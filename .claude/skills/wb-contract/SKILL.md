@@ -24,6 +24,10 @@ description: 工作台契约管理。登记、锁定、漂移校验、影响面�
 
 **技术方案文档** `.workbench/artifacts/design/design.md` —— 由 `architect` 在 design 阶段登记为 `design-doc`，消费方是三个开发/测试角色。它和接口契约一样需要「多方对着同一版本干活、改动要通知所有人」，所以走同一套冻结与 bump，没有第二套机制。
 
+**阶段产物** `requirements.md` / `current-state.md` / `test-report.md` / `retro.md` —— 不用谁手工登记，`phase advance` 在门禁**真**通过时（强推不算）自动 `add` + `lock`，名字是 `artifact-<文件名去扩展>`，owner 与消费方按阶段定（`artifact-requirements` 的 owner 是 `pm`，消费方是 `analyst` 与 `architect`）。阶段过了就是定稿，回头改走一样的申报流程。`develop` 不在里面：`verification.md` 由编排者写，没有角色 owner。
+
+这三类在 `contract list` 里混在一起，区别只有一个：阶段产物带 `kind: "artifact"`，`contracts_locked` 那条门禁不数它 —— 否则 clarify 一过，「并行开发前先把接口定下来」这条断言就永远 PASS 了。
+
 ## 生命周期
 
 ```
@@ -76,9 +80,9 @@ python3 .claude/hooks/wb.py contract bump --name user-api                 # 3. �
 | 规则 | 为什么 |
 | --- | --- |
 | `unlock --reason` 必填 | **改动理由必须在改之前留痕。** 事后补的理由都是给已发生的事找解释 |
-| 窗口只对那一份契约生效 | 解冻 `user-api` 不会顺带放开 `design-doc` |
-| `state.json` / `role` / `frozen` / `unlock` 永不可解冻 | 它们是机制本身的地基，解冻了整套约束都能被绕 |
-| 窗口在 `bump` / `lock` / 子 agent 结束时自动关闭 | 忘了关也不会一直敞着 |
+| 窗口只对那一份契约生效 | 解冻 `user-api` 不会顺带放开 `design-doc`。多份可以同时开着（`.workbench/unlock/` 一份契约一个文件）—— `bump` 一份产物契约会给每个消费方各建同步任务，它们并行申报是常态 |
+| `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` 永不可解冻 | 它们是机制本身的地基，解冻了整套约束都能被绕 |
+| 窗口在 `bump` / `lock`（或子 agent 结束且无 doing 任务）时自动关闭 | 忘了关也不会一直敞着。`bump` / `lock` 只关自己那一份，不会收掉兄弟 agent 的窗口；子 agent 结束时清全部，但有 doing 任务就不清 |
 | `bump` 时内容没变会被拒绝 | 不能靠刷版本号消掉一次漂移 |
 | `bump` 不给 `--reason` 就继承 unlock 时申报的理由 | 同一次变更只写一次理由 |
 
@@ -101,7 +105,7 @@ python3 .claude/hooks/wb.py contract bump --name user-api                 # 3. �
 
 **开发中发现契约缺字段** — 开发角色 `task block <ID> --reason "契约 X 缺 Y 字段，因为…"`，主线程派 architect 走 `impact` → `unlock --reason` → 改文件 → `bump`，然后 `task reopen`。
 
-**被守卫拦了** — 拒绝信息里就写着该跑哪条命令。**不要换等价写法绕**（不要用 Bash 代替 Write，不要改 `settings.json`）—— 这些路径也被拦，且绕过冻结的意图会留在日志里。契约确实该改就申报，不该你改就 `task block` 交给 owner。
+**被守卫拦了** — 拒绝信息里就写着该跑哪条命令，契约名已经填好，照抄即可。它按你是不是这份契约的 owner 分岔：**是 owner** 就给完整的 `unlock` / `bump` 命令；**不是 owner** 就只告诉你 owner 是谁，让你报回编排者或 `task block`，不给你申报命令 —— 因为 `bump` 会给每个消费方建返工任务，那是编排者的调度决定，而且子 agent 结束时会关掉悬挂窗口，留下一个改过但没定版的文件（下次 `verify` 报漂移）。**不要换等价写法绕**（不要用 Bash 代替 Write，不要改 `settings.json`）—— 这些路径也被拦，且绕过冻结的意图会留在日志里。
 
 **verify 报漂移** — 说明改动走的是守卫之外的路径（外部编辑器、`git checkout`、用户手改）。先 `git diff` 看改了什么：
 - 是有意变更 → `unlock --reason` 补申报，再 `bump`，接受它自动生成的返工任务。

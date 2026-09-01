@@ -30,6 +30,11 @@ import tempfile
 import time
 from pathlib import Path
 
+try:
+    import fcntl  # 只有 POSIX 有；缺它就退回无锁（Windows 上仍是旧行为）
+except ImportError:  # pragma: no cover
+    fcntl = None
+
 # --------------------------------------------------------------------------
 # 常量：阶段、门禁规则、角色写入范围、危险命令
 # --------------------------------------------------------------------------
@@ -75,10 +80,13 @@ GATES = {
             "artifact_contains:design.md:方案对比",
             "contracts_locked",
             "tasks_exist",
-            "no_blocked:design",
+            "no_blocked:*",
         ],
     },
     "develop": {
+        # 产物是最小可运行校验的记录。没有它，develop 门禁在未配 gate_commands 的
+        # 项目里四条全 PASS —— 阶段可以在零代码证据下推进。
+        "artifacts": ["verification.md"],
         "checks": [
             "contracts_intact",
             "tasks_done:develop",
@@ -96,10 +104,40 @@ GATES = {
     },
 }
 
+# 阶段产物的契约化：门禁一通过就把该阶段产物登记成契约并锁定。值是 (owner, consumers)。
+# 上游产物此前只在「恰好有角色锁」时才受保护 —— 角色范围检查在 role 缺失时整层跳过，
+# 主线程与非角色 subagent 随时能重写 requirements.md 且不留痕。登记成契约后走的是
+# design-doc 那条现成的路：哈希冻结、改动先 `contract unlock --reason` 申报、
+# `bump` 给下游发同步任务，一行新机制都不用造。
+# develop 不在表里：verification.md 由编排者写，没有角色 owner。
+PHASE_ARTIFACT_CONTRACTS = {
+    "clarify": ("pm", ["analyst", "architect"]),
+    "analyze": ("analyst", ["architect"]),
+    "design": ("architect", ["frontend-developer", "backend-developer", "qa"]),
+    "verify": ("qa", ["reviewer"]),
+    "retro": ("reviewer", []),
+}
+
 # 角色默认可写范围（相对项目根的 fnmatch 模式）。
 # 产物目录按阶段隔离：每个角色只能写自己阶段的产物，写不了上游的方案与需求文档。
 # 项目布局不同时用 `wb.py config set role_scopes.<role> <json>` 覆盖，
 # 或 `wb.py role scopes --reset` 把老项目的 state.json 刷成当前默认值。
+#
+# 三类范围值得单独说明，它们都是补实测出来的误拦：
+#
+# `*.md` 给开发与 reviewer：写 README、补接口说明、落 ADR 都是本职。之前只有
+# architect 含 `docs/**`，于是 develop 阶段的开发碰 README 会被拒，而拒绝信息给的
+# 第一条出路「交给对应角色」在那时不存在 —— architect 已经下场了。放宽碰不到已定稿
+# 的产物：阶段产物过门禁后是冻结契约，守卫第二层先拦，与角色范围无关。
+#
+# 测试框架配置给 qa：按约定放仓库根，而 qa 原本只有四个测试目录。拦住它等于拦住
+# 「配 e2e」这件事本身，堵的是这个角色的本职而不是跨界。`pytest.ini` / `tox.ini` 与
+# `*.config.*` 一起列，否则 qa 配得了 vitest 配不了 pytest。`pyproject.toml` 与
+# `setup.cfg` 故意不给 —— 那两个同时装着依赖与打包配置，不是测试专属文件。
+#
+# 前端的根级布局与扩展名：`components/` `pages/` `lib/` `styles/` 是 Next.js / Nuxt /
+# Vite 的标准位置，`.js` / `.jsx` / `.vue` / `.html` / `.scss` 是同样常见的技术栈。
+# 原来的列表默认了「源码在 src/ 或 web/ 下且用 TypeScript」。
 DEFAULT_ROLE_SCOPES = {
     "pm": [".workbench/artifacts/clarify/**"],
     "analyst": [".workbench/artifacts/analyze/**"],
@@ -109,21 +147,40 @@ DEFAULT_ROLE_SCOPES = {
     "frontend-developer": [
         ".workbench/artifacts/develop/**",
         "web/**", "frontend/**", "app/**", "src/**", "public/**",
-        "*.json", "*.ts", "*.tsx", "*.css",
+        "components/**", "pages/**", "lib/**", "styles/**",
+        "*.json", "*.ts", "*.tsx", "*.js", "*.jsx", "*.vue",
+        "*.css", "*.scss", "*.html", "*.md",
     ],
     "backend-developer": [
         ".workbench/artifacts/develop/**",
         "server/**", "backend/**", "api/**", "src/**", "migrations/**",
-        "*.json", "*.py", "*.go", "*.java",
+        "*.json", "*.py", "*.go", "*.java", "*.md",
     ],
-    "qa": [".workbench/artifacts/verify/**", "tests/**", "test/**", "e2e/**", "spec/**"],
-    "reviewer": [".workbench/artifacts/retro/**"],
+    "qa": [
+        ".workbench/artifacts/verify/**",
+        "tests/**", "test/**", "e2e/**", "spec/**",
+        "*.config.ts", "*.config.js", "*.config.mjs", "pytest.ini", "tox.ini",
+    ],
+    "reviewer": [".workbench/artifacts/retro/**", "docs/**", "*.md"],
 }
+
+# 跨仓库布局下按目录名认领仓库。只用于生成默认范围，认领不到的仓库谁都写不了 ——
+# init 与 `role scopes` 会点名让你手写前缀，见 unclaimed_repos()。
+REPO_HINTS = {
+    "frontend-developer": ("frontend", "web", "client", "ui", "www"),
+    "backend-developer": ("backend", "server", "api", "service", "svc"),
+}
+
+# 产物流水账。post-tool 只往这里追加，由 task done 归并进任务的 artifacts ——
+# 不能在 hook 里读改写 state.json，见 hook_post_tool 的说明。
+ARTIFACT_LOG = "artifacts.jsonl"
 
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——
 # hook 每次工具调用都要读它，读一个纯文本列表比解析整个 state.json 便宜一个量级。
-FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen"]
+# 流水账在列表里是因为归属判定读它：能追加一行就能把别人的改动记到自己名下。
+# wb.py 自己写它不受影响 —— 守卫只拦工具调用，不拦这个进程内的文件写。
+FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG]
 
 # 写入型 shell 动作。命中其一且命令里提到冻结路径 = 试图绕过 Write/Edit 守卫。
 BASH_WRITE = re.compile(
@@ -195,14 +252,60 @@ def default_state(name: str) -> dict:
         "contracts": [],
         "role_scopes": json.loads(json.dumps(DEFAULT_ROLE_SCOPES)),
         "gate_commands": {},  # 例如 {"test": "npm test", "lint": "npm run lint"}
+        "gate_timeout": 1800,  # 单条门禁命令的秒数上限，超时记 FAIL
         "log": [],
     }
 
 
-def load_state(root: Path) -> dict:
+_STATE_LOCK = None  # 持锁的文件对象。load_state(lock=True) 开，save_state / main 收尾关
+
+
+def acquire_state_lock(root: Path, timeout: float = 20.0) -> None:
+    """对 .workbench/state.lock 上排他锁。已持锁时直接返回，不重入自阻塞。"""
+    global _STATE_LOCK
+    if fcntl is None or _STATE_LOCK is not None:
+        return
+    d = wb_dir(root)
+    if not d.is_dir():
+        return
+    fh = open(d / "state.lock", "a+")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _STATE_LOCK = fh
+            return
+        except OSError:
+            if time.time() >= deadline:
+                fh.close()
+                die(f"等状态锁超时（{timeout:.0f}s）：另一个 wb.py 进程正在改状态，重试即可")
+            time.sleep(0.02)
+
+
+def release_state_lock() -> None:
+    global _STATE_LOCK
+    if _STATE_LOCK is None:
+        return
+    fh, _STATE_LOCK = _STATE_LOCK, None
+    try:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
+def load_state(root: Path, lock: bool = False) -> dict:
+    """lock=True 进入「读-改-写」临界区，由 save_state 出锁。**所有会改状态的命令都要 lock=True。**
+
+    并行 develop 下每个 subagent 各自跑 wb.py，无锁的读改写会让先落盘的 task done
+    被后一个进程的旧快照静默盖掉（实测 45 个并发 task done 丢 23 个），且 save_state
+    顺手重写的 .workbench/frozen 会一起退回旧版 —— 刚锁的契约的两条防线同时失效。
+    锁不能跨门禁命令持有，phase advance 因此先在锁外算门禁再入锁落记录。
+    """
     p = state_path(root)
     if not p.is_file():
         die(f"未初始化工作台。先运行：python3 .claude/hooks/wb.py init --name <项目名>")
+    if lock:
+        acquire_state_lock(root)
     st = json.loads(p.read_text(encoding="utf-8"))
     # 向前兼容：补齐新增字段
     base = default_state(st.get("project", "unnamed"))
@@ -214,10 +317,17 @@ def load_state(root: Path) -> dict:
 def save_state(root: Path, st: dict) -> None:
     st["log"] = st["log"][-MAX_LOG:]
     p = state_path(root)
-    tmp = p.with_suffix(".json.tmp")
+    # 临时文件名带 pid：共用一个名字时，两个进程同时写会把彼此的字节交织进去，
+    # 再各自 replace —— 实测 45 个并发进程能写出语法上就无效的 state.json，
+    # 那时连 status 都跑不起来。锁已经把这条路串行化了，这里是第二道保险。
+    tmp = p.parent / f"{p.name}.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(p)
+    # 派生缓存先落盘。反过来的话中途崩溃会留下「state 新、frozen 旧」——
+    # 刚锁的契约不在清单里，守卫放行。这个顺序崩在中间是 frozen 比 state 新，
+    # 多冻一份契约的误拒，下一次 save_state 自然纠正。
     write_frozen(root, st)
+    tmp.replace(p)
+    release_state_lock()
 
 
 def frozen_paths(st: dict) -> list[str]:
@@ -228,17 +338,32 @@ def frozen_paths(st: dict) -> list[str]:
 
 
 def write_frozen(root: Path, st: dict) -> None:
-    """把冻结清单落成纯文本，供 hook 低成本读取。"""
+    """把冻结清单落成纯文本，供 hook 低成本读取。
+
+    必须原子替换。`write_text` 是「truncate 再 write」两步，中间那一瞬文件存在但为空，
+    而守卫只判文件在不在 —— 实测 4 写 6 读并行，12000 次读里 5588 次读到空清单，
+    那一刻 Write/Edit 与 Bash 两条防线对 state.json、role 与全部已锁契约同时放行
+    （含改 role 提权）。触发不需要谁去绕：一次 task done 与一次工具调用重叠就够。
+    """
     f = wb_dir(root) / "frozen"
-    f.write_text("\n".join(frozen_paths(st)) + "\n", encoding="utf-8")
+    tmp = f.parent / f"{f.name}.{os.getpid()}.tmp"
+    tmp.write_text("\n".join(frozen_paths(st)) + "\n", encoding="utf-8")
+    tmp.replace(f)
 
 
 def read_frozen(root: Path) -> list[str]:
     """冻结清单。`.workbench/frozen` 只是缓存 —— 缺失时从状态现算，
-    否则升级前建的项目会静默退化成「只保护状态文件」，契约的 Bash 防线整条失效。"""
+    否则升级前建的项目会静默退化成「只保护状态文件」，契约的 Bash 防线整条失效。
+
+    空清单同样走现算：`FROZEN_ALWAYS` 那五个恒在，合法的清单不可能为空，所以
+    「空 = 这份缓存不可信」不会误判。write_frozen 已经原子化，这条是纵深防御 ——
+    它不认成因，任何原因写出的空文件都接得住，而失效方向是误拒而非放行。
+    """
     f = wb_dir(root) / "frozen"
     if f.is_file():
-        return [l.strip() for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
+        got = [l.strip() for l in f.read_text(encoding="utf-8").splitlines() if l.strip()]
+        if got:
+            return got
     try:
         st = json.loads(state_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -246,13 +371,30 @@ def read_frozen(root: Path) -> list[str]:
     return frozen_paths(st)
 
 
-def read_unlock(root: Path) -> tuple[str, str]:
-    """当前申报的解冻窗口：(契约名, 理由)。无窗口返回 ("", "")。"""
-    f = wb_dir(root) / "unlock"
-    if not f.is_file():
-        return "", ""
-    parts = f.read_text(encoding="utf-8").split("\n", 1)
-    return parts[0].strip(), (parts[1].strip() if len(parts) > 1 else "")
+def read_unlocks(root: Path) -> dict[str, str]:
+    """当前全部解冻窗口：{契约名: 申报理由}。无窗口返回 {}。
+
+    一份契约一个文件，不是单个 `unlock` 文件。单文件时 `bump` 一份产物契约会给
+    每个消费方建同步任务（`artifact-requirements` 的消费方是 analyst 与
+    architect），两者并行改各自那份冻结产物时后一个 `unlock` 覆盖前一个 ——
+    前者刚申报完就被拒，拒绝理由还是「先申报」。产物冻结让这条路径从
+    「理论可能」变成「bump 之后必然发生」，所以窗口必须按契约分开。
+    """
+    d = wb_dir(root) / "unlock"
+    if not d.is_dir():
+        return {}
+    return {f.name: f.read_text(encoding="utf-8").strip()
+            for f in sorted(d.iterdir()) if f.is_file()}
+
+
+def close_unlock(root: Path, name: str = "") -> None:
+    """关掉解冻窗口：给 name 只关那一份，不给关全部。"""
+    d = wb_dir(root) / "unlock"
+    if not d.is_dir():
+        return
+    for f in d.iterdir():
+        if f.is_file() and (not name or f.name == name):
+            f.unlink(missing_ok=True)
 
 
 def log(st: dict, event: str, **fields) -> None:
@@ -260,6 +402,7 @@ def log(st: dict, event: str, **fields) -> None:
 
 
 def die(msg: str, code: int = 1) -> "None":
+    release_state_lock()  # 半途退出不留着锁：selfcheck 全程同进程，留着会自阻塞
     print(f"错误：{msg}", file=sys.stderr)
     sys.exit(code)
 
@@ -335,9 +478,13 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         return ok, label, "已覆盖" if ok else "缺少该章节"
 
     if kind == "contracts_locked":
-        unlocked = [c["name"] for c in st["contracts"] if not c.get("sha")]
-        if not st["contracts"]:
-            return False, "契约已锁定", "尚未登记任何契约（无接口的纯本地改动可 --force 跳过）"
+        # 只数真正的接口契约。阶段产物自动登记的那些（kind="artifact"）不算 ——
+        # 否则 clarify / analyze 过完门禁后契约列表永远非空，这条断言就再也逼不出
+        # 「并行开发前先把接口定下来」。
+        real = [c for c in st["contracts"] if c.get("kind") != "artifact"]
+        unlocked = [c["name"] for c in real if not c.get("sha")]
+        if not real:
+            return False, "契约已锁定", "尚未登记任何接口契约（无接口的纯本地改动可 --force 跳过）"
         return (not unlocked), "契约已锁定", "全部锁定" if not unlocked else f"未锁定：{', '.join(unlocked)}"
 
     if kind == "contracts_intact":
@@ -358,18 +505,39 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         return (not left), label, "全部完成" if not left else f"未完成：{', '.join(left)}"
 
     if kind == "no_blocked":
-        blocked = [t["id"] for t in st["tasks"] if t["phase"] == rest and t["status"] == "blocked"]
-        return (not blocked), f"{rest} 无阻塞任务", "无" if not blocked else f"阻塞：{', '.join(blocked)}"
+        pool = st["tasks"] if rest == "*" else [t for t in st["tasks"] if t["phase"] == rest]
+        blocked = [t["id"] for t in pool if t["status"] == "blocked"]
+        label = "无阻塞任务" if rest == "*" else f"{rest} 无阻塞任务"
+        return (not blocked), label, "无" if not blocked else f"阻塞：{', '.join(blocked)}"
 
     if kind == "cmd":
         cmd = st["gate_commands"].get(rest)
         label = f"命令门禁 {rest}"
         if not isinstance(cmd, str) or not cmd.strip():
             return True, label, "未配置，跳过（config set gate_commands.%s '<命令>'）" % rest
-        r = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=1800)
-        tail = (r.stdout + r.stderr).strip().splitlines()
-        detail = tail[-1] if tail else ""
-        return r.returncode == 0, label, f"`{cmd}` exit={r.returncode} {detail[:200]}"
+        # 完整输出必须落盘。门禁刚跑过一遍，若只留汇总行，诊断就得再跑一遍。
+        logf = wb_dir(root) / f"gate-{rest}.log"
+        rel_log = os.path.relpath(logf, root)
+
+        def _text(v) -> str:
+            if v is None:
+                return ""
+            return v.decode("utf-8", "replace") if isinstance(v, bytes) else v
+
+        def _record(out: str, verdict: str) -> str:
+            logf.write_text(f"$ {cmd}\n[{verdict}] {now()}\n\n{out}", encoding="utf-8")
+            tail = out.strip().splitlines()[-5:]
+            return (f"完整输出见 {rel_log}" + ("\n" + "\n".join("      " + l[:200] for l in tail) if tail else ""))
+
+        limit = st.get("gate_timeout") or 1800
+        try:
+            r = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=limit)
+        except subprocess.TimeoutExpired as e:
+            # 超时是一条 FAIL 结论，不是崩溃。CLI 路径没有兜底 try，
+            # 不捕获会让 `gate check` / `phase advance` 打出 Traceback。
+            body = _record(_text(e.stdout) + _text(e.stderr), "TIMEOUT")
+            return False, label, f"`{cmd}` 超时（>{limit}s）{body}"
+        return r.returncode == 0, label, f"`{cmd}` exit={r.returncode} " + _record(r.stdout + r.stderr, f"exit={r.returncode}")
 
     return False, spec, "未知门禁类型"
 
@@ -420,6 +588,61 @@ def ready_tasks(st: dict, phase: str | None = None, role: str | None = None) -> 
 # CLI 命令实现
 # --------------------------------------------------------------------------
 
+def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
+    """跨仓库布局（`repos/<仓库>/`）下的默认角色范围；不是这个布局返回 None。
+
+    默认值在这个布局下同时错两个方向，而且静默：`fnmatch` 的 `*` 跨 `/`，所以
+    `*.py` 放行任意仓库里的 Python 文件；`migrations/**` 又要求字符串以它开头，
+    匹配不到 `repos/backend/migrations/`。于是默认值退化成「按语言隔离」——
+    后端写不了自己的迁移（看起来像守卫抽风），却能写前端仓库（没人会发现）。
+
+    跨仓库时仓库本身就是边界，所以按目录名认领仓库：认领到了就整个仓库放行，
+    `repos/<仓库>/**` 是那些裸扩展名模式的超集。
+
+    认不出仓库名的角色（`qa` 永远如此 —— 它没有仓库提示词）退回「任意仓库的对应
+    位置」，模式逐条加 `repos/*/` 前缀。这里必须**带上裸扩展名模式**，否则 qa 只
+    剩四个测试目录，配不了 `repos/frontend/vitest.config.ts` —— 与单仓库下同一个
+    误拦，只是布局 B 下更难发现。跨仓库放行是这个分支本来就有的性质
+    （`repos/*/src/**` 一样跨），加裸扩展名没有新破的边界。
+
+    ponytail: 认领靠目录名。谁都没认领的仓库（`shared` / `payments-svc`）落在所有
+    角色范围之外 —— 宁可拦住也不跨仓库放行，由 `unclaimed_repos()` 在 init 与
+    `role scopes` 里点名，手写前缀认领。
+    """
+    d = root / "repos"
+    repos = sorted(p.name for p in d.iterdir() if p.is_dir()) if d.is_dir() else []
+    if not repos:
+        return None
+    out = {}
+    for role, pats in DEFAULT_ROLE_SCOPES.items():
+        mine = [r for r in repos if any(h in r.lower() for h in REPO_HINTS.get(role, ()))]
+        extra = [f"repos/{r}/**" for r in mine] or \
+                [f"repos/*/{p}" for p in pats if not p.startswith(".workbench/")]
+        out[role] = [p for p in pats if p.startswith(".workbench/")] + extra
+    return out
+
+
+def unclaimed_repos(root: Path, scopes: dict[str, list[str]]) -> list[str]:
+    """`repos/` 下没有开发角色能写代码的仓库。
+
+    只要有一个仓库被认领，`repo_layout_scopes` 就走 `repos/<仓库>/**` 分支，于是
+    认不出名字的仓库谁都写不了 —— 是硬拦，不是跨仓库放行。这个失败要到 develop
+    阶段才暴露成一次权限拒绝，所以 init 与 `role scopes` 提前点名。
+
+    判定按守卫的方式拿探路径去撞模式，只看写代码的两个角色：`qa` 的
+    `repos/*/tests/**` 覆盖所有仓库，但「只有 qa 能写它的测试目录」不是认领。
+    全都认不出名字时两个角色都拿到 `repos/*/src/**`，探路径命中，不会误报。
+    """
+    d = root / "repos"
+    if not d.is_dir():
+        return []
+    pats = [p for r in ("frontend-developer", "backend-developer")
+            for p in scopes.get(r, ())]
+    return [r.name for r in sorted(d.iterdir()) if r.is_dir() and not any(
+        fnmatch.fnmatch(f"repos/{r.name}/src/probe{ext}", p)
+        for ext in (".ts", ".py") for p in pats)]
+
+
 def cmd_init(args) -> None:
     root = Path(args.root).resolve() if args.root else Path.cwd().resolve()
     for sub in ("contracts", "artifacts"):
@@ -429,10 +652,34 @@ def cmd_init(args) -> None:
     if state_path(root).is_file() and not args.force:
         die("已存在 state.json，如需重建请加 --force")
     st = default_state(args.name or root.name)
+    scopes = repo_layout_scopes(root)
+    if scopes:
+        st["role_scopes"] = scopes
     log(st, "init", project=st["project"])
     save_state(root, st)
     print(f"工作台已初始化：{root}")
     print(f"项目：{st['project']}  当前阶段：clarify（需求澄清）")
+    if scopes:
+        print("检测到 repos/ 跨仓库布局，角色范围已按仓库前缀重算 —— 默认值在这个布局下"
+              "会放行别人仓库的同语言文件，又匹配不到自己仓库的 migrations/。")
+        print("核对一遍：wb.py role scopes。仓库与角色不是按名字对应时手写前缀，例如 "
+              "wb.py config set role_scopes.backend-developer "
+              "'[\"repos/backend/**\",\"repos/shared/**\"]'")
+        print("门禁命令也要各自 cd：config set gate_commands.test "
+              "'(cd repos/frontend && npm test) && (cd repos/backend && pytest)'")
+        print_unclaimed(root, scopes)
+
+
+def print_unclaimed(root: Path, scopes: dict[str, list[str]]) -> None:
+    """认不出名字的仓库谁都写不了，得当场说 —— 否则要到 develop 才撞成权限拒绝。"""
+    un = unclaimed_repos(root, scopes)
+    if un:
+        print(f"\n没有角色认领这些仓库，任何角色都写不了：{', '.join(un)}")
+        print("按名字认不出来（认领靠 " + " / ".join(
+            sorted({h for hs in REPO_HINTS.values() for h in hs})) + "）。手写认领：")
+        print("  wb.py config set role_scopes.backend-developer "
+              f"'[\".workbench/artifacts/develop/**\",\"repos/{un[0]}/**\"]'")
+        print("  （连自己原有的前缀一起写进去，config set 是整条覆盖不是追加）")
 
 
 def cmd_status(args) -> None:
@@ -444,13 +691,15 @@ def cmd_status(args) -> None:
     # 根路径必须显示：工作区里可以有多个仓库各带一份 .workbench/，
     # 只看项目名分不清当前操作的是哪一份。
     print(f"项目：{st['project']}　根：{root}")
-    order = {p: i for i, p in enumerate(st["phases"])}
     cur = st["phase"]
     line = []
     for p in st["phases"]:
-        mark = "*" if p == cur else ("v" if st["gates"].get(p, {}).get("passed") else "-")
+        g = st["gates"].get(p, {})
+        # 强推的阶段必须与真正过门禁的区分开 —— status 是最常看的看板，
+        # 只有 report 能看出区别等于看不出。
+        mark = "*" if p == cur else ("!" if g.get("forced") else ("v" if g.get("passed") else "-"))
         line.append(f"{mark}{p}")
-    print("阶段：" + "  ".join(line) + f"   （* = 当前，v = 门禁已过）")
+    print("阶段：" + "  ".join(line) + "   （* = 当前，v = 门禁已过，! = 强推）")
     print(f"当前：{cur}（{PHASE_CN.get(cur, cur)}）")
 
     by_status: dict[str, int] = {}
@@ -473,8 +722,7 @@ def cmd_status(args) -> None:
         print(f"契约：{len(st['contracts'])} 份" + (f"，漂移 {len(bad)} 份" if bad else "，一致"))
         for b in bad:
             print(f"  ! {b}")
-    uname, ureason = read_unlock(root)
-    if uname:
+    for uname, ureason in read_unlocks(root).items():
         print(f"解冻窗口开启中：{uname} —— {ureason}")
         print(f"  改完必须 `contract bump --name {uname}`，否则窗口悬挂、文档处于无主状态")
     rt = ready_tasks(st, phase=cur)
@@ -482,13 +730,47 @@ def cmd_status(args) -> None:
         print(f"就绪可派发（{cur}）：" + ", ".join(t["id"] for t in rt[: st["max_parallel"]]))
 
 
+def freeze_phase_artifacts(root: Path, st: dict, phase: str) -> list[str]:
+    """把刚过门禁的阶段产物登记成契约并锁定，返回新登记的契约名。
+
+    只在门禁真通过时调用：强推的阶段产物不冻结 —— 那个阶段并没有真的做完。
+
+    为什么复用契约而不是另造一套「产物冻结」：产物被改的场景与契约完全同形 ——
+    qa 打回要改需求、开发中途发现方案有问题要改 design.md。契约这条路径已经有
+    申报理由必填、哈希校验、bump 通知下游三件事，另造一套只会造出第二个半成品。
+
+    kind="artifact" 把它们与真正的接口契约区分开，见 run_check 的 contracts_locked。
+    """
+    owner, consumers = PHASE_ARTIFACT_CONTRACTS.get(phase, ("", []))
+    if not owner:
+        return []
+    added = []
+    for fname in GATES.get(phase, {}).get("artifacts", []):
+        p = artifact_path(root, phase, fname)
+        if not p.is_file():
+            continue
+        rel = os.path.relpath(p, root).replace(os.sep, "/")
+        name = f"artifact-{Path(fname).stem}"
+        # architect 手工登记过的（design.md -> design-doc）不重复登记
+        if find_contract(st, name) or any(c["path"] == rel for c in st["contracts"]):
+            continue
+        st["contracts"].append({
+            "name": name, "path": rel, "owner": owner, "consumers": list(consumers),
+            "kind": "artifact", "version": 1,
+            "sha": sha256_file(p), "locked_at": now(), "created": now(),
+        })
+        log(st, "contract_lock", name=name, version=1, kind="artifact")
+        added.append(name)
+    return added
+
+
 def cmd_phase(args) -> None:
     root = find_root()
-    st = load_state(root)
     if args.action == "get":
-        print(st["phase"])
+        print(load_state(root)["phase"])
         return
     if args.action == "set":
+        st = load_state(root, lock=True)
         if args.name not in st["phases"]:
             die(f"未知阶段 {args.name}，可选：{', '.join(st['phases'])}")
         old, st["phase"] = st["phase"], args.name
@@ -496,18 +778,29 @@ def cmd_phase(args) -> None:
         save_state(root, st)
         print(f"阶段：{old} -> {args.name}")
         return
-    # advance
+    # advance：门禁里的 cmd: 断言可能跑几分钟的 npm test，不能攥着状态锁跑 ——
+    # 那会把并行 subagent 的 task done 全堵在等锁上。先无锁算门禁，再入锁落记录：
+    # 期间落盘的 task done 因此不会被门禁前的旧快照盖掉。
+    st = load_state(root)
     cur = st["phase"]
     results = gate_check(root, st, cur)
     passed = print_gate(cur, results)
     if not passed and not args.force:
         die("门禁未通过，阶段未推进。修完再来，或 --force 强推（会记入日志）", code=1)
+    st = load_state(root, lock=True)
+    if st["phase"] != cur:
+        # 两段之间别人推进了阶段。仍按旧 cur 落记录会把 phase 写回去 —— 对方推了两次
+        # 就是倒退一个阶段。门禁结论已经作废（它算的是 cur 那个阶段），重跑即可。
+        die(f"阶段已被另一个进程从 {cur} 改到 {st['phase']}，这次门禁结论作废，重跑 phase advance")
     st["gates"][cur] = {
-        "passed": True,
+        "passed": passed,
         "at": now(),
         "forced": bool(args.force and not passed),
         "failures": [l for ok, l, _ in results if not ok],
     }
+    for name in (freeze_phase_artifacts(root, st, cur) if passed else []):
+        print(f"已把 {cur} 阶段产物冻结为契约 {name}：之后要改它先 "
+              f"`contract unlock --name {name} --reason '<为什么>'`，改完 `contract bump` 通知下游")
     idx = st["phases"].index(cur)
     if idx + 1 >= len(st["phases"]):
         log(st, "flow_complete")
@@ -536,13 +829,42 @@ def cmd_gate(args) -> None:
     sys.exit(0 if ok else 1)
 
 
+def merge_artifacts(root: Path, t: dict) -> int:
+    """把产物流水账里属于这个任务的改动并进 t["artifacts"]，返回新增条数。
+
+    按「角色 + 任务开始时间」认领。不要改回「读一个 current_task 文件」——
+    单文件在并行下内容永远是最后启动的那个任务，据它归属会把两个 subagent 的改动
+    全挂到一个任务上。流水账只追加、从不重写：重写又是一次读改写竞态，去重让重复归并幂等。
+
+    ponytail: 按角色认领，两个同角色任务并行时分不开；要更准就得等上游暴露
+    subagent 身份，或改成按写入路径反查角色范围。
+    """
+    logf = wb_dir(root) / ARTIFACT_LOG
+    if not logf.is_file():
+        return 0
+    since = t.get("started") or t.get("created") or ""
+    n = 0
+    for raw in logf.read_text(encoding="utf-8").splitlines():
+        if not raw.strip():
+            continue
+        try:
+            e = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if e.get("role") != t["role"] or (e.get("at") or "") < since:
+            continue
+        rel = e.get("path") or ""
+        if rel and rel not in t["artifacts"]:
+            t["artifacts"].append(rel)
+            n += 1
+    return n
+
+
 def cmd_task(args) -> None:
     root = find_root()
-    st = load_state(root)
+    st = load_state(root, lock=True)
 
     if args.action == "add":
-        if args.role not in ROLES:
-            die(f"未知角色 {args.role}，可选：{', '.join(ROLES)}")
         phase = args.phase or st["phase"]
         if phase not in st["phases"]:
             die(f"未知阶段 {phase}")
@@ -584,16 +906,16 @@ def cmd_task(args) -> None:
         if undone and not args.force:
             die(f"依赖未完成：{', '.join(undone)}（--force 忽略）")
         t["status"] = "doing"
-        (wb_dir(root) / "current_task").write_text(t["id"], encoding="utf-8")
+        t["started"] = now()
         if args.role_lock:
             (wb_dir(root) / "role").write_text(t["role"], encoding="utf-8")
     elif args.action == "done":
         t["status"] = "done"
         if args.note:
             t["notes"] = args.note
-        ct = wb_dir(root) / "current_task"
-        if ct.is_file() and ct.read_text(encoding="utf-8").strip() == t["id"]:
-            ct.unlink()
+        merged = merge_artifacts(root, t)
+        if merged:
+            print(f"归并 {merged} 个改动到 {t['id']}.artifacts")
     elif args.action == "block":
         t["status"] = "blocked"
         t["notes"] = args.reason or t["notes"]
@@ -636,12 +958,24 @@ def cmd_next(args) -> None:
 
 def cmd_contract(args) -> None:
     root = find_root()
-    st = load_state(root)
+    # 只在会写状态的分支上锁。impact 在锁里跑 `git grep` 子进程，大仓库要几秒 ——
+    # 而 wb-contract 要求改契约前先跑 impact，此时结束的 subagent 的 SubagentStop
+    # 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。
+    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump"))
 
     if args.action == "add":
         p = Path(args.path)
         rel = os.path.relpath((root / p).resolve() if not p.is_absolute() else p.resolve(), root)
+        if rel.startswith(".."):
+            # 越根的契约会同时锁死两头：Bash 提到它就被拦，Write 又先撞越根检查，
+            # 契约进入无法维护的状态。
+            die(f"契约必须在项目根内：{args.path} 解析为 {rel}")
         name = args.name or Path(rel).stem
+        # 契约名会被当成解冻窗口的文件名（`.workbench/unlock/<名>`），所以它是
+        # 一个信任边界上的输入：`--name ../../x` 能让 unlock 写到项目根外。
+        # 在名字进入 state 的这一处校验，不在每个使用点做转义。
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            die(f"契约名只能用字母、数字、`.`、`_`、`-`，且首字符是字母或数字：{name}")
         if find_contract(st, name):
             die(f"契约 {name} 已存在，改动请用 contract bump")
         if not (root / rel).is_file():
@@ -662,7 +996,7 @@ def cmd_contract(args) -> None:
         if not st["contracts"]:
             print("尚无契约。")
             return
-        uname, _ = read_unlock(root)
+        opened = read_unlocks(root)
         for c in st["contracts"]:
             cur = sha256_file(root / c["path"])
             if not c.get("sha"):
@@ -673,7 +1007,7 @@ def cmd_contract(args) -> None:
                 state = "漂移!"
             else:
                 state = "一致"
-            if c["name"] == uname:
+            if c["name"] in opened:
                 state += "/解冻中"
             print(f"{c['name']:<20} v{c['version']:<3} {state:<12} {c['owner']:<19} "
                   f"-> {','.join(c['consumers']) or '-'}  {c['path']}")
@@ -690,7 +1024,9 @@ def cmd_contract(args) -> None:
             c["sha"], c["locked_at"] = sha, now()
             log(st, "contract_lock", name=c["name"], version=c["version"], sha=sha[:12])
             print(f"已锁定 {c['name']} v{c['version']}  {sha[:12]}")
-        (wb_dir(root) / "unlock").unlink(missing_ok=True)
+            # 只关自己那一份窗口。`lock --all` 逐个关等于全关，但 `lock --name X`
+            # 不能顺手收掉兄弟 agent 正在用的窗口。
+            close_unlock(root, c["name"])
         save_state(root, st)
         return
 
@@ -700,7 +1036,13 @@ def cmd_contract(args) -> None:
             die(f"契约不存在：{args.name}")
         if not args.reason:
             die("unlock 必须给 --reason —— 冻结文档的改动理由要在改之前留痕，不是改完补")
-        (wb_dir(root) / "unlock").write_text(f"{c['name']}\n{args.reason}", encoding="utf-8")
+        d = wb_dir(root) / "unlock"
+        # 升级前的项目这里是单个文件。不删掉，mkdir 会抛 FileExistsError，
+        # 老项目第一次 unlock 就是一条栈追踪。旧文件里只有一份悬挂窗口，丢掉是对的。
+        if d.is_file():
+            d.unlink()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / c["name"]).write_text(args.reason, encoding="utf-8")
         log(st, "contract_unlock", name=c["name"], version=c["version"], reason=args.reason)
         save_state(root, st)
         print(f"已开启解冻窗口：{c['name']} v{c['version']}  {c['path']}")
@@ -725,8 +1067,7 @@ def cmd_contract(args) -> None:
         sha = sha256_file(root / c["path"])
         if sha is None:
             die(f"文件缺失：{c['path']}")
-        uname, ureason = read_unlock(root)
-        reason = args.reason or (ureason if uname == c["name"] else "")
+        reason = args.reason or read_unlocks(root).get(c["name"], "")
         if not reason:
             die("bump 必须给 --reason（或先 contract unlock 时申报）—— "
                 "变更理由要进审计日志与交付报告")
@@ -745,12 +1086,15 @@ def cmd_contract(args) -> None:
             tid = f"T{st['seq']}"
             st["tasks"].append({
                 "id": tid, "title": f"同步契约 {c['name']} v{c['version']} 变更：{reason}",
-                "role": role, "phase": "develop", "status": "todo", "deps": [],
+                # 阶段取当前阶段，不能硬编码 develop：在 verify 阶段 bump 出来的
+                # 返工任务若落到 develop，verify 门禁的 tasks_done:verify 看不见它，
+                # 带着未完成的返工就放过去了 —— 正是契约传播机制要防的事。
+                "role": role, "phase": st["phase"], "status": "todo", "deps": [],
                 "contracts": [c["name"]], "artifacts": [], "notes": "由 contract bump 自动创建",
                 "created": now(), "updated": now(),
             })
             created.append(f"{tid}({role})")
-        (wb_dir(root) / "unlock").unlink(missing_ok=True)
+        close_unlock(root, c["name"])
         save_state(root, st)
         print(f"{c['name']} v{old} -> v{c['version']}  {sha[:12]}  理由：{reason}")
         print("已为消费方创建返工任务：" + (", ".join(created) or "无消费方"))
@@ -820,25 +1164,33 @@ def cmd_role(args) -> None:
         f.unlink(missing_ok=True)
         print("角色已清除")
     elif args.action == "scopes":
-        st = load_state(root)
+        st = load_state(root, lock=True)
         if args.reset:
-            st["role_scopes"] = json.loads(json.dumps(DEFAULT_ROLE_SCOPES))
-            log(st, "role_scopes_reset")
+            # 必须跟 init 走同一条路径。只写 DEFAULT_ROLE_SCOPES 会把跨仓库项目的
+            # 范围刷成裸默认值 —— 后端从此写不了自己仓库的 migrations/，却能写别人
+            # 仓库的同语言文件，两个方向同时破，而输出看起来只是「刷成默认值」。
+            layout = repo_layout_scopes(root)
+            st["role_scopes"] = layout or json.loads(json.dumps(DEFAULT_ROLE_SCOPES))
+            log(st, "role_scopes_reset", repo_layout=bool(layout))
             save_state(root, st)
-            print("角色范围已刷成当前默认值。")
+            print("角色范围已刷成当前默认值。" +
+                  ("检测到 repos/ 跨仓库布局，已按仓库前缀重算。" if layout else ""))
         for r, globs in st["role_scopes"].items():
             print(f"{r:<19} {', '.join(globs)}")
+        print_unclaimed(root, st["role_scopes"])
         print("\n冻结文件（任何角色都不能用工具直接写）：")
-        for f in read_frozen(root):
-            print(f"  {f}")
-        uname, ureason = read_unlock(root)
-        if uname:
-            print(f"\n解冻窗口开启中：{uname} —— {ureason}")
+        for fr in read_frozen(root):
+            print(f"  {fr}")
+        opened = read_unlocks(root)
+        if opened:
+            print("\n解冻窗口开启中：")
+            for uname, ureason in opened.items():
+                print(f"  {uname} —— {ureason}")
 
 
 def cmd_config(args) -> None:
     root = find_root()
-    st = load_state(root)
+    st = load_state(root, lock=True)
     if args.action == "get":
         v = dotted_get(st, args.key) if args.key else st["gate_commands"]
         print(json.dumps(v, ensure_ascii=False, indent=2))
@@ -855,7 +1207,7 @@ def cmd_config(args) -> None:
 
 def cmd_log(args) -> None:
     root = find_root()
-    st = load_state(root)
+    st = load_state(root, lock=bool(args.message))  # --tail 只读，不占锁
     if args.message:
         log(st, "note", message=args.message, role=args.role or "")
         save_state(root, st)
@@ -926,26 +1278,88 @@ def resolve_target(cwd: Path, raw: str) -> Path:
         return p
 
 
-def frozen_hit(root: Path, cmd: str) -> str:
-    """命令里提到的第一个冻结路径。同时匹配相对路径与文件名，
-    以拦住 `cd .workbench/contracts && sed -i ... user-api.json` 这类先切目录的写法。"""
-    for rel in read_frozen(root):
-        if rel in cmd or os.path.basename(rel) in cmd:
-            return rel
-    return ""
+def frozen_hits(root: Path, cmd: str) -> list[str]:
+    """命令文本里提到的全部冻结路径。
+
+    返回全部而不是第一个：只比对第一个命中时，`sed -i s/a/b/ a.json b.json`
+    里若 a.json 正处于解冻窗口，b.json 就被静默放行。
+
+    只匹配相对路径。早期版本还按 basename 匹配，但 `role` / `frozen` /
+    `state.json` 这几个词在业务代码里太常见（SQL 的 role 字段、web/state.json），
+    误拦率高到把「误拦显式、漏拦静默」这个原则本身推翻。先切目录再写的写法
+    由调用方的 `.workbench` 兜底覆盖。
+    """
+    return [rel for rel in read_frozen(root) if rel in cmd]
 
 
-def unlocked_path(root: Path) -> str:
-    """当前解冻窗口对应的契约路径。窗口只对单份契约生效，状态文件永不可解冻。"""
-    name, _ = read_unlock(root)
-    if not name or not state_path(root).is_file():
-        return ""
+def unlocked_paths(root: Path) -> set[str]:
+    """当前全部解冻窗口对应的契约路径。窗口按契约分开，状态文件永不可解冻。"""
+    names = read_unlocks(root)
+    if not names or not state_path(root).is_file():
+        return set()
     try:
         st = json.loads(state_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return ""
-    c = find_contract(st, name)
-    return c["path"] if c else ""
+        return set()
+    return {c["path"] for c in st.get("contracts", []) if c["name"] in names}
+
+
+def contracts_for(root: Path, rels: list[str]) -> list[dict]:
+    """反查这些冻结路径对应的契约。只在即将拒绝时调用，读一次 state.json 不在热路径上。
+
+    查不到就是空列表（`FROZEN_ALWAYS` 那几个不是契约），由调用方退回「只能用 wb.py
+    子命令改」那句 —— 给不存在的契约名让人去申报比不给更坏。
+    """
+    try:
+        st = json.loads(state_path(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    return [c for c in st.get("contracts", []) if c["path"] in rels]
+
+
+def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
+    """撞上冻结文件时该怎么办。按撞上的人是不是 owner 分岔。
+
+    统一给 `contract unlock` 命令错在两处。一是 `FROZEN_ALWAYS` 不是契约，读的人
+    会去申报一个不存在的名字。二是非 owner 角色自己申报也不对：`bump` 会给每个
+    消费方建返工任务，那是编排者的调度决定；而 `SubagentStop` 会在它结束时关掉
+    悬挂窗口，留下一个改过但没定版的文件，下次 `contract verify` 报漂移。
+
+    名字必须填实的 —— 只有 `pm` 的定义里硬编码了 `artifact-requirements`，其余角色
+    撞上自己那份阶段产物时只能猜，而 CLAUDE.md 不许换等价写法绕。
+    """
+    cs = contracts_for(root, rels)
+    if not cs:
+        return "状态与进度只能用 wb.py 子命令改。"
+    names = ",".join(c["name"] for c in cs)
+    owners = {c["owner"] for c in cs}
+    if role and role not in owners:
+        return (f"它的 owner 是 {'/'.join(sorted(owners))}，不是你 —— 不要自己申报解冻。"
+                f"报回编排者：要改 {names}，为什么。由编排者决定是否 "
+                f"`wb.py contract unlock --name {names} --reason '<理由>'`，"
+                f"或者用 `wb.py task block <ID> --reason '<缺什么>'` 把任务打回。")
+    return (f"先申报：`wb.py contract unlock --name {names} --reason '<为什么要改>'`，"
+            f"改完 `wb.py contract bump --name {names}` 重新锁定并通知消费方。")
+
+
+def current_role(root: Path, data: dict) -> str:
+    """当前角色：subagent 优先取 hook 载荷里的 agent_type，主线程退回读 `.workbench/role`。
+
+    载荷里的 `agent_type` 就是 agent 定义 frontmatter 的 `name`，与 ROLES 同名 ——
+    实测（Claude Code 2.1.252）subagent 的 PreToolUse / PostToolUse / SubagentStop
+    都带 `agent_type` 与 `agent_id`，主线程两个都没有。所以并行 subagent 各自判定，
+    不再抢 `.workbench/role` 那个单文件：谁写的由谁的载荷说，与启动顺序无关。
+
+    两种情况退回读文件，也就是退回旧行为：字段缺失（老版本 Claude Code），或
+    `agent_type` 不是角色名（内置的 Explore / general-purpose / Plan）。后者意味着
+    开发活要派给角色 agent —— 用 general-purpose 干开发，角色范围只能按最后一次
+    `role set` 兜底。
+    """
+    at = (data.get("agent_type") or "").strip()
+    if at in ROLES:
+        return at
+    f = wb_dir(root) / "role"
+    return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
 
 def hook_pre_tool(data: dict) -> None:
@@ -961,14 +1375,44 @@ def hook_pre_tool(data: dict) -> None:
                 hook_deny(f"{why}。命令：{cmd[:160]}")
         # Bash 重定向 / sed -i 会绕过 Write 与 Edit 上的全部守卫，必须单独拦。
         if BASH_WRITE.search(cmd):
-            hit = frozen_hit(root, cmd)
-            if hit and hit != unlocked_path(root):
+            mentioned = frozen_hits(root, cmd)
+            unlocked = unlocked_paths(root)
+            hits = [h for h in mentioned if h not in unlocked]
+            if hits:
                 hook_deny(
-                    f"{hit} 是冻结文件，不能用 shell 直接写（这会绕过守卫与哈希校验）。"
-                    f"契约改动走 `wb.py contract unlock --name <名> --reason <理由>` "
-                    f"申报后再改，改完 `wb.py contract bump --name <名>`；"
-                    f"状态与进度只能用 wb.py 子命令改。命令：{cmd[:120]}"
+                    f"{', '.join(hits)} 是冻结文件，不能用 shell 直接写"
+                    f"（这会绕过守卫与哈希校验）。"
+                    f"{frozen_advice(root, hits, current_role(root, data))}命令：{cmd[:120]}"
                 )
+            # `cd .workbench/contracts && sed -i ... user-api.json` 这类先切目录的写法，
+            # 命令文本里看不到完整相对路径，frozen_hits 抓不到，只能按「切进了
+            # .workbench」整类兜住。条件是**切目录**而不是「命令里提到 .workbench」：
+            # 后者会连带拦下 `echo '.workbench/' >> .git/info/exclude`（多仓库布局 A
+            # 的第二步，.workbench 是被写的内容不是写入目标）与 architect 用 heredoc
+            # 新建一份还没登记的契约文件 —— 两个都是文档写明的正常操作，且撞上
+            # 「被拦时不要换等价写法」那条约定后没有出路。
+            if not mentioned and re.search(r"\b(?:cd|pushd)\s+[^\s;|&]*\.workbench\b", cmd):
+                hook_deny(
+                    "先 cd 进 .workbench/ 再写文件这条路不通：切了目录守卫就看不到完整"
+                    "相对路径，所以整类写法一并拒绝，换 sed/tee/重定向都一样。"
+                    "状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
+                    "`wb.py contract unlock --name <契约名> --reason '<为什么要改>'` 申报"
+                    "（契约名用 `wb.py contract list` 查）；写还没登记的新文件用相对"
+                    f"仓库根的完整路径，别 cd。命令：{cmd[:120]}"
+                )
+        # 越根写入：只从重定向目标里抽绝对路径。任意 shell 命令的写入目标抽不干净
+        # （cp / mv / 外部编辑器都漏），做一个漏一半的检查会让人误以为有防护，
+        # 所以只认这一种可靠形式，其余边界见 README 的「已知边界」。
+        rootr = root.resolve()
+        # /dev 与系统临时目录放行：`2>/dev/null`、scratch 文件是常规写法，
+        # 拦它们的误报率远高于收益。这里防的是写进别人的项目或系统路径。
+        safe = (Path("/dev"), Path("/tmp"), Path(tempfile.gettempdir()))
+        for m in re.finditer(r">>?\s*['\"]?(/[^\s'\";|&>]+)", cmd):
+            tgt = Path(m.group(1))
+            if any(s == tgt or s in tgt.parents for s in safe):
+                continue
+            if tgt != rootr and rootr not in tgt.parents:
+                hook_deny(f"重定向写入越出项目根 {rootr}：{tgt}")
         for pat, why in WARN_BASH:
             if re.search(pat, cmd, re.IGNORECASE):
                 print(f"[工作台提示] {why}。确认这是你要的操作。")
@@ -991,24 +1435,27 @@ def hook_pre_tool(data: dict) -> None:
 
     # 2. 冻结文件：状态、进度、契约、以及被登记为契约的方案文档。
     #    任何角色都不能直接写 —— 包括 owner 与主线程。
-    if rel in read_frozen(rootr):
-        if rel != unlocked_path(rootr):
-            name = next((c for c in ("state.json", "role", "unlock", "frozen")
-                         if rel.endswith(c)), "")
-            if name:
+    #    `.workbench/unlock` 现在是目录，所以也要拦它下面的窗口文件：
+    #    能写 unlock/<契约名> 就能自己给自己发申报，冻结形同虚设。
+    frozen = read_frozen(rootr)
+    if rel in frozen or any(rel.startswith(f + "/") for f in frozen):
+        if rel not in unlocked_paths(rootr):
+            # 精确匹配，不能用 endswith：契约路径若以 role / frozen 结尾
+            # （例如 docs/role），会给出「只能通过 wb.py 命令修改」而不是契约申报指引。
+            wbrel = os.path.relpath(wb_dir(rootr), rootr).replace(os.sep, "/")
+            always = {f"{wbrel}/{c}" for c in FROZEN_ALWAYS}
+            if rel in always or any(rel.startswith(a + "/") for a in always):
                 hook_deny(f"{rel} 只能通过 wb.py 命令修改（保证门禁与进度不可绕过）")
             hook_deny(
                 f"{rel} 是已冻结的契约文档，不能直接改。"
-                f"先申报：`wb.py contract unlock --name <契约名> --reason '<为什么要改>'`，"
-                f"改完 `wb.py contract bump --name <契约名>` 重新锁定并通知消费方"
+                + frozen_advice(rootr, [rel], current_role(rootr, data))
             )
         # 在申报窗口内，放行到下一层继续做角色范围检查
 
     # 3. 角色写入范围
-    rolef = wb_dir(rootr) / "role"
-    if not rolef.is_file() or not state_path(rootr).is_file():
+    role = current_role(rootr, data)
+    if not role or not state_path(rootr).is_file():
         return
-    role = rolef.read_text(encoding="utf-8").strip()
     try:
         st = json.loads(state_path(rootr).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -1016,6 +1463,15 @@ def hook_pre_tool(data: dict) -> None:
     globs = (st.get("role_scopes") or {}).get(role)
     if not globs:
         return
+    # `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。
+    # 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`，所以
+    # `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配
+    # `.workbench/contracts/events.json`。两者都绕开了本层的设计意图：产物目录
+    # 按阶段隔离、契约只有 architect 能写。冻结那一层（第二层）补不上这个缺口 ——
+    # 它只认**已锁定**的契约，而强推过的阶段产物不冻结、还没 lock 的契约也不在清单里。
+    # 收窄只影响裸扩展名模式，各角色显式写的 `.workbench/artifacts/<阶段>/**` 照常。
+    if rel.startswith(".workbench/"):
+        globs = [g for g in globs if g.startswith(".workbench/")] or ["（无）"]
     if not any(fnmatch.fnmatch(rel, g) for g in globs):
         hook_deny(
             f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。"
@@ -1024,31 +1480,33 @@ def hook_pre_tool(data: dict) -> None:
 
 
 def hook_post_tool(data: dict) -> None:
-    """把被改动的文件挂到当前任务上，复盘时能追溯谁改了什么。"""
+    """把改动追加到产物流水账，由 `task done` 归并进任务（见 merge_artifacts）。
+
+    这里绝不能读改写 state.json：并行 develop 下每个 subagent 的每次文件写入
+    都会触发本钩子，旧快照回写会静默吞掉期间落盘的 `task done`，连带把
+    save_state 顺手重写的冻结清单退回旧版 —— 于是「门禁与进度不可绕过」
+    在并发下失效，不需要谁去绕。纯 append 无竞态，也把全量 JSON 读写
+    从每次工具调用的热路径上挪走了。
+
+    每行的 role 取自本次调用的载荷（见 current_role），不是那个被并行 subagent
+    互相覆盖的 `.workbench/role` —— 归属记录只在 develop 并行时才有价值，读单文件
+    会让两个开发角色的改动全挂到最后一次 `role set` 的那个角色名下。
+    """
     ti = data.get("tool_input") or {}
     raw = ti.get("file_path") or ti.get("notebook_path")
     if not raw:
         return
-    root = find_root(Path(data.get("cwd") or os.getcwd()))
+    cwd = Path(data.get("cwd") or os.getcwd())
+    root = find_root(cwd)
     if not state_path(root).is_file():
         return
-    ctf = wb_dir(root) / "current_task"
-    if not ctf.is_file():
-        return
-    tid = ctf.read_text(encoding="utf-8").strip()
-    st = json.loads(state_path(root).read_text(encoding="utf-8"))
-    t = find_task(st, tid)
-    if not t:
-        return
-    target = resolve_target(Path(data.get("cwd") or os.getcwd()), str(raw))
     try:
-        rel = os.path.relpath(target, root.resolve()).replace(os.sep, "/")
+        rel = os.path.relpath(resolve_target(cwd, str(raw)), root.resolve()).replace(os.sep, "/")
     except ValueError:
         return
-    if rel not in t["artifacts"]:
-        t["artifacts"].append(rel)
-        t["updated"] = now()
-        save_state(root, st)
+    entry = {"at": now(), "path": rel, "role": current_role(root, data)}
+    with (wb_dir(root) / ARTIFACT_LOG).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def hook_session_start(data: dict) -> None:
@@ -1084,27 +1542,37 @@ def hook_session_start(data: dict) -> None:
 
 
 def hook_subagent_stop(data: dict) -> None:
-    """子 agent 结束：解除角色锁与解冻窗口，避免下一个 agent 继承上一个的权限。"""
+    """子 agent 结束：解除角色锁与解冻窗口，避免下一个 agent 继承上一个的权限。
+
+    只在没有别的任务仍处于 doing 时才解除。并行派发下先结束的那个 subagent
+    会把仍在运行的兄弟的角色锁与解冻窗口一并清掉，后者随后进入无限制状态
+    （角色范围检查在 role 文件缺失时直接跳过）—— 这个清除动作在串行下是缓解，
+    在并行下方向是反的。
+    """
     root = find_root(Path(data.get("cwd") or os.getcwd()))
     if not state_path(root).is_file():
         return
+    st = load_state(root, lock=True)
     rolef = wb_dir(root) / "role"
-    role = rolef.read_text(encoding="utf-8").strip() if rolef.is_file() else ""
-    rolef.unlink(missing_ok=True)
-    uname, _ = read_unlock(root)
-    (wb_dir(root) / "unlock").unlink(missing_ok=True)
-    st = load_state(root)
-    log(st, "subagent_stop", role=role)
+    role = current_role(root, data)
+    doing = [t["id"] for t in st["tasks"] if t["status"] == "doing"]
+    log(st, "subagent_stop", role=role, doing=",".join(doing))
     save_state(root, st)
-    if uname:
-        print(f"[工作台] 解冻窗口 {uname} 已随子 agent 结束关闭。"
-              f"若已改动该文件，跑 `wb.py contract verify` 确认状态，"
-              f"需要定版就 `wb.py contract bump --name {uname} --reason '<理由>'`。")
-    ctf = wb_dir(root) / "current_task"
-    if ctf.is_file():
-        print(f"[工作台] 子 agent（{role or '未标注角色'}）结束，任务 "
-              f"{ctf.read_text(encoding='utf-8').strip()} 仍为 doing。"
-              f"确认产物后执行 `wb.py task done <id>`。")
+
+    if doing:
+        print(f"[工作台] 子 agent（{role or '未标注角色'}）结束，但 {', '.join(doing)} 仍为 doing，"
+              f"角色锁与解冻窗口保持不变 —— 并行下清掉会打断仍在运行的兄弟 agent。"
+              f"确认产物后执行 `wb.py task done <id>`，最后一个任务收尾时自动解除。")
+        return
+
+    rolef.unlink(missing_ok=True)
+    opened = list(read_unlocks(root))
+    close_unlock(root)
+    if opened:
+        names = ", ".join(opened)
+        print(f"[工作台] 解冻窗口 {names} 已随子 agent 结束关闭。"
+              f"若已改动这些文件，跑 `wb.py contract verify` 确认状态，"
+              f"需要定版就逐个 `wb.py contract bump --name <名> --reason '<理由>'`。")
 
 
 def cmd_hook(args) -> None:
@@ -1142,7 +1610,6 @@ def cmd_selfcheck(args) -> None:
     old = Path.cwd()
     try:
         os.chdir(tmp)
-        run = lambda *a: main(list(a))
 
         def quiet(*a):
             buf = io.StringIO()
@@ -1170,6 +1637,13 @@ def cmd_selfcheck(args) -> None:
         assert code == 0, "产物齐全后门禁应通过"
         quiet("phase", "advance")
         assert load_state(tmp)["phase"] == "analyze"
+
+        # 阶段产物过门禁即登记为契约，但它不能顶替接口契约 —— 否则 clarify 一过，
+        # design 门禁的 contracts_locked 就永远非空，再也逼不出「接口先定」
+        assert find_contract(load_state(tmp), "artifact-requirements"), \
+            "clarify 门禁通过时应把 requirements.md 登记成契约"
+        code, out = quiet("gate", "check", "--phase", "design")
+        assert code == 1 and "接口契约" in out, out
 
         # 任务依赖：未完成依赖不得开工
         quiet("task", "add", "--title", "建表", "--role", "backend-developer", "--phase", "develop")
@@ -1206,10 +1680,15 @@ def cmd_selfcheck(args) -> None:
         assert find_contract(st, "user-api")["version"] == 2
         assert len(st["tasks"]) == before + 1, "bump 应为消费方创建返工任务"
         assert st["tasks"][-1]["role"] == "frontend-developer"
+        assert st["tasks"][-1]["phase"] == st["phase"], \
+            "返工任务要落在当前阶段，硬编码 develop 会让本阶段门禁看不见它"
         code, _ = quiet("contract", "verify")
         assert code == 0, "bump 后应重新一致"
         code, out = quiet("contract", "bump", "--name", "user-api", "--reason", "空改动")
         assert code == 1 and "未变" in out, "内容未变时 bump 应拒绝，避免刷版本号"
+        code, out = quiet("contract", "add", "../outside.json")
+        assert code == 1 and "项目根" in out, \
+            "越根契约必须拒绝：登记后 Bash 提它就被拦、Write 又先撞越根检查，契约无法维护"
 
         # 命令门禁
         quiet("config", "set", "gate_commands.test", "exit 1")
@@ -1221,6 +1700,26 @@ def cmd_selfcheck(args) -> None:
         quiet("config", "set", "gate_commands.lint", '""')
         ok, _, detail = run_check(tmp, load_state(tmp), "develop", "cmd:lint")
         assert ok and "跳过" in detail, detail
+
+        # develop 门禁要有产物兜底：否则未配 gate_commands 的项目里四条全 PASS，
+        # 阶段能在零代码证据下推进
+        code, out = quiet("gate", "check", "--phase", "develop")
+        assert code == 1 and "verification.md" in out, out
+
+        # 失败输出必须留档：只剩汇总行的话，诊断得把门禁再跑一遍
+        quiet("config", "set", "gate_commands.test", "printf 'a\\nb\\nBOOM\\n'; exit 1")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        logf = tmp / ".workbench" / "gate-test.log"
+        assert not ok and "gate-test.log" in detail, detail
+        assert "BOOM" in logf.read_text(encoding="utf-8"), "完整输出未落盘"
+
+        # 超时是 FAIL，不是 Traceback（CLI 路径没有兜底 try）
+        quiet("config", "set", "gate_timeout", "1")
+        quiet("config", "set", "gate_commands.test", "sleep 5")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert not ok and "超时" in detail, detail
+        quiet("config", "set", "gate_timeout", "1800")
+        quiet("config", "set", "gate_commands.test", "exit 0")
 
         # 权限守卫
         def guard(payload) -> int:
@@ -1250,29 +1749,138 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "src/app.ts"}}) == 2, "pm 越权写代码未被拦"
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": ".workbench/artifacts/clarify/requirements.md"}}) == 0
+                      "tool_input": {"file_path": ".workbench/artifacts/clarify/notes.md"}}) == 0
         quiet("role", "set", "frontend-developer")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "web/index.tsx"}}) == 0
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 2, "前端越权写迁移未被拦"
+
+        # 并行 develop：角色按载荷的 agent_type 判定，不看那个被互相覆盖的单文件。
+        # role 文件此刻是 frontend-developer —— 相当于后启动的前端 subagent 刚 role set 过。
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "migrations/001.sql"}}) == 0, \
+            "后端 subagent 写自己的迁移被误拦：角色要取载荷 agent_type，不是最后一次 role set"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "web/index.tsx"}}) == 2, \
+            "载荷带 agent_type 时仍要按那个角色限制范围"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "general-purpose",
+                      "tool_input": {"file_path": "migrations/001.sql"}}) == 2, \
+            "agent_type 不是角色名（Explore / general-purpose）时应退回读 role 文件"
+        # 产物归属同样按载荷取角色，否则并行下两个角色的改动全挂到同一个名下
+        hook_post_tool({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                        "tool_input": {"file_path": "migrations/001.sql"}})
+        last = json.loads((tmp / ".workbench" / ARTIFACT_LOG).read_text(
+            encoding="utf-8").strip().splitlines()[-1])
+        assert last["role"] == "backend-developer", last
+
         quiet("role", "clear")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 0, "无角色时不应做角色限制"
 
+        # 各角色的本职写入不能被拦。这六条都是实测出来的误拦，每一条堵的都是
+        # 该角色自己的活，而不是跨界 —— 误拦比漏拦更快让 agent 去想办法绕守卫。
+        for agent, path, why in [
+            ("backend-developer", "README.md", "开发更新文档"),
+            ("backend-developer", "docs/api-changes.md", "开发补接口说明"),
+            ("frontend-developer", "components/Button.jsx", "根级布局 + JS 项目"),
+            ("frontend-developer", "styles/main.scss", "同上"),
+            ("qa", "vitest.config.ts", "qa 配置测试框架"),
+            ("qa", "playwright.config.ts", "同上"),
+            ("qa", "pytest.ini", "Python 测试框架的配置不叫 *.config.*"),
+            ("reviewer", "docs/adr/001-choice.md", "复盘落 ADR"),
+        ]:
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
+                          "tool_input": {"file_path": path}}) == 0, f"{agent} 写 {path} 被误拦（{why}）"
+
+        # 放宽的是仓库内的文件，不是状态目录。裸扩展名模式（`*.md` / `*.json`）在
+        # fnmatch 下跨 `/`，不收窄就会跨进 .workbench/ ——「产物按阶段隔离」与
+        # 「契约只有 architect 能写」两条都被绕开，且第二层补不上（强推的阶段产物
+        # 不冻结，未 lock 的契约不在清单里）。
+        for agent, path, why in [
+            ("backend-developer", ".workbench/artifacts/clarify/requirements.md", "*.md 跨进上游产物"),
+            ("reviewer", ".workbench/artifacts/design/design.md", "*.md 跨进方案文档"),
+            ("backend-developer", ".workbench/contracts/events.json", "*.json 跨进契约目录"),
+            ("qa", ".workbench/artifacts/design/notes.config.ts", "*.config.ts 跨进产物目录"),
+            ("pm", "README.md", "pm 没有 *.md，放宽不是给所有角色"),
+            ("reviewer", "src/app.ts", "reviewer 拿到 *.md 不等于拿到代码"),
+            ("qa", "src/app.ts", "qa 拿到 *.config.ts 不等于拿到代码"),
+        ]:
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
+                          "tool_input": {"file_path": path}}) == 2, f"{agent} 写 {path} 未被拦（{why}）"
+        # 收窄只针对裸扩展名，显式的产物目录模式照常放行
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": ".workbench/artifacts/develop/notes.md"}}) == 0, \
+            "收窄误伤了显式写出的 .workbench/artifacts/<阶段>/** 模式"
+
         # 冻结文档：契约与方案文档不能被随意修改
         DESIGN = ".workbench/artifacts/design/design.md"
-        # 产物目录按阶段隔离 —— 下游角色写不了上游的方案文档
+        REQ = ".workbench/artifacts/clarify/requirements.md"
+        # 产物目录按阶段隔离 —— 下游角色写不了上游阶段的产物目录
         quiet("role", "set", "qa")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": DESIGN}}) == 2, "qa 改 design.md 未被拦"
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": ".workbench/artifacts/clarify/requirements.md"}}) == 2, \
-            "qa 改需求文档未被拦"
+                      "tool_input": {"file_path": ".workbench/artifacts/clarify/notes.md"}}) == 2, \
+            "qa 改上游阶段产物未被拦"
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": ".workbench/artifacts/verify/test-report.md"}}) == 0, \
             "qa 写自己阶段的产物被误拦"
         quiet("role", "clear")
+
+        # 冻结的阶段产物：角色范围只在恰好有角色锁时生效，主线程与非角色 subagent
+        # 此前能随手重写 requirements.md 且不留痕。登记成契约后走同一套申报
+        assert guard({"tool_name": "Write", "cwd": cw, "tool_input": {"file_path": REQ}}) == 2, \
+            "无角色时上游产物仍应受冻结保护"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "pm",
+                      "tool_input": {"file_path": REQ}}) == 2, "冻结产物对 owner 也只读"
+        quiet("contract", "unlock", "--name", "artifact-requirements",
+              "--reason", "qa 打回：验收标准第 3 条写错了")
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "pm",
+                      "tool_input": {"file_path": REQ}}) == 0, "申报窗口内应放行给 owner"
+        quiet("contract", "lock", "--name", "artifact-requirements")
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "pm",
+                      "tool_input": {"file_path": REQ}}) == 2, "lock 应关闭窗口"
+
+        # 空 frozen 缓存：守卫只判文件在不在，而 write_text 的「truncate 再 write」
+        # 中间那一瞬就是空文件。实测那一刻五条防线全放行，含改 role 提权。现在
+        # write_frozen 原子替换、read_frozen 把空清单视同缺失，两条都得成立。
+        fz = wb_dir(tmp) / "frozen"
+        saved_fz = fz.read_text(encoding="utf-8")
+        fz.write_text("", encoding="utf-8")
+        assert read_frozen(tmp), "空 frozen 应回退到从 state.json 现算"
+        for path in (".workbench/state.json", ".workbench/role", REQ):
+            assert guard({"tool_name": "Write", "cwd": cw,
+                          "tool_input": {"file_path": path}}) == 2, \
+                f"frozen 缓存为空时 {path} 被放行"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "echo architect > .workbench/role"}}) == 2, \
+            "frozen 缓存为空时 Bash 提权被放行"
+        fz.write_text(saved_fz, encoding="utf-8")
+        quiet("config", "set", "max_parallel", "3")   # 走一次 save_state
+        assert read_frozen(tmp) == [l for l in saved_fz.splitlines() if l.strip()], \
+            "save_state 重写的 frozen 与之前不一致"
+        assert not list(fz.parent.glob("frozen.*.tmp")), "write_frozen 留下了临时文件"
+        # 上面那组管的是空清单。清单大到跨多页时 truncate 中间态还会是**写了一半**，
+        # 兜底认不出来（实测 4 写 6 读 9000 次：45 行 0 次，405 行 54 次，4005 行 82 次）。
+        # 同时覆盖两者的只有原子替换，所以直接验证它：rename 必然换 inode，就地截断不换。
+        # 中间态单进程测不到，inode 是它在事后唯一可靠的痕迹。
+        ino = fz.stat().st_ino
+        write_frozen(tmp, load_state(tmp))
+        assert fz.stat().st_ino != ino, \
+            "write_frozen 没换 inode，说明是就地截断而非原子替换，并发读会读到空或半截清单"
+
+        # 拒绝文案必须填真实契约名，并且按 owner 分岔。给占位符等于让撞上守卫的
+        # agent 自己去查，而只有 pm 的定义里硬编码了这个名字。教非 owner 自己申报
+        # 更坏：bump 会给消费方建返工任务，那是编排者的调度决定。
+        own = frozen_advice(tmp, [REQ], "pm")
+        assert "unlock --name artifact-requirements" in own and "owner" not in own, own
+        other = frozen_advice(tmp, [REQ], "qa")
+        assert "owner 是 pm" in other and "task block" in other, other
+        assert "unlock" not in frozen_advice(tmp, [".workbench/state.json"]), \
+            "FROZEN_ALWAYS 不是契约，不能让人去申报一个不存在的名字"
+        assert "unlock --name artifact-requirements" in frozen_advice(tmp, [REQ]), \
+            "主线程没有 agent_type，应拿到完整命令"
 
         # Bash 绕过：重定向 / sed -i / 提权写 role 全部要拦
         for bad_cmd, why in [
@@ -1282,13 +1890,31 @@ def cmd_selfcheck(args) -> None:
             ("echo architect > .workbench/role", "重定向改 role 提权"),
             ("tee .workbench/frozen < /dev/null", "清空冻结清单"),
             ("cd .workbench/contracts && sed -i s/a/b/ user-api.json", "先切目录再改"),
+            ("echo '{\"role\":\"qa\",\"path\":\"x\"}' >> .workbench/artifacts.jsonl",
+             "追加流水账伪造产物归属"),
+            ("echo x > /etc/hosts", "重定向写出项目根"),
         ]:
             assert guard({"tool_name": "Bash", "cwd": cw,
                           "tool_input": {"command": bad_cmd}}) == 2, f"Bash 绕过未被拦：{why}"
         for ok_cmd in ["cat .workbench/contracts/user-api.json",
                        "git diff .workbench/contracts/user-api.json",
                        "git checkout -- .workbench/contracts/user-api.json",
-                       "echo hi > /tmp/scratch.txt"]:
+                       "echo hi > /tmp/scratch.txt",
+                       "ls nope 2>/dev/null > out.txt",
+                       # 冻结匹配不能按 basename：role / state.json / unlock
+                       # 这几个词在业务代码里太常见，误拦率高到会推翻
+                       # 「误拦显式、漏拦静默」这个原则，而且错误信息指向契约申报，
+                       # 与真实原因无关。
+                       "echo 'ALTER TABLE users ADD COLUMN role text' >> migrations/002.sql",
+                       "echo 'const roles = []' >> web/roles.ts",
+                       "echo '{}' > web/state.json",
+                       "echo unlock >> notes.md",
+                       # .workbench 出现在**内容**里而不是写入目标里：这是多仓库
+                       # 布局 A 文档写明的第二步，拦它等于每个新仓库的第一步就撞墙
+                       "echo '.workbench/' >> .git/info/exclude",
+                       # architect 用 heredoc 新建一份还没登记的契约 —— 登记要求文件
+                       # 已存在，所以「先写文件」必须走得通，Write 工具那条路本来就通
+                       "cat > .workbench/contracts/new-api.yaml <<EOF\npaths: {}\nEOF"]:
             assert guard({"tool_name": "Bash", "cwd": cw,
                           "tool_input": {"command": ok_cmd}}) == 0, f"正常命令被误杀：{ok_cmd}"
 
@@ -1299,7 +1925,7 @@ def cmd_selfcheck(args) -> None:
         code, out = quiet("contract", "unlock", "--name", "user-api")
         assert code == 1 and "reason" in out, "unlock 无理由必须拒绝"
         quiet("contract", "unlock", "--name", "user-api", "--reason", "补 403 错误码")
-        assert read_unlock(tmp)[1] == "补 403 错误码"
+        assert read_unlocks(tmp) == {"user-api": "补 403 错误码"}, read_unlocks(tmp)
         assert guard({"tool_name": "Edit", "cwd": cw,
                       "tool_input": {"file_path": ".workbench/contracts/user-api.json"}}) == 0, \
             "申报窗口内应放行"
@@ -1314,7 +1940,7 @@ def cmd_selfcheck(args) -> None:
         cpath.write_text('{"GET /users": {"200": ["id"], "403": ["code"]}}\n', encoding="utf-8")
         code, out = quiet("contract", "bump", "--name", "user-api")
         assert code == 0 and "补 403 错误码" in out, "bump 应继承 unlock 申报的理由"
-        assert read_unlock(tmp)[0] == "", "bump 后窗口应关闭"
+        assert read_unlocks(tmp) == {}, "bump 后窗口应关闭"
         assert guard({"tool_name": "Edit", "cwd": cw,
                       "tool_input": {"file_path": ".workbench/contracts/user-api.json"}}) == 2, \
             "bump 后应重新冻结"
@@ -1338,10 +1964,105 @@ def cmd_selfcheck(args) -> None:
         code, _ = quiet("contract", "verify")
         assert code == 0
 
+        # 解冻窗口只对一份契约生效：同一条命令写两份时，不能因为第一个命中在窗口里
+        # 就把第二份静默放行
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "验证多文件写入")
+        assert guard({"tool_name": "Bash", "cwd": cw, "tool_input": {
+            "command": f"sed -i s/a/b/ .workbench/contracts/user-api.json {DESIGN}"}}) == 2, \
+            "解冻 A 之后同一条命令改 B 被静默放行"
+        quiet("contract", "lock", "--name", "user-api")
+
+        # 两份契约必须能同时开窗口。`bump` 一份阶段产物会给每个消费方各建一条同步
+        # 任务（`artifact-requirements` 是 analyst + architect），硬规则要求并行派发 ——
+        # 窗口若是单个文件，后一个 unlock 覆盖前一个，前者刚申报完就被拒，拒绝理由
+        # 还是「先申报」。产物冻结让这条路径从理论可能变成 bump 之后必然发生。
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "并行 A")
+        quiet("contract", "unlock", "--name", "design-doc", "--reason", "并行 B")
+        assert read_unlocks(tmp) == {"design-doc": "并行 B", "user-api": "并行 A"}, read_unlocks(tmp)
+        for f in (".workbench/contracts/user-api.json", DESIGN):
+            assert guard({"tool_name": "Edit", "cwd": cw,
+                          "tool_input": {"file_path": f}}) == 0, f"并行窗口下 {f} 应可写"
+        # bump 自己那份不能收掉兄弟 agent 的窗口
+        cpath.write_text('{"GET /users": {"200": ["id", "name"], "403": ["code"]}}\n', encoding="utf-8")
+        code, out = quiet("contract", "bump", "--name", "user-api")
+        assert code == 0 and "并行 A" in out, out
+        assert read_unlocks(tmp) == {"design-doc": "并行 B"}, read_unlocks(tmp)
+        assert guard({"tool_name": "Edit", "cwd": cw,
+                      "tool_input": {"file_path": DESIGN}}) == 0, "bump 收掉了兄弟 agent 的窗口"
+        quiet("contract", "lock", "--name", "design-doc")
+        assert read_unlocks(tmp) == {}, "lock 应关闭窗口"
+        # 窗口文件本身必须冻结：能写 unlock/<名> 就等于能给自己签发申报
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "tool_input": {"file_path": ".workbench/unlock/design-doc"}}) == 2, \
+            "解冻窗口目录未冻结，申报机制可被自签绕过"
+        # 契约名会当文件名用，路径穿越要在名字进 state 时就挡住
+        code, out = quiet("contract", "add", ".workbench/contracts/user-api.json",
+                          "--name", "../../pwn")
+        assert code == 1 and "契约名" in out, out
+
+        # no_blocked:* 要看全部任务，不只当前阶段 —— 只看 design 阶段近乎恒真
+        code, _ = quiet("gate", "check", "--phase", "design")
+        assert code == 0, "design 门禁此时应通过"
+        quiet("task", "block", "T2", "--reason", "等接口")
+        code, out = quiet("gate", "check", "--phase", "design")
+        assert code == 1 and "阻塞" in out, out
+        quiet("task", "reopen", "T2")
+
         # 角色范围迁移
         quiet("config", "set", "role_scopes.qa", '["everything/**"]')
         quiet("role", "scopes", "--reset")
         assert load_state(tmp)["role_scopes"]["qa"] == DEFAULT_ROLE_SCOPES["qa"]
+
+        # 跨仓库布局：默认范围静默错两个方向，init 要换成按仓库前缀
+        assert repo_layout_scopes(tmp) is None, "没有 repos/ 时不该动默认范围"
+        assert unclaimed_repos(tmp, DEFAULT_ROLE_SCOPES) == [], "没有 repos/ 时无从认领"
+        for r in ("frontend", "backend", "payments-svc", "shared"):
+            (tmp / "repos" / r).mkdir(parents=True)
+        rs = repo_layout_scopes(tmp)
+
+        def allowed(rel, role):
+            return any(fnmatch.fnmatch(rel, g) for g in rs[role])
+
+        assert allowed("repos/backend/migrations/001.sql", "backend-developer"), \
+            "默认的 migrations/** 匹配不到 repos/backend/migrations/"
+        assert not allowed("repos/frontend/src/api.py", "backend-developer"), \
+            "裸 *.py 会放行别人仓库的同语言文件"
+        assert not allowed("repos/backend/package.json", "frontend-developer")
+        assert allowed(".workbench/artifacts/develop/verification.md", "backend-developer"), \
+            "产物目录在工作区根，不该被加仓库前缀"
+        # qa 没有仓库提示词，永远走「任意仓库」分支 —— 裸扩展名模式不能在那个分支被
+        # 丢掉，否则它只剩四个测试目录，配不了测试框架（与单仓库下同一个误拦）
+        assert allowed("repos/frontend/vitest.config.ts", "qa"), \
+            "qa 在跨仓库布局下配不了测试框架"
+        assert allowed("repos/backend/tests/test_api.py", "qa")
+        assert not allowed("repos/backend/src/app.py", "qa"), "qa 仍然不该碰产品代码"
+        # 认领靠目录名。认不出的仓库落在所有角色范围外 —— 是硬拦不是跨仓库放行，
+        # 所以必须点名，否则要到 develop 阶段才撞成一次权限拒绝
+        assert not allowed("repos/shared/src/x.py", "backend-developer"), \
+            "没被任何角色认领的仓库不该静默放行"
+        assert unclaimed_repos(tmp, rs) == ["shared"], \
+            f"认领判定不对：{unclaimed_repos(tmp, rs)}"
+        # 手写认领之后不该再点名；而 config set 是整条覆盖，漏抄一个前缀就换成
+        # 那个仓库被点名 —— 这正是提示最后一行要说的
+        claimed = dict(rs, **{"backend-developer": [
+            ".workbench/artifacts/develop/**", "repos/backend/**", "repos/shared/**"]})
+        assert unclaimed_repos(tmp, claimed) == ["payments-svc"], \
+            "整条覆盖漏抄的前缀没有被点名"
+        # 全都认不出名字时走「任意仓库」分支，探路径命中，不该误报点名
+        assert unclaimed_repos(tmp, {r: [f"repos/*/{p}" for p in ("src/**", "*.py")]
+                                     for r in ("frontend-developer", "backend-developer")}) == [], \
+            "回退分支下误报未认领"
+        # --reset 必须跟 init 走同一条路径。只写 DEFAULT_ROLE_SCOPES 会把跨仓库项目
+        # 刷成裸默认值：后端写不了自己仓库的 migrations/，却能写别人仓库的同语言
+        # 文件 —— 两个方向同时破，而输出看起来只是「刷成默认值」
+        quiet("role", "scopes", "--reset")
+        after = load_state(tmp)["role_scopes"]
+        assert after == rs, "role scopes --reset 丢了跨仓库布局"
+        assert "migrations/**" not in after["backend-developer"], \
+            "--reset 把跨仓库项目刷成了裸默认值"
+        shutil.rmtree(tmp / "repos")
+        quiet("role", "scopes", "--reset")   # repos/ 已删，恢复裸默认值给后面的断言
+        assert load_state(tmp)["role_scopes"] == DEFAULT_ROLE_SCOPES
 
         # 冻结缓存缺失（升级前建的项目）时不能静默退化
         (tmp / ".workbench" / "frozen").unlink()
@@ -1350,11 +2071,55 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"command": "echo x > .workbench/contracts/user-api.json"}}) == 2, \
             "冻结缓存缺失时契约失去保护"
 
-        # 产物挂载
-        quiet("task", "start", "T2")
+        # 产物挂载：post-tool 只追加流水账，task done 归并 —— 它绝不能写 state.json，
+        # 并行下旧快照回写会静默吞掉期间落盘的 task done
+        quiet("task", "start", "T2", "--role-lock")
         hook_post_tool({"tool_name": "Write", "cwd": cw, "tool_input": {"file_path": "web/list.tsx"}})
         t2 = find_task(load_state(tmp), "T2")
+        assert t2["artifacts"] == [], "post-tool 不该写 state.json（并发下会丢任务状态）"
+        assert (tmp / ".workbench" / ARTIFACT_LOG).is_file(), "改动应落进产物流水账"
+        # 兄弟 subagent 还在跑时，先结束的那个不能清掉角色锁 —— 后者会进入无限制状态
+        hook_subagent_stop({"cwd": cw})
+        assert (tmp / ".workbench" / "role").is_file(), "有 doing 任务时不该解除角色锁"
+        quiet("task", "done", "T2")
+        t2 = find_task(load_state(tmp), "T2")
         assert "web/list.tsx" in t2["artifacts"], t2["artifacts"]
+        quiet("task", "done", "T2")
+        assert find_task(load_state(tmp), "T2")["artifacts"].count("web/list.tsx") == 1, \
+            "流水账只追加不重写，归并必须幂等"
+        hook_subagent_stop({"cwd": cw})
+        assert not (tmp / ".workbench" / "role").is_file(), "无 doing 任务时应解除角色锁"
+
+        # 强推的阶段必须与真正过门禁的区分开：status 是最常看的看板
+        quiet("phase", "advance", "--force")
+        st = load_state(tmp)
+        assert st["phase"] == "design"
+        assert not st["gates"]["analyze"]["passed"] and st["gates"]["analyze"]["forced"], \
+            "强推不该记成门禁已过"
+        code, out = quiet("status")
+        assert "!analyze" in out and "vclarify" in out, out
+
+        # 并发写状态：多个 subagent 各自跑 wb.py，「读-改-写」必须串行化。无锁时实测
+        # 45 个并发 task done 丢 23 个 —— 丢掉的每一个都让 tasks_done 门禁永远 FAIL，
+        # 且 save_state 顺手重写的冻结清单会一起退回旧版，刚锁的契约两条防线同时失效。
+        code, out = quiet("task", "add", "--title", "并发写", "--phase", "develop",
+                          "--role", "backend-developer")
+        tid = out.split()[0]
+        if fcntl is not None:
+            acquire_state_lock(tmp)
+            child = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "task", "done", tid],
+                cwd=tmp, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            time.sleep(0.4)
+            assert child.poll() is None, "持锁期间另一个进程仍能改状态：锁没生效"
+            assert find_task(load_state(tmp), tid)["status"] != "done"
+            st = load_state(tmp)      # 锁在手里，这次读不重新抢
+            st["max_parallel"] = 4    # 子进程抢锁前落盘的改动，它必须看得见
+            save_state(tmp, st)       # 出锁
+            assert child.wait(timeout=30) == 0
+            st = load_state(tmp)
+            assert st["max_parallel"] == 4 and find_task(st, tid)["status"] == "done", \
+                "子进程拿抢锁前的旧快照写回，盖掉了期间落盘的改动"
 
         # 报告可渲染
         code, out = quiet("report")
@@ -1362,7 +2127,7 @@ def cmd_selfcheck(args) -> None:
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
-    print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / 产物挂载 / 报告")
+    print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / 并发写状态 / 产物挂载 / 报告")
 
 
 # --------------------------------------------------------------------------
@@ -1392,7 +2157,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("gate", help="门禁校验（退出码 1 = 未通过）")
     p.add_argument("action", choices=["check"])
-    p.add_argument("--phase")
+    p.add_argument("--phase", help="查别的阶段的门禁。注意有副作用：该阶段配置的 "
+                                   "cmd:* 命令会真的执行（build / test 都会跑）")
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_gate)
 
@@ -1481,7 +2247,10 @@ def main(argv: list[str] | None = None) -> None:
         die("contract add 需要契约文件路径")
     if args.cmd == "contract" and args.action in ("bump", "impact", "unlock") and not args.name:
         die(f"contract {args.action} 需要 --name")
-    args.func(args)
+    try:
+        args.func(args)
+    finally:
+        release_state_lock()
 
 
 if __name__ == "__main__":

@@ -4,28 +4,9 @@
 
 ## 就绪集合
 
-核心算法在 `ready_tasks()`，二十行：
+`ready_tasks()` 二十行，一次依赖图前沿扫描：**状态为 `todo` 且所有前置任务已 `done`**，可选按阶段与角色过滤。不是拓扑排序 —— 不需要全序，只需要「现在能动的那一批」。每轮重新算，所以没有增量状态要维护。复杂度 O(任务数)，上千条仍毫秒级。
 
-```python
-def ready_tasks(st, phase=None, role=None):
-    done = {t["id"] for t in st["tasks"] if t["status"] == "done"}
-    out = []
-    for t in st["tasks"]:
-        if t["status"] != "todo":          continue
-        if phase and t["phase"] != phase:  continue
-        if role  and t["role"]  != role:   continue
-        if all(d.upper() in done for d in t.get("deps", [])):
-            out.append(t)
-    order = {p: i for i, p in enumerate(PHASES)}
-    out.sort(key=lambda t: (order.get(t["phase"], 99), t["id"]))
-    return out
-```
-
-**就绪 = 状态为 `todo` 且所有前置任务已 `done`。** 这是依赖图上的一次前沿扫描，不是拓扑排序 —— 不需要全序，只需要「现在能动的那一批」。每轮重新算，所以不需要维护增量状态。
-
-排序按（阶段顺序，任务 ID），让输出稳定可预测。
-
-复杂度 O(n)，n 是任务数。任务上千条时仍然毫秒级，不需要索引。
+输出按（阶段顺序，任务 ID）排序，让派发批次稳定可预测 —— 同样的状态两次 `next --all` 给同样的顺序，否则 loop 的日志无法复现。
 
 ### 依赖只写真依赖
 
@@ -46,13 +27,7 @@ task add --title "用户列表页"   --role frontend-developer --phase develop -
 task add --title "分页契约测试" --role qa --phase verify --deps T1,T2
 ```
 
-第二种写法下 `next --all` 返回 T1 与 T2，一批派出去。实测输出：
-
-```
-$ wb.py next --all
-T1	backend-developer	用户列表接口  契约:user-api
-T2	frontend-developer	用户列表页  契约:user-api
-```
+第二种写法下 `next --all` 一次返回 T1 与 T2，一批派出去。
 
 **假依赖是这套流程最常见的性能损失**，且不报错，只表现为「跑得慢」。复盘时看 `deps` 里有多少条其实不必要。
 
@@ -67,17 +42,9 @@ wb.py next --any-phase      # 不限当前阶段
 
 主线程拿到一批后，**放在同一条消息里用多个 Agent 调用同时派出去**。分多条消息发就是串行，浪费掉契约先行的全部收益。
 
-每个 subagent 的 prompt 必须给到：
+每个 subagent 的 prompt 必须给到：任务 ID（它要用来跑 `task start` / `task done`）、任务标题与范围（避免顺手改别的）、要读的契约文件路径（实现的唯一事实来源）、相关的验收标准条目（「做到什么程度算完」）、上游产物路径（`current-state.md` 里的既有约定与可复用资产）。
 
-| 内容 | 为什么必需 |
-| --- | --- |
-| 任务 ID | subagent 要用它跑 `task start` / `task done` |
-| 任务标题与范围 | 避免超出任务范围顺手改别的 |
-| 要读的契约文件路径 | 契约是实现的唯一事实来源 |
-| 相关的验收标准条目 | 让 subagent 知道「做到什么程度算完」 |
-| 上游产物路径 | `current-state.md` 里的既有约定与可复用资产 |
-
-只说「做 T1」的派发会让 subagent 自己去摸索上下文，慢且容易跑偏。
+只说「做 T1」的派发会让 subagent 自己去摸索上下文，慢且容易跑偏 —— 它的上下文是独立的，你知道的它一概不知道。
 
 ### 并发上限
 
@@ -85,7 +52,7 @@ wb.py next --any-phase      # 不限当前阶段
 wb.py config set max_parallel 5
 ```
 
-`next --all` 最多返回 `max_parallel` 条。往上调之前确认**这一批任务写入的目录不重叠** —— 同一批里两个 agent 改同一个文件会互相覆盖，且没有任何机制能检出（Edit 工具的 old_string 匹配可能恰好都成功）。
+`next --all` 最多返回 `max_parallel` 条。往上调之前确认**这一批任务写入的目录不重叠** —— 同一批里两个 agent 改同一个文件会互相覆盖，且没有任何机制能检出（Edit 的 `old_string` 匹配可能恰好都成功）。
 
 默认 3 是保守值。前后端分离清晰的项目可以调到 5–6；单体项目里多个任务都改 `src/` 时应该调到 1–2。
 
@@ -130,41 +97,23 @@ wb.py task block T2 --reason "契约缺 total 字段"
 wb.py task reopen T2 --note "契约已 bump 到 v2"
 ```
 
-`task start` 会把任务 ID 写进 `.workbench/current_task`，`PostToolUse` hook 靠它把改动文件挂到任务上。`task done` 清除它。
+**依赖检查在 `start` 而非 `add`**：`add` 时依赖的任务可能还没建（先建 T2 再建它依赖的 T1 是合法的，只要建 T1 时用 `--id`）。`add` 只校验依赖的任务**存在**，避免写错 ID 造成永久无法就绪的僵尸任务。
+
+### 产物归属
+
+`task start` 记下 `started` 时间戳。`PostToolUse` hook 把每次改动追加一行到 `.workbench/artifacts.jsonl`（路径 + 当时的角色 + 时间），`task done` 时按「角色 + `started` 之后」认领并归并进任务的 `artifacts`。
+
+归属不看「当前任务」那种单文件 —— 并行下它的内容永远是最后启动的那个任务，据它归属会把两个 subagent 的改动全挂到一个任务上。
+
+**剩余边界：同一角色的两个任务并行时分不开**，它们的改动会互相认领。不是上游限制 —— hook 载荷里有 `agent_id`，`PostToolUse` 能拿到。真正的障碍在另一头：`task start` 是 subagent 自己在 shell 里跑的 CLI，那个进程拿不到自己的 `agent_id`（它只出现在 hook 的 stdin 载荷里），所以任务与 agent 对不上号。要修得让编排者代跑 `task start`，那会把「subagent 自己开工」这条简单约定换成一轮额外往返。当前的取法在「一个角色同时只跑一个任务」下是准的，那也是 `max_parallel` 默认值下的常态。
 
 `--role-lock` 是给编排者用的便捷开关（`start` 的同时 `role set`）。subagent 自己开工时通常先 `role set` 再 `task start`，两种路径等价。
 
-### 依赖检查在 start 而非 add
-
-`task add` 时依赖的任务可能还没建（先建 T2 再建它依赖的 T1 是合法的，只要建 T1 时用 `--id`）。检查放在 `start`：
-
-```python
-undone = [d for d in t["deps"] if (find_task(st, d) or {}).get("status") != "done"]
-if undone and not args.force:
-    die(f"依赖未完成：{', '.join(undone)}（--force 忽略）")
-```
-
-`add` 时只校验依赖的任务**存在**，避免写错 ID 造成永久无法就绪的僵尸任务。
-
 ## Loop 执行
 
-`/wb-loop` skill 驱动自动排空。循环体：
+`/wb-loop` skill 驱动自动排空。每轮开头**重读状态**（`status` + `next --all --json`），不用上一轮的记忆 —— 期间可能有 subagent 落盘、有契约 bump 造出新任务。
 
-```
-每轮开头重读状态（不用上一轮的记忆）
-        ↓
-wb.py status && wb.py next --all --json
-        ↓
-┌───────────────────┬──────────────────┬─────────────────┬──────────────┐
-│ 有就绪任务         │ 无就绪 有进行中   │ 无就绪 有阻塞    │ 全部完成      │
-├───────────────────┼──────────────────┼─────────────────┼──────────────┤
-│ 并行派发整批       │ 等，不重复派发    │ 停 → 交人决策    │ gate check   │
-│ 回来逐个验证产物   │                  │                 │ 过 → advance │
-│ 再 task done      │                  │                 │ 不过 → 补齐  │
-└───────────────────┴──────────────────┴─────────────────┴──────────────┘
-        ↓
-回到循环开头
-```
+四种分支：有就绪任务就并行派发整批，回来逐个验证产物再 `task done`；无就绪但有进行中就等，**不重复派发**；无就绪但有阻塞就停下交人决策；全部完成就 `gate check`，过了 `advance`，不过则派 subagent 补齐。
 
 ### 派发回来必须验证
 
@@ -192,13 +141,7 @@ wb.py status && wb.py next --all --json
 
 防的不是逻辑死循环（`next` 是纯函数，不会自己产生任务），而是**同一个门禁失败反复重试**：门禁 FAIL → 派 subagent 补齐 → subagent 没真正解决 → 门禁还是 FAIL → 再派。这个循环每轮都在烧 token 且不收敛。「同一任务失败两次就停」是第一道防线，轮次上限是第二道。
 
-**每轮记一条日志：**
-
-```bash
-wb.py log "第 3 轮：派发 T3,T4；T3 完成，T4 阻塞于契约"
-```
-
-复盘阶段 `reviewer` 靠这些还原过程。没有日志的自动化循环在复盘时是黑盒。
+**每轮记一条日志**（`wb.py log "第 3 轮：派发 T3,T4；T3 完成，T4 阻塞于契约"`）。复盘阶段 `reviewer` 靠这些还原过程 —— 没有日志的自动化循环在复盘时是黑盒。
 
 ### 与内置 /loop 的区别
 

@@ -62,6 +62,12 @@ python3 .claude/hooks/wb.py next --all --json
 
 一批回来后再 `next --all` 取下一批，直到无就绪任务。
 
+### develop 的落盘校验记录
+
+每批回来后，把 subagent 报的校验命令**自己跑一遍**，把命令与输出记进 `.workbench/artifacts/develop/verification.md`。用 Write：先读出文件现有内容，再连着新的一段一起写回 —— 两个开发角色共用这一份，让 subagent 各自写会互相覆盖，而 shell 追加（`>> .workbench/...`）被守卫拦。
+
+develop 门禁要求这个文件非空。它是硬规则「subagent 说做完了不等于做完了」的落盘依据 —— 记的是**你复核过**的结果，不是 subagent 的自我报告。没有它，未配 `gate_commands` 的项目里 develop 门禁四条全 PASS，阶段能在零代码证据下推进。
+
 ### 并发上限
 
 `config set max_parallel 5` 可调。往上调之前确认这些任务写入的目录不重叠 —— 同一批里两个 agent 改同一个文件会互相覆盖。
@@ -72,7 +78,7 @@ python3 .claude/hooks/wb.py next --all --json
 
 - **契约不够用**（最常见）→ 派 `architect` 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。bump 会自动给消费方建同步任务。然后 `task reopen <被阻塞的ID>`。
 - **方案有问题**（实现时发现设计不可行）→ 同一套流程，`--name design-doc`。**不要让开发角色自己改 `design.md`** —— 它已冻结，守卫会拦，而且悄悄改设计等于把返工藏起来。
-- **需求不清** → 派 `pm` 补充澄清，追加变更记录。
+- **需求不清** → 派 `pm` 补充澄清，追加变更记录。clarify 门禁已过时 `requirements.md` 是冻结契约，先 `contract unlock --name artifact-requirements --reason '<为什么>'` 再派，改完 `contract bump` —— 下游 `analyst` / `architect` 各拿一条同步任务，因为需求变了那两份产物也过期了。
 - **依赖判断错了** → 直接改：`task reopen`，或让 architect 重新拆。
 - **技术上做不到** → 派 `architect` 换方案，同时把结论报给用户。
 
@@ -94,6 +100,17 @@ python3 .claude/hooks/wb.py config set gate_commands.test 'npm test'
 python3 .claude/hooks/wb.py config set gate_commands.lint 'npm run lint'
 python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
+
+### 阶段产物过门禁即冻结
+
+`phase advance` 在门禁**真**通过时把该阶段产物登记成 `artifact-<名>` 契约并锁定，打一行提示：
+
+```
+已把 clarify 阶段产物冻结为契约 artifact-requirements：之后要改它先
+`contract unlock --name artifact-requirements --reason '<为什么>'`，改完 `contract bump` 通知下游
+```
+
+`requirements.md` / `current-state.md` / `test-report.md` / `retro.md` 各一份（`develop` 不冻结 —— `verification.md` 是你自己在写的文件）。**看到这行提示就别再直接改那份产物**，包括你自己和派下去的 owner 角色：走申报流程，或者派对应角色走。强推（`--force`）不冻结 —— 没真做完的产物冻上只会让下一步立刻要求解冻。
 
 ### 强推
 
