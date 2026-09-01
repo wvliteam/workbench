@@ -1,0 +1,84 @@
+{
+  "$comment": "软件开发工作台配置。hooks 由 .claude/hooks/wb.py 统一实现；权限守卫在 pre-tool 里，settings 这一层只做粗粒度兜底。",
+  "permissions": {
+    "allow": [
+      "Bash(python3 .claude/hooks/wb.py:*)",
+      "Bash(python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py\":*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git grep:*)",
+      "Bash(git show:*)",
+      "Bash(git add:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(rg:*)",
+      "Bash(jq:*)",
+      "Bash(npm test:*)",
+      "Bash(npm run lint:*)",
+      "Bash(npm run build:*)",
+      "Bash(pytest:*)",
+      "Bash(go test:*)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.pem)",
+      "Read(./**/*.key)",
+      "Read(./**/id_rsa*)",
+      "Read(./secrets/**)",
+      "Write(./.workbench/state.json)",
+      "Write(./.workbench/role)",
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py\" hook pre-tool",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py\" hook post-tool",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py\" hook session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py\" hook subagent-stop",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

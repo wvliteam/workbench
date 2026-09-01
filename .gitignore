@@ -1,0 +1,11 @@
+# 运行时状态：每个项目 wb.py init 时自己生成，不属于工作台本体
+.workbench/
+
+# clone 进来的代码库各有自己的远程
+repos/
+
+# Claude Code 本地覆盖配置
+.claude/settings.local.json
+
+__pycache__/
+*.py[cod]
