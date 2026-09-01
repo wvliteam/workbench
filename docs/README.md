@@ -10,6 +10,7 @@
 | [contracts.md](contracts.md) | 契约机制：哈希冻结 + 只读守卫、申报窗口、生命周期状态机、`bump` 的影响面传播、方案文档复用、失效模式 |
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、角色范围匹配、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合算法、并行派发协议、循环停止条件、防失控设计 |
+| [review.md](review.md) | 实现评审（2026-09-01）：逐行审查 + 实测验证发现的 15 项问题、修复顺序建议。**与其他文档冲突时以 review.md 为准** |
 
 ## 一页速览
 
