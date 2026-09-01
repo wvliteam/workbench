@@ -1,6 +1,6 @@
 # 契约机制
 
-契约（contract）是**一份多方依赖、不能被单方悄悄改的文件**。最初为接口定义而做，后来技术方案文档 `design.md` 也走同一套 —— 它们要的是同一件事，不需要两套机制。
+契约（contract）是**一份多方依赖、不能被单方悄悄改的文件**。最初为接口定义而做，后来技术方案文档 `design.md` 与各阶段产物也走同一套 —— 它们要的是同一件事，不需要三套机制。
 
 ## 问题
 
@@ -14,22 +14,13 @@
 
 方案文档面对的是同一个漏洞的另一个形态：设计定稿后，开发过程中发现方案某处不好实现，顺手把 `design.md` 改成自己实现的样子。结果是**文档与实现永远一致，因为文档跟着实现改** —— 评审、QA、复盘全部失去基准。
 
-## 契约是什么
+## 三类契约
 
 ### 接口契约
 
-放 `.workbench/contracts/`，形式随项目：
+放 `.workbench/contracts/`，形式随项目：OpenAPI 片段（`user-api.yaml`）、JSON Schema（`events.json`）、TypeScript 类型（`types.ts`）、Protobuf（`rpc.proto`）。
 
-| 形式 | 例子 | 适用 |
-| --- | --- | --- |
-| OpenAPI 片段 | `user-api.yaml` | HTTP 接口 |
-| JSON Schema | `events.json` | 消息体、事件 |
-| TypeScript 类型 | `types.ts` | 前后端共享类型（Node 项目） |
-| Protobuf | `rpc.proto` | gRPC |
-
-内容必须具体到**字段名、类型、可选性、错误码、分页形状、时间格式**。「返回用户列表」不是契约 —— 它在联调时提供不了任何判断依据。
-
-一份最小契约的样子：
+内容必须具体到**字段名、类型、可选性、错误码、分页形状、时间格式**。「返回用户列表」不是契约 —— 它在联调时提供不了任何判断依据。一份最小契约的样子：
 
 ```json
 {
@@ -59,9 +50,38 @@ wb.py contract add .workbench/artifacts/design/design.md \
 wb.py contract lock --name design-doc
 ```
 
-登记为契约后它获得的完全是接口契约那一套：哈希冻结、守卫拦直接写、漂移检出、改动要申报理由、bump 给三个消费方各建一条同步任务。**零新代码** —— 复用现成机制而不是为方案文档另写一套「文档保护」，是这个设计里最省的一处。
+登记后它获得的完全是接口契约那一套：哈希冻结、守卫拦直接写、漂移检出、改动要申报理由、bump 给三个消费方各建一条同步任务。**零新代码** —— 复用现成机制而不是为方案文档另写一套「文档保护」，是这个设计里最省的一处。
 
 消费方选这三个角色的理由：开发照着方案实现、QA 照着方案与验收标准验证，方案变了三方都要重新对齐。`reviewer` 不在列 —— 它在 retro 阶段读最终版，不需要中途返工。
+
+### 阶段产物
+
+`requirements.md`、`current-state.md`、`test-report.md`、`retro.md` 由 `phase advance` 在门禁**真**通过时自动登记并锁定，owner 与消费方取自 `PHASE_ARTIFACT_CONTRACTS` 表，名字是 `artifact-<文件名去扩展>`。不需要谁手工 `contract add` —— 阶段过了就是定稿，定稿就该只读。
+
+```
+$ python3 .claude/hooks/wb.py phase advance
+门禁 · clarify（需求澄清）
+  [PASS] 产物 clarify/requirements.md — 已产出
+  ...
+结论：通过
+已把 clarify 阶段产物冻结为契约 artifact-requirements：之后要改它先
+`contract unlock --name artifact-requirements --reason '<为什么>'`，改完 `contract bump` 通知下游
+阶段推进：clarify -> analyze（现状分析）
+```
+
+**为什么复用契约而不另造一套「产物冻结」**：产物被改的场景与契约完全同形 —— qa 打回要改需求、开发中途发现方案有问题要改 `design.md`。契约这条路径已经有理由必填、哈希校验、`bump` 通知下游三件事，另造一套只会造出第二个半成品。
+
+它补的洞是**上游产物此前只在「恰好有角色锁」时才受保护**：角色范围检查在角色取不到时整层跳过，主线程与非角色 subagent 随时能重写 `requirements.md`，且 `artifacts.jsonl` 里不留角色。冻结不依赖角色，所以这条对谁都成立。
+
+三处与接口契约不同：
+
+| 项 | 接口契约 | 阶段产物 |
+| --- | --- | --- |
+| 登记 | `architect` 手工 `contract add` | `phase advance` 自动（强推不登记） |
+| `kind` 字段 | 无 | `"artifact"` —— `contracts_locked` 不数它，否则 clarify 一过那条门禁就永远 PASS |
+| `develop` 阶段 | 照常 | 不登记：`verification.md` 由编排者写，没有角色 owner |
+
+`design.md` 两边都不算：architect 在 design 阶段自己登记为 `design-doc`（`contracts_locked` 要求至少一份接口契约，靠它满足），自动登记那步按路径查重跳过它。
 
 ## 冻结原理
 
@@ -73,13 +93,9 @@ wb.py contract lock --name design-doc
 c["sha"] = hashlib.sha256(path.read_bytes()).hexdigest()
 ```
 
-`contract lock` 把当前内容的 SHA-256 存进 `state.json`。此后：
+`contract lock` 把当前内容的 SHA-256 存进 `state.json`。此后 `contract verify` 重算哈希比对，不一致即「漂移」，退出码 1；develop 与 verify 两个阶段的门禁都包含 `contracts_intact` 断言；`state.json` 本身在冻结清单里，改不了记录的哈希。
 
-- `contract verify` 重算哈希比对，不一致即「漂移」，退出码 1。
-- develop 与 verify 两个阶段的门禁都包含 `contracts_intact` 断言。
-- `state.json` 本身在冻结清单里，改不了记录的哈希。
-
-为什么用哈希而不是语法感知的 diff：哈希对格式无关（YAML / JSON / proto / TS / Markdown 一视同仁 —— 这也是方案文档能零成本复用的原因）、零依赖、一行代码。代价是查不出语法错误 —— 那个挂到命令门禁上：
+为什么用哈希而不是语法感知的 diff：哈希对格式无关（YAML / JSON / proto / TS / Markdown 一视同仁 —— 这也是方案文档与阶段产物能零成本复用的原因）、零依赖、一行代码。代价是查不出语法错误，那个挂到命令门禁上：
 
 ```
 wb.py config set gate_commands.lint 'npx @redocly/cli lint .workbench/contracts/*.yaml'
@@ -87,27 +103,11 @@ wb.py config set gate_commands.lint 'npx @redocly/cli lint .workbench/contracts/
 
 ### 锁定即只读
 
-`lock` 的第二个作用：把文件路径写进冻结清单，`PreToolUse` 守卫据此拒绝一切直接写入。
-
-```python
-FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen"]
-
-def frozen_paths(st):
-    out = [f".workbench/{n}" for n in FROZEN_ALWAYS]
-    out += [c["path"] for c in st.get("contracts", [])]
-    return out
-```
-
-拦的范围：
-
-| 路径 | 拦法 |
-| --- | --- |
-| Write / Edit / MultiEdit / NotebookEdit | 目标路径在冻结清单里就拒绝 |
-| Bash 里的 `>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `python3 -c` `node -e` `ln -sf` | 命令有写入意图且提到冻结路径就拒绝 |
+`lock` 的第二个作用：把文件路径写进冻结清单，`PreToolUse` 守卫据此拒绝一切直接写入 —— Write/Edit 系工具按目标路径拦，Bash 按「有写入意图且提到冻结路径」拦。完整机制见 [permissions.md](permissions.md#第二层冻结清单)。
 
 **没有豁免角色。** owner 不行，主线程不行。理由：能豁免的机制等于没有机制 —— 「我是 owner 所以我可以直接改」正是要防的那件事。owner 与其他人的区别只在**有权申报**，不在能跳过申报。
 
-三层叠起来的结果：**私自改契约会在动手时就被拦下，拦不住的（外部编辑器、`cp`、用户手改）会在门禁时被抓出。** 详见 [permissions.md](permissions.md#bash-分支绕过检查)。
+叠起来的结果：**私自改契约会在动手时就被拦下，拦不住的（外部编辑器、`cp`、用户手改）会在门禁时被抓出。**
 
 ### 申报窗口
 
@@ -119,16 +119,9 @@ wb.py contract unlock --name user-api --reason "分页要返回 total，前端�
 wb.py contract bump --name user-api
 ```
 
-窗口存在 `.workbench/unlock`（`<契约名>\n<理由>`）。四条规则：
+`--reason` 必填，不给直接拒绝。**理由必须在改之前留痕** —— 事后补的理由都是给已发生的事找解释，那时人已经知道自己改了什么，写出来的是辩护而不是动机。`bump` 不给 `--reason` 时继承申报时的理由：同一次变更只写一次理由，写两遍的机制最后会有一遍是敷衍的。
 
-| 规则 | 为什么 |
-| --- | --- |
-| `--reason` 必填，不给直接拒绝 | **理由必须在改之前留痕。** 事后补的理由都是给已发生的事找解释 —— 那时人已经知道自己改了什么，写出来的是辩护而不是动机 |
-| 只对一份契约生效 | 解冻 `user-api` 不会顺带放开 `design-doc`。`unlocked_path()` 只解析 `unlock` 里那一个名字 |
-| 状态文件永不可解冻 | `unlocked_path()` 查的是 `contracts` 列表，`FROZEN_ALWAYS` 那四个不在里面，查不到 |
-| `bump` / `lock` / `SubagentStop` 关闭窗口 | 忘了关也不会一直敞着 |
-
-`bump` 不给 `--reason` 时继承申报时的理由 —— 同一次变更只写一次理由，写两遍的机制最后会有一遍是敷衍的。
+窗口存在 `.workbench/unlock/`，一份契约一个文件，多份可以并存；开关时机与分片理由见 [permissions.md 第三层](permissions.md#第三层解冻窗口)。
 
 `bump` 时内容没变会被拒绝：
 
@@ -174,37 +167,9 @@ wb.py contract bump --name user-api
 
 ### 命令
 
-```bash
-# 登记
-wb.py contract add .workbench/contracts/user-api.yaml \
-    --name user-api --owner backend-developer --consumers frontend-developer
-wb.py contract add .workbench/artifacts/design/design.md \
-    --name design-doc --owner architect \
-    --consumers frontend-developer,backend-developer,qa
+全部子命令与参数见 `wb.py contract --help`，操作顺序见 [wb-contract skill](../.claude/skills/wb-contract/SKILL.md)。两处约束值得单独记：
 
-# 定稿冻结（design 阶段门禁要求全部锁定）
-wb.py contract lock --all
-wb.py contract lock --name user-api
-
-# 校验（退出码 1 = 有漂移）
-wb.py contract verify
-
-# 看影响面（改之前先看）
-wb.py contract impact --name user-api
-
-# 申报解冻（理由必填）
-wb.py contract unlock --name user-api --reason "响应加 next_cursor 支持无限滚动"
-
-# 正式变更（不给 --reason 就继承申报时的理由）
-wb.py contract bump --name user-api
-
-# 列表与状态（解冻中的会标出来）
-wb.py contract list
-```
-
-`--name` 省略时取文件名主干（`user-api.yaml` → `user-api`）。`--owner` 省略时默认 `architect`。
-
-`add` 要求文件已存在 —— 先写好接口定义再登记，不允许登记一个占位。
+`add` 要求文件**已存在** —— 先写好接口定义再登记，不允许登记一个占位。`--name` 省略时取文件名主干，且只能含字母数字与 `.`、`_`、`-`：契约名会成为 `.workbench/unlock/` 下的文件名，不校验就能用 `--name ../../x` 让 `unlock` 写到项目根之外。
 
 ## bump 的影响面传播
 
@@ -248,37 +213,21 @@ $ wb.py contract impact --name user-api
 | `verify`、字段级人工核对 | `qa` | qa agent 定义里的必做项 |
 | 发现契约不够用 | 开发角色 `task block` | 冻结守卫 + 提示词：禁止直接改契约文件 |
 
-开发角色的写入范围**不含** `.workbench/contracts/` 与 `.workbench/artifacts/design/`，守卫会拦。这是有意的：**契约由单一角色统一定义，才叫契约。** 谁都能改的接口定义文件只是一份注释。
+开发角色的写入范围**不含** `.workbench/contracts/` 与 `.workbench/artifacts/design/`。这是有意的：**契约由单一角色统一定义，才叫契约。** 谁都能改的接口定义文件只是一份注释。
+
+这条断言依赖守卫第四层的一处收窄：开发角色的范围里有 `*.json`，而 `fnmatch` 的 `*` 跨 `/`，所以不收窄的话 `.workbench/contracts/events.json` 是匹配得上的 —— 冻结那层也补不上，它只认已 `lock` 的契约。守卫因此对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式（[permissions.md](permissions.md#第四层角色写入范围)）。
 
 「owner 也要申报」看起来多余，但它是这套机制唯一没有后门的原因。owner 直接改的场景恰好是最需要留痕的场景 —— 他是唯一有能力独自改动、且最容易觉得「这点小改不用记」的人。
 
 ## 开发中发现契约不够用
 
-标准流程：
+操作流程（`task block` → 报回主线程 → architect 走 `impact` / `unlock` / 改 / `bump` → `task reopen`）在 [wb-contract skill](../.claude/skills/wb-contract/SKILL.md) 里，那是主线程执行时读的地方。这里只记三件它不解释的事：
 
-```bash
-# 1. 开发角色阻塞任务，写清原因
-wb.py task block T2 --reason "契约 user-api 响应缺 total，无法做分页"
+**为什么必须回传而不是自己改。** 开发角色适配一个契约里没有的字段不会立刻报错，它把 bug 推迟到联调，且届时没人记得是谁加的。而契约变更的影响面要由能看到全局的人确认 —— `bump` 会给每个消费方建返工任务，那是调度决定。
 
-# 2. 报回主线程 → 主线程派 architect
+**三类契约走的是同一条路。** 方案文档只是换成 `--name design-doc`（三个消费方各一条同步任务，设计变更本来就该三方重新对齐）；qa 打回要改需求换成 `--name artifact-requirements`，`impact` 会列出 `analyst` 与 `architect` —— 需求变了这两个阶段的产物也过期了。
 
-# 3. architect 先看影响面
-wb.py contract impact --name user-api
-
-# 4. 申报，理由必填
-wb.py contract unlock --name user-api --reason "响应加 total 支持分页"
-
-# 5. 改契约文件，然后正式 bump（继承上一步的理由）
-wb.py contract bump --name user-api
-#    → 自动为 frontend-developer 创建同步任务，窗口关闭
-
-# 6. 解除阻塞
-wb.py task reopen T2 --note "契约已 bump 到 v2"
-```
-
-**禁止的做法**：开发角色适配一个契约里没有的字段。这不会立刻报错，但把 bug 推迟到联调，且届时没人记得是谁加的。
-
-方案文档不够用（发现设计有问题）走完全一样的六步，只是 `--name design-doc`。第 5 步的 bump 会给三个消费方各建一条同步任务 —— 设计变更本来就该三方都重新对齐。
+**改需求那一步要派 `pm`。** 它是 `artifact-requirements` 的 owner，且写入范围里只有它含 `artifacts/clarify/`。主线程解冻后自己改不会被拦（它没有角色限制），但那样落进 `artifacts.jsonl` 的记录里没有角色，事后追不到是谁改的需求。
 
 ## 失效模式与处置
 
@@ -291,18 +240,10 @@ wb.py task reopen T2 --note "契约已 bump 到 v2"
 | 契约锁了但联调还是不一致 | 实现没逐字段对齐契约 | 这是 `qa` 的字段级核对该抓的。契约保证「双方看同一份」，不保证「双方读对了」 |
 | 契约文件语法错误 | 哈希不校验语法 | 挂 `gate_commands.lint` |
 | `bump` 后消费方任务堆积 | 契约设计不稳定，改动过频 | 复盘信号：设计阶段对接口的思考不足。看 `log` 里 `contract_bump` 的条数 |
-| 升级 `wb.py` 后契约的 Bash 防线失效 | 老项目没有 `.workbench/frozen` 缓存 | 已修：缺失时从 `state.json` 现算。自检有断言。老项目顺手跑 `role scopes --reset` 刷新角色范围 |
+| 升级 `wb.py` 后契约的 Bash 防线失效 | 老项目没有 `.workbench/frozen` 缓存 | 已修：缺失**或为空**时从 `state.json` 现算。老项目顺手跑 `role scopes --reset` 刷新角色范围 |
+| 契约明明锁了，某次工具调用却放行了 | `.workbench/frozen` 被读到中间态（旧版就地截断重写它） | 已修：`write_frozen` 改成原子替换，见 [architecture.md](architecture.md#写入原子性与并发) |
 
-### 冻结机制本身的边界
-
-| 边界 | 说明 |
-| --- | --- |
-| `cp` / `mv` / `install` 未纳入 Bash 写入检测 | 加进去会拦掉大量正常的构建与资源拷贝。靠 `verify` 兜 |
-| basename 匹配偏保守 | 项目里另有同名文件时写它也会被拦。误拦是显式的（模型收到拒绝理由），漏拦是静默的，方向刻意选保守 |
-| 解冻窗口在并行下不隔离 | `.workbench/unlock` 是单文件，两个 subagent 同时申报会互相覆盖。缓解：窗口只对一份契约生效，覆盖的结果是后者生效而非两者都开 |
-| 用户自己能改任何东西 | 有意为之。用户是机制的所有者，不是被约束的对象 |
-
-这些边界的共同点：**守卫防的是模型主动绕过，不是防人。** 兜底始终是 `contract verify` 的哈希校验 —— 它不管改动从哪来。
+冻结机制本身覆盖不到的写入路径（`cp` / `mv` / 外部编辑器 / 用户手改）与那些取舍的理由，见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。共同点：**守卫防的是模型主动绕过，不是防人。** 兜底始终是 `contract verify` 的哈希校验 —— 它不管改动从哪来。
 
 ## 版本策略
 

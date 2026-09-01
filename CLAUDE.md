@@ -57,7 +57,9 @@ python3 .claude/hooks/wb.py init --name <需求名>   # 只在外层
 
 必须调两处,否则会静默出错:
 
-**1. 角色范围按仓库前缀,不是按目录名。**
+**1. 角色范围按仓库前缀，不是按目录名。** `init` 看到 `repos/*` 会自己换成按仓库前缀，并在输出里说明 —— 但它只能按目录名猜（`frontend` / `web` / `client` / `ui` / `www` 归前端，`backend` / `server` / `api` / `service` / `svc` 归后端）。
+
+**猜不出名字的仓库谁都写不了。** 只要有一个仓库被认领，认不出的那些（`shared`、`payments-core`）就落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。`init` 与 `role scopes` 会点名，照它给的命令认领：
 
 ```bash
 python3 .claude/hooks/wb.py config set role_scopes.frontend-developer \
@@ -66,7 +68,11 @@ python3 .claude/hooks/wb.py config set role_scopes.backend-developer \
   '["repos/backend/**","repos/shared/**",".workbench/artifacts/develop/**"]'
 ```
 
-默认范围在跨仓库下会歪成**按语言隔离**:`fnmatch` 的 `*` 跨 `/`,所以 `*.py` 会放行任意仓库里的 `.py`,而 `migrations/**` 匹配不到 `repos/backend/migrations/` —— 后端在自己仓库里写不了迁移,却能写别人仓库的同语言文件。跨仓库时仓库本身就是边界,按前缀写最准。
+`config set` 是**整条覆盖不是追加** —— 漏抄一个前缀，那个仓库就换成没人认领，`role scopes` 下一次会点它的名。
+
+只有**一个仓库都认不出**时（全叫 `foo` / `bar`）才退回「任意仓库的对应位置」，那时才是跨仓库放行。
+
+未经检测的默认范围在跨仓库下会歪成**按语言隔离**：`fnmatch` 的 `*` 跨 `/`，所以 `*.py` 会放行任意仓库里的 `.py`，而 `migrations/**` 匹配不到 `repos/backend/migrations/` —— 后端在自己仓库里写不了迁移，却能写别人仓库的同语言文件。跨仓库时仓库本身就是边界，按前缀写最准。
 
 **2. 门禁命令用子 shell 分别 cd。** `gate_commands` 的 cwd 是外层根,那里没有 `package.json`。
 
@@ -75,7 +81,7 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
   '(cd repos/frontend && npm test) && (cd repos/backend && pytest)'
 ```
 
-子 shell 括号让 `cd` 不外溢。`&&` 串联时先失败的那个决定退出码,门禁说明只带最后一行输出,所以哪个仓库红了要自己看完整输出。
+子 shell 括号让 `cd` 不外溢。`&&` 串联时先失败的那个决定退出码，哪个仓库红了看 `.workbench/gate-test.log` 的完整输出。
 
 契约放哪里两种都行:放 `repos/backend/openapi.yaml` 会进那个仓库的 git(适合契约由该服务负责发布);放外层 `.workbench/contracts/` 则不进任何仓库(适合契约独立于双方)。两种都受同一套冻结保护 —— 实测跨仓库路径的契约,前端、后端 owner、主线程的 Write/Edit/`sed -i`/先 `cd` 再改全部拦住。
 
@@ -94,7 +100,7 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
 | clarify | `pm` | `.workbench/artifacts/clarify/requirements.md`（含「验收标准」「非目标」） |
 | analyze | `analyst` | `analyze/current-state.md`（含「风险」） |
 | design | `architect` | `design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
-| develop | `frontend-developer` `backend-developer` | 代码 + 最小可运行校验 |
+| develop | `frontend-developer` `backend-developer` | 代码 + `develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
 | verify | `qa` | `verify/test-report.md` |
 | retro | `reviewer` | `retro/retro.md`（含「改进项」） |
 
@@ -103,7 +109,7 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
 ## 硬规则
 
 1. **状态只能经 wb.py 改。** 直接写 `.workbench/state.json`、`role`、`frozen`、`unlock` 会被守卫拦，Write/Edit 与 shell 重定向、`sed -i` 都拦。门禁与进度必须不可绕过，否则记录没有意义。
-2. **契约与方案文档锁定后就是只读的。** 包括对 owner 和主线程。要改先申报：`contract unlock --name <名> --reason '<为什么>'`，改完 `contract bump`。理由必须在改之前写 —— 事后补的理由都是给已发生的事找解释。`design.md` 由 architect 登记为 `design-doc` 契约，走同一套。
+2. **契约、方案文档与过了门禁的阶段产物锁定后就是只读的。** 包括对 owner 和主线程。要改先申报：`contract unlock --name <名> --reason '<为什么>'`，改完 `contract bump`。理由必须在改之前写 —— 事后补的理由都是给已发生的事找解释。`design.md` 由 architect 登记为 `design-doc`；`requirements.md` / `current-state.md` / `test-report.md` / `retro.md` 由 `phase advance` 在门禁**真**通过时自动登记为 `artifact-<名>`（强推不冻结）。回头改上游需求走 `--name artifact-requirements`，改文件那一步派 `pm`。
 3. **门禁不通过不推进。** 需要 `phase advance --force` 时先问用户。唯一例外：FAIL 项本身不适用（纯文档改动没有构建命令）。跳过失败的测试不算例外。
 4. **子 agent 说做完了不等于做完了。** 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍，再 `task done`。
 5. **develop 阶段并行派发。** `next --all` 拿一批，放在同一条消息里多个 Agent 调用同时发出。串行派发会浪费掉契约先行带来的全部收益。
@@ -119,26 +125,33 @@ python3 .claude/hooks/wb.py config set gate_commands.lint 'npm run lint'
 python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
 
+失败时完整输出落在 `.workbench/gate-<名>.log`，门禁说明里只带最后 5 行 —— 别为了看失败原因把命令再跑一遍。单条命令超过 `gate_timeout`（默认 1800 秒）记 FAIL，不是崩溃。
+
 ## 权限守卫
 
 `PreToolUse` hook 拦四类：
 
 - 写出项目根之外
-- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / 所有已锁定的契约与 `design.md`）—— Write/Edit 与 Bash 的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
+- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash 的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
 - 角色越权写（`pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`）—— 产物目录按阶段隔离
 - 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）
 
-被拦时不要绕（不要改 settings、不要换等价命令、不要用 Bash 代替 Write —— 那条也拦）。要么走 `contract unlock` 申报，要么交给有权限的角色，要么说明理由让用户决定。
+被拦时不要绕（不要改 settings、不要换等价命令）。写冻结文件时 Bash 的等价写法（`>` / `tee` / `sed -i`）也拦，换写法没用。要么走 `contract unlock` 申报，要么交给有权限的角色，要么说明理由让用户决定。拒绝信息里已经按 owner 分岔给了该跑的命令与契约实名，照它说的做。
 
 ```
 python3 .claude/hooks/wb.py role scopes      # 当前范围 + 冻结清单 + 解冻窗口
-python3 .claude/hooks/wb.py role scopes --reset   # 老项目刷成当前默认值
+python3 .claude/hooks/wb.py role scopes --reset   # 老项目刷成当前默认值（跨仓库布局会重新按仓库前缀算）
 python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/**","migrations/**",".workbench/artifacts/develop/**"]'
 ```
 
 ## 已知边界
 
-- 角色锁与解冻窗口都是单个文件，并行 subagent 会互相覆盖。hook 拿不到「当前是哪个 subagent」，这是上游限制。并行派发时依赖 subagent 自己遵守写入范围，守卫只兜底最后一次 set 的角色。
-- 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。
-- Bash 冻结检查不覆盖 `cp` / `mv` / 外部编辑器 / `git checkout`（误报成本高于收益）。这类改动靠 `contract verify` 的哈希校验在门禁时抓出。
+- 角色按 hook 载荷里的 `agent_type` 判定，并行 subagent 各自生效，与谁最后 `role set` 过无关。`.workbench/role` 只兜底主线程与非角色 agent（`general-purpose` / `Explore` 等）—— 开发活派给角色 agent，别派给 `general-purpose`，那时范围只能按最后一次 `role set` 兜底。
+- 解冻窗口是 `.workbench/unlock/` 目录，一份契约一个文件，多份可以同时开着。同一份契约上不区分申报者 —— 两个 agent 同时改一份契约本身就该避免。`bump` / `lock` 只关自己那一份；`SubagentStop` 关全部但只在没有任务处于 doing 时才关，否则先结束的那个会收掉仍在跑的兄弟的窗口。**所以每个任务收尾都要 `task done`。**
+- 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
+- 改状态的命令走 `.workbench/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
+- 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式，否则 `*.md` / `*.json` 会跨进产物与契约目录，把阶段隔离绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
+- Bash 冻结检查只按相对路径匹配命令文本，加一条「`cd`/`pushd` 切进 `.workbench` 后写」的兜底。不覆盖 `cp` / `mv` / 外部编辑器 / `git checkout`（误报成本高于收益）。这类改动靠 `contract verify` 的哈希校验在门禁时抓出。角色越权与越根这两类，Bash 只拦重定向到绝对路径 —— 从任意 shell 命令里可靠抽出全部写入目标做不到，做半个检查比不做更坏。所以别把「Bash 没被拦」当成「这个写入是允许的」。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
+
+设计取舍与每条边界的理由在 `docs/`，索引见 [docs/README.md](docs/README.md)。

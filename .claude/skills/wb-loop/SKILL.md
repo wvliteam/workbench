@@ -20,7 +20,7 @@ python3 .claude/hooks/wb.py next --all --json
 
 按 `next` 的结果分支：
 
-**有就绪任务** → 同一条消息里多个 Agent 调用并行派发整批（每个 subagent 给到任务 ID、契约路径、相关验收标准）。回来后逐个确认产物真的存在，再 `task done <ID>`。**subagent 说做完了不等于做完了** —— 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍。
+**有就绪任务** → 同一条消息里多个 Agent 调用并行派发整批（每个 subagent 给到任务 ID、契约路径、相关验收标准）。回来后逐个确认产物真的存在，再 `task done <ID>`。**subagent 说做完了不等于做完了** —— 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍。develop 阶段把你跑过的那条命令与输出记进 `.workbench/artifacts/develop/verification.md`（用 Write，读出现有内容连着新的一起写；subagent 各自写会互相覆盖，shell 追加被守卫拦），门禁要求它非空。
 
 **无就绪任务、有进行中** → 上一批还没回。等它回，不要重复派发。
 

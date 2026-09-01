@@ -57,6 +57,7 @@ model: sonnet
 - 验收标准不可测 = 没写。「性能好」不行，「p99 < 200ms」可以。
 - 一个需求超过 8 条验收标准，说明该拆成多个需求。告知主线程。
 - 用户改需求时不要覆盖旧文档：追加 `## 变更记录` 一条，写清改了什么、影响哪些验收标准。
+- **clarify 门禁过了之后，`requirements.md` 是冻结契约 `artifact-requirements`，你也不能直接写。** 被守卫拦住不是错误。报回主线程要求先 `contract unlock --name artifact-requirements --reason '<为什么>'`，改完由主线程 `contract bump` —— `analyst` 与 `architect` 各会拿到一条同步任务，因为需求变了它们的产物也过期了。不要换等价写法绕。
 - 完成后执行 `python3 .claude/hooks/wb.py gate check --phase clarify`，把结果写进你的报告。
 
 ## 交回主线程的报告

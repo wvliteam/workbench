@@ -14,7 +14,7 @@ python3 .claude/hooks/wb.py role set backend-developer
 python3 .claude/hooks/wb.py task start <任务ID>
 ```
 
-写入范围：`server/ backend/ api/ src/ migrations/`、配置文件与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。
+写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` 只对仓库内的文件生效，`.workbench/` 下的产物与契约仍然碰不到。
 
 ## 干活顺序
 
@@ -59,4 +59,6 @@ python3 .claude/hooks/wb.py task done <ID> --note "接口 + 迁移 + 契约测�
 
 ## 交回主线程的报告
 
-改了哪些文件、契约是否完全对齐、留下的校验怎么跑、跑的结果、遗留问题。
+改了哪些文件、契约是否完全对齐、遗留问题，以及**校验命令原文与它的完整输出** —— 写成能被原样复制执行的形式（`pytest tests/test_users.py -q`），不要只说「测试通过了」。
+
+编排者会自己跑一遍那条命令，再把它落盘到 `.workbench/artifacts/develop/verification.md`（develop 门禁要求这个文件非空）。**不要自己写那个文件** —— 它是并行的两个开发角色共用的一份，Write 会覆盖掉对方刚写的内容，shell 追加（`>> .workbench/...`）则被守卫拦。给出命令与输出就够了。

@@ -34,122 +34,108 @@ if target != rootr and rootr not in target.parents:
 
 ```python
 rel = os.path.relpath(target, rootr).replace(os.sep, "/")
-if rel in read_frozen(rootr) and rel != unlocked_path(rootr):
-    hook_deny(...)
+frozen = read_frozen(rootr)
+if rel in frozen or any(rel.startswith(f + "/") for f in frozen):   # unlock/ 是目录
+    if rel not in unlocked_paths(rootr):
+        hook_deny(...)
 ```
 
-冻结清单 = 四个状态文件 + **所有已锁定的契约**：
+冻结清单 = 五个状态文件（`FROZEN_ALWAYS`）+ **所有已锁定的契约**。状态文件不可写是整套机制的地基：
 
-```python
-FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen"]
+- 能写 `state.json` → 能把 `gates` 全标成 `passed: true`，或改契约的 `sha` → 门禁与契约冻结一起作废。
+- 能写 `role` → 能给自己换个权限大的角色 → 角色隔离作废。
+- 能写 `frozen` → 能把自己想改的文件从清单里删掉 → 冻结作废。
+- 能追加 `artifacts.jsonl` → 能把别人的改动记到自己名下 → 产物归属作废。
+- 能写 `unlock/<契约名>` → 能给自己签发申报 → 申报制度作废。所以守卫连冻结路径的**子路径**一起拦。
 
-def frozen_paths(st):
-    out = [f".workbench/{n}" for n in FROZEN_ALWAYS]
-    out += [c["path"] for c in st.get("contracts", [])]
-    return out
-```
+`wb.py` 自己写它们不受影响，守卫只拦工具调用。
 
-状态文件不可写是整套机制的地基：
+契约不可写是「技术方案与接口定义不能被随意修改」的实现方式，**对 owner 和主线程同样生效**，唯一写入路径是先申报解冻（[contracts.md](contracts.md#锁定即只读)）。清单里除了接口契约与 `design.md`，还有各阶段过门禁后自动登记的产物，所以「回头改上游需求」也是一次要写理由的申报。
 
-- 能直接写 `state.json` → 能把 `gates` 全标成 `passed: true` → 门禁作废。
-- 能直接写 `state.json` → 能改契约的 `sha` → 契约冻结作废。
-- 能直接写 `role` → 能给自己换个权限大的角色 → 角色隔离作废。
-- 能直接写 `frozen` → 能把自己想改的文件从清单里删掉 → 冻结作废。
-
-契约不可写是「技术方案与接口定义不能被随意修改」的实现方式，详见 [contracts.md](contracts.md#锁定即只读)。**注意这条对 owner 和主线程同样生效** —— 没有豁免角色，唯一的写入路径是先申报解冻。
-
-`save_state()` 每次都把清单落成 `.workbench/frozen`（纯文本一行一条），让 hook 不必解析整个 `state.json`。这个文件只是缓存 —— 缺失时 `read_frozen()` 从 `state.json` 现算：
-
-```python
-def read_frozen(root):
-    f = wb_dir(root) / "frozen"
-    if f.is_file():
-        return [l.strip() for l in f.read_text().splitlines() if l.strip()]
-    try:
-        st = json.loads(state_path(root).read_text())
-    except (OSError, json.JSONDecodeError):
-        st = {}
-    return frozen_paths(st)
-```
-
-**不做这个兜底会造成升级路径上的静默失效**：升级 `wb.py` 之前建的项目没有 `frozen` 文件，退化成「只保护状态文件」后契约的整条防线消失，而且不报错。自检里有一条专门断言这个（删掉缓存后契约仍受保护）。
+`save_state()` 每次把清单落成 `.workbench/frozen`（纯文本一行一条），让 hook 不必解析整个 `state.json`。这个文件只是缓存，缺失**或为空**时 `read_frozen()` 从 `state.json` 现算。缺失那一半是升级路径：升级前建的项目没有 `frozen`，退化成「只保护状态文件」后契约的整条防线消失，且不报错。为空那一半是并发路径 —— 旧版就地重写这个文件，`truncate` 与 `write` 之间那一瞬清单是空的，而守卫只判路径在不在清单里，那一刻五条防线同时放行（含改 `role` 提权）。两半都有断言（删掉缓存后契约仍受保护；清空缓存后 Write 与 Bash 两条路仍拒绝）。清单本身现在原子替换，为空这条是纵深防御，见 [architecture.md](architecture.md#写入原子性与并发)。
 
 ### 第三层：解冻窗口
 
-`.workbench/unlock` 存 `<契约名>\n<理由>`。第二层命中后放行的唯一条件：
+`.workbench/unlock/` 是目录，一份契约一个文件：文件名是契约名，内容是申报理由。第二层命中后放行的唯一条件：
 
 ```python
-def unlocked_path(root):
-    name, _ = read_unlock(root)
-    if not name or not state_path(root).is_file():
-        return ""
+def unlocked_paths(root):
+    names = read_unlocks(root)            # {契约名: 理由}，无窗口是 {}
     ...
-    c = find_contract(st, name)
-    return c["path"] if c else ""
+    return {c["path"] for c in st.get("contracts", []) if c["name"] in names}
 ```
 
 窗口的三个性质，每一个都是刻意的：
 
 | 性质 | 为什么 |
 | --- | --- |
-| 只对一份契约生效 | 解冻 `user-api` 不会顺带放开 `design-doc`。范围最小 |
-| 状态文件永不可解冻 | `unlocked_path()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那四个查不到 |
+| 一份窗口只对一份契约生效，但多份可以并存 | 解冻 `user-api` 不会顺带放开 `design-doc`，范围最小；而 `bump` 一份产物契约会给每个消费方各建同步任务，它们并行申报是常态，不是边界情况。分片键是契约不是 agent —— 按 agent 分片会把「两个 agent 同时改一份契约」变成合法操作，正好放开唯一真该拦的那种（[architecture.md](architecture.md#解冻窗口按契约分片曾是单文件记录一次纠错)） |
+| 状态文件永不可解冻 | `unlocked_paths()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那五个查不到 |
 | 理由必填，且先于改动 | 事后补的理由都是给已发生的事找解释。`contract unlock` 不给 `--reason` 直接拒绝 |
 
-窗口在 `contract bump`、`contract lock`、`SubagentStop` 时关闭。三个关闭点里 `SubagentStop` 最重要 —— 否则一个 subagent 申报的窗口会敞着让下一个用。
+`contract bump` / `contract lock` 只关自己那一份，不会收掉兄弟 agent 的窗口。`SubagentStop` 关全部，但只在没有任务处于 doing 时才关，否则先结束的 subagent 会把仍在跑的兄弟的窗口一起收掉。串行下这条兜住「一个 subagent 申报的窗口敞着让下一个用」；并行下要靠 `bump` / `lock` 自己关。
 
 ### 第四层：角色写入范围
 
 ```python
-role = (wb_dir(root) / "role").read_text().strip()
+role = current_role(rootr, data)          # 载荷 agent_type 优先，取不到才读 .workbench/role
 globs = st["role_scopes"].get(role)
 rel = os.path.relpath(target, rootr).replace(os.sep, "/")
+if rel.startswith(".workbench/"):         # 裸扩展名模式不得跨进状态目录
+    globs = [g for g in globs if g.startswith(".workbench/")]
 if not any(fnmatch.fnmatch(rel, g) for g in globs):
     hook_deny(f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。…")
 ```
 
-`role` 文件不存在时**不做角色限制** —— 那是主线程在操作，前三层仍生效。这让编排者能自由整理项目，同时让每个 subagent 受自己角色的约束。
+**角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-默认范围**按阶段隔离产物目录**，不是给所有角色一个 `.workbench/artifacts/**`：
+**`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。** 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
-| 角色 | 可写 | 用意 |
-| --- | --- | --- |
-| `pm` | `artifacts/clarify/**` | 澄清需求的人不改代码 |
-| `analyst` | `artifacts/analyze/**` | 分析阶段动手改代码是最常见的流程破坏 |
-| `architect` | `artifacts/design/**` `contracts/**` `docs/**` | 定契约与方案，不写实现 |
-| `frontend-developer` | `artifacts/develop/**` `web/ frontend/ app/ src/ public/` `*.ts *.tsx *.css *.json` | 碰不到 `migrations/` |
-| `backend-developer` | `artifacts/develop/**` `server/ backend/ api/ src/ migrations/` `*.py *.go *.java *.json` | 碰不到 `web/` |
-| `qa` | `artifacts/verify/**` `tests/ test/ e2e/ spec/` | 只写测试，不改产品代码 —— 否则缺陷统计失真 |
-| `reviewer` | `artifacts/retro/**` | 评审者改代码就没人评审那次改动了 |
+第二层补不上这个缺口：它只认**已锁定**的契约，而强推过的阶段产物不冻结（那个阶段并没真做完）、还没 `lock` 的契约也不在清单里。所以「开发角色的写入范围不含 `.workbench/contracts/`」这条断言在收窄之前对 `*.json` 并不成立 —— 收窄不只是为新加的 `*.md` 铺路，它同时补掉了 `*.json` 一直存在的同类缺口。收窄只影响裸扩展名，各角色显式写出的 `.workbench/artifacts/<阶段>/**` 照常放行，两个方向都有断言。
 
-**按阶段隔离是第二层之外的纵深。** 契约冻结挡的是「已定稿的东西被改」，阶段隔离挡的是「下游角色去改上游产物」—— 包括还没登记为契约的产物（`requirements.md`、`current-state.md`）。两者独立：`qa` 改 `design.md` 会被两层各自拦一次。
+角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
-升级前建的项目 `role_scopes` 里存的是老的宽范围。刷成当前默认值：
+各角色的默认范围见 [roles.md](roles.md#角色矩阵)。这里只记它的形状：**产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这是第二层之外的纵深 —— 契约冻结挡「已定稿的东西被改」，阶段隔离挡「下游角色去改上游产物」，包括还没定稿的当前阶段产物。两者独立互补：`qa` 改 `design.md` 会被两层各自拦一次；阶段隔离只在守卫能判出角色时生效，冻结不依赖角色。
+
+升级前建的项目 `role_scopes` 里存的是老的宽范围：
 
 ```bash
 wb.py role scopes            # 看当前配置 + 冻结清单 + 解冻窗口
-wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES
+wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES（会覆盖定制过的范围，先存一份）
+                             # 跨仓库布局下改按仓库前缀算 —— 只写裸默认值会把隔离改坏
 wb.py config set role_scopes.backend-developer \
     '["server/**","migrations/**","internal/**",".workbench/artifacts/develop/**"]'
 ```
 
-`--reset` 会覆盖定制过的范围，跑之前先 `role scopes` 存一份。
+**跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
 
 ### 拒绝信息要可操作
 
 ```
-[工作台权限守卫] 拒绝：角色 frontend-developer 无权写 migrations/001.sql。
-允许范围：.workbench/artifacts/**, web/**, frontend/**, app/**, src/**, public/**, *.json, *.ts, *.tsx, *.css。
-确需跨界请交给对应角色，或 wb.py config set role_scopes.frontend-developer '<JSON 数组>'
+[工作台权限守卫] 拒绝：角色 qa 无权写 src/app.ts。
+允许范围：.workbench/artifacts/verify/**, tests/**, test/**, e2e/**, spec/**, *.config.ts, *.config.js, *.config.mjs, pytest.ini, tox.ini。
+确需跨界请交给对应角色，或 wb.py config set role_scopes.qa '<JSON 数组>'
 ```
 
 三段：拒绝了什么、允许什么、怎么正确地做。只说「拒绝」会让 subagent 反复试同一件事。
+
+「允许什么」那段打的是**对这个路径实际生效的**模式集合，所以撞上 `.workbench/` 收窄时它只列 `.workbench/artifacts/develop/**` 一条，而不是把二十个模式全倒出来让读的人自己排除。
+
+**冻结文件的第三段按 owner 分岔。** 契约名从 `state.json` 反查填实，不给 `<契约名>` 占位符 —— 只有 `pm` 的定义里硬编码了 `artifact-requirements`，其余角色撞上自己那份阶段产物时只能猜，而「不许换等价写法绕」这条要求拒绝信息把该跑的命令给全。分岔的三种：
+
+| 撞上的人 | 给什么 | 为什么不给另一种 |
+| --- | --- | --- |
+| 这份契约的 owner，或主线程（载荷无 `agent_type`） | 完整的 `contract unlock --name <实名> --reason` 与 `contract bump` | —— |
+| 非 owner 的角色 | owner 是谁 + 报回编排者 + `task block <ID>` | 教它自己申报是错的：`bump` 会给每个消费方建返工任务，那是编排者的调度决定；而 `SubagentStop` 会在它结束时关掉悬挂窗口，留下一个改过但没定版的文件，下次 `contract verify` 报漂移 |
+| `FROZEN_ALWAYS` 里那五个（不是契约） | 「只能用 wb.py 子命令改」 | 给 `contract unlock` 会让读的人去申报一个不存在的契约名 |
+
+这段判断放在守卫里而不是抄进三个 agent 定义：一处代码覆盖七个角色、主线程，以及以后新增的任何契约。
 
 **被拦时不许绕。** agent 定义与 `CLAUDE.md` 里都写明：不要改 `settings.json`、不要换等价命令、不要用 Bash 的 `cat >` 代替 Write。要么交给有权限的角色，要么说明理由让用户决定。
 
 ## Bash 分支：绕过检查
 
-前四层挂在 Write / Edit / NotebookEdit / MultiEdit 上。Bash 是**另一条完全独立的写入路径**，早期版本只查危险命令、不查写入目标，结果是四层拦截可以被一行 shell 全部绕过：
+前四层挂在 Write / Edit / NotebookEdit / MultiEdit 上。Bash 是**另一条完全独立的写入路径**，早期版本只查危险命令、不查写入目标，结果是四层拦截可以被一行 shell 全部绕过（实测这三条当时全部 `exit=0`）：
 
 ```bash
 echo '{}' > .workbench/state.json                   # 门禁作废
@@ -157,7 +143,7 @@ echo architect > .workbench/role                    # 提权
 sed -i 's/int/str/' .workbench/contracts/api.json   # 契约漂移，且无人申报
 ```
 
-实测这三条当时全部 `exit=0`。所以 Bash 分支现在也查冻结清单：
+所以 Bash 分支现在也查冻结清单：
 
 ```python
 BASH_WRITE = re.compile(
@@ -166,74 +152,35 @@ BASH_WRITE = re.compile(
 )
 
 if BASH_WRITE.search(cmd):
-    hit = frozen_hit(root, cmd)
-    if hit and hit != unlocked_path(root):
+    unlocked = unlocked_paths(root)
+    hits = [h for h in frozen_hits(root, cmd) if h not in unlocked]
+    if hits:
         hook_deny(...)
 ```
 
 两段式：**先判命令有没有写入意图，再判它提到的路径在不在冻结清单里。** 只判其一都不行 —— 只判写入意图会拦掉 `echo hi > /tmp/x`，只判路径会拦掉 `cat .workbench/state.json`。
 
-`frozen_hit()` 同时匹配相对路径与 basename：
+`frozen_hits()` 返回命令文本里提到的**全部**冻结相对路径，每一个都要落在解冻窗口里才放行。只比对第一个命中会开一个静默的洞：`sed -i s/a/b/ a.json b.json` 里若 `a.json` 在窗口内，`b.json` 就被放过去了。
 
-```python
-def frozen_hit(root, cmd):
-    for rel in read_frozen(root):
-        if rel in cmd or os.path.basename(rel) in cmd:
-            return rel
-    return ""
-```
+先切目录再改（`cd .workbench/contracts && sed -i ... user-api.json`）靠一条兜底覆盖：命中 `BASH_WRITE`、没提到任何完整冻结路径、**且命令里有 `cd`/`pushd` 切进某个 `.workbench` 路径**时拒绝。hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），只能这么兜。
 
-basename 那半边是为了拦 `cd .workbench/contracts && sed -i ... user-api.json` 这类先切目录的写法 —— hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），只能按文件名匹配。
+**这条的触发条件从「命令里出现 `.workbench`」收窄到「切进 `.workbench`」，是修两处误拦。** 宽版本会拦下 `echo '.workbench/' >> .git/info/exclude`（多仓库布局 A 的第二步，`.workbench` 是被写的**内容**不是写入目标）与 architect 用 heredoc 新建一份还没登记的契约文件（`contract add` 要求文件已存在，所以「先写文件」这一步必须走得通，Write 工具那条路本来就通）。两个都是文档写明的正常操作，撞上「被拦时不许绕、不许换等价写法」那条约定后没有出路 —— 而 `cd` 是这类漏检的**唯一**成因：不切目录时完整相对路径就在命令文本里，`frozen_hits()` 直接抓到。
 
-**代价是误报方向偏保守**：项目里另有一个同名文件时，写它也会被拦。这个方向是刻意选的 —— 漏拦是静默的（契约被改了没人知道），误拦是显式的（模型收到拒绝信息，可以改用 Write 或换路径）。契约文件名（`user-api.yaml`、`design.md`）在项目里重名的概率也低。
+早期版本还按 basename 匹配（`os.path.basename(rel) in cmd`），已删除。不是「误报方向偏保守」这条原则不成立，而是这几个词的误报率高到推翻了原则本身：`role` / `state.json` / `unlock` / `frozen` 在业务代码里太常见 —— `echo 'ALTER TABLE users ADD COLUMN role text' >> migrations/002.sql`、`echo '{}' > web/state.json` 全被拦。而且拒绝理由说的是「契约改动走 unlock 申报」，与真实原因无关：**误拦要算「显式」，前提是错误信息指向真实原因。** 兜底那条把误报面收进「切进 `.workbench/` 的写入型命令」，理由也能说准。
 
 `wb.py` 自身不会被这条挡住：它的命令行里不出现 `>`、`tee`、`sed -i` 之类。`python3 -c` 在 `BASH_WRITE` 里但 `python3 .claude/hooks/wb.py` 不是 `-c`。
 
-### 这条挡不住什么
-
-| 绕法 | 为什么没纳入 |
-| --- | --- |
-| `cp other.json .workbench/contracts/api.json` | `cp` / `mv` / `install` 未纳入 `BASH_WRITE`。加进去会拦掉大量正常的构建、拷贝资源操作，误报成本高于收益 |
-| 编译型工具、`git checkout`、外部编辑器改文件 | 不经过 hook。**这是 `contract verify` 必须留着的原因** —— 守卫防住的是模型主动绕过，哈希校验兜住剩下的一切 |
-| 用户自己动手改 | 有意为之。用户是这套机制的所有者，不是被约束的对象 |
-
-守卫与哈希校验是两道独立的东西，不是重复：守卫在**改之前**拦（能给出可操作的拒绝理由），校验在**门禁时**发现（能兜住守卫覆盖不到的路径）。
+这条挡不住 `cp` / `mv` / 外部编辑器 / `git checkout` / 用户手改，那是刻意的取舍，兜底是 `contract verify` 的哈希校验 —— 见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。
 
 ## 危险命令分级
 
-Bash 调用除了上面的冻结检查，还查危险命令文本。分两级。
+Bash 调用除了冻结检查，还按命令文本查危险命令，两级：`DENY_BASH` 退出码 2（删根删家目录、`rm -r ../../`、force push、`DROP`/`TRUNCATE`、`curl|sh`、直写块设备、`mkfs`、`chmod 777 /`、fork bomb、`dd of=/dev/`），`WARN_BASH` 放行并把提示写到 stdout（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish` / `twine upload`）。完整正则读 `wb.py` 里那两张表，这里不抄。
 
-### DENY —— 不可逆或灾难性，退出码 2
+分级的依据：不可逆或灾难性的进 DENY，开发中确有正当用途的进 WARN —— 后四条拒绝会很烦人，而提示出现在 transcript 里模型能看见。
 
-| 模式 | 拦的是 |
-| --- | --- |
-| `rm` 目标为 `/` `~` `/*` `$HOME` | 删根、删家目录 |
-| `rm -r` 目标含 `../../` | 递归越出项目根两级以上 |
-| `git push --force` / `-f` | 覆盖远端历史 |
-| `DROP` / `TRUNCATE TABLE\|DATABASE\|SCHEMA` | 破坏性 SQL DDL |
-| `curl`/`wget` 管道到 `sh`/`bash` | 执行未审查的远端脚本 |
-| `> /dev/sd*` `nvme*` `disk*` `hd*` | 直写块设备 |
-| `mkfs*` | 格式化文件系统 |
-| `chmod 777 /` | 对根目录放开全部权限 |
-| `:(){ :\|:& };:` | fork bomb |
-| `dd ... of=/dev/` | dd 写入设备 |
+**误杀控制**：DENY 的模式都要求具体的危险目标，不笼统匹配命令名。`rm -rf build/`、`rm -rf node_modules` 正常通过，自检有专门断言。误杀比漏杀更影响可用性 —— 它会让 agent 开始想办法绕过守卫。
 
-正则匹配，`re.IGNORECASE`。
-
-**误杀控制**：模式都要求具体的危险目标，而不是笼统匹配命令名。`rm -rf build/`、`rm -rf node_modules` 正常通过 —— 自检里有一条专门断言这个（`assert guard(rm -rf build/) == 0, "正常 rm 被误杀"`）。误杀比漏杀更影响可用性，因为它会让 agent 开始想办法绕过守卫。
-
-### WARN —— 有正当用途，放行并提示
-
-| 模式 | 提示 |
-| --- | --- |
-| `git reset --hard` | 会丢弃未提交改动 |
-| `git clean -fd` | 会删除未跟踪文件 |
-| `git checkout --` | 会覆盖工作区文件 |
-| `npm publish` / `twine upload` | 对外发布动作，确认版本号 |
-
-这四条开发中确有正当用途，拒绝会很烦人。提示写到 stdout（退出码 0），出现在 transcript 里让模型看见。
-
-**为什么不做 ask 级别**：`PreToolUse` 的 JSON 输出支持 `permissionDecision: "ask"`，但退出码 2 是所有 Claude Code 版本都支持的机制。选退出码换取兼容性，代价是只能二分 deny/allow。要三态就改用 JSON 输出协议。
+**为什么不做 ask 级别**：`PreToolUse` 的 JSON 输出支持 `permissionDecision: "ask"`，但退出码 2 是所有 Claude Code 版本都支持的机制。选退出码换兼容性，代价是只能二分 deny/allow。要三态就改用 JSON 输出协议。
 
 ## hook 载荷与失败语义
 
@@ -243,9 +190,11 @@ Bash 调用除了上面的冻结检查，还查危险命令文本。分两级。
 
 ```jsonc
 {
-  "session_id": "...",
+  "session_id": "...",               // 主线程与 subagent 共享，不能用来区分
   "transcript_path": "...",
-  "cwd": "/home/work/workbench",   // 用于定位项目根
+  "cwd": "/home/work/workbench",     // 用于定位项目根
+  "agent_type": "backend-developer",  // 只有 subagent 带；值 = agent 定义的 name
+  "agent_id": "a...",                // 同上，只有 subagent 带
   "tool_name": "Write",
   "tool_input": { "file_path": "src/app.ts", "content": "..." }
 }
@@ -253,9 +202,7 @@ Bash 调用除了上面的冻结检查，还查危险命令文本。分两级。
 
 路径字段按工具不同取 `file_path`（Write/Edit/MultiEdit）或 `notebook_path`（NotebookEdit）；Bash 取 `tool_input.command`。取不到就放行 —— 未知形态的输入不该被守卫瞎猜。
 
-**载荷里没有 subagent 标识。** 主线程与 subagent 在所有字段上无法区分。这是角色锁在并行下不隔离的根因，详见 [architecture.md](architecture.md#角色锁与解冻窗口在并行下不隔离)。
-
-同样的原因，**解冻窗口在并行下也不隔离** —— `.workbench/unlock` 是单个文件，两个 subagent 同时申报会互相覆盖。缓解：窗口只对一份契约生效（互相覆盖的结果是后者生效、前者被拒，不是两者都放开），且 `SubagentStop` 会清窗口。要真隔离得等上游在载荷里暴露 subagent 身份。
+**载荷里有 subagent 标识，`agent_type` 就是角色名。** 实测（Claude Code 2.1.252）subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 都带 `agent_type` 与 `agent_id`，主线程两个都没有；`session_id` 反而是共享的。文档早期版本写「主线程与 subagent 在所有字段上无法区分」，那是错的，也是角色锁一度被做成单文件的由来。老版本 Claude Code 不带这两个字段时退回读 `.workbench/role`，也就是退回旧行为，不需要版本判断。
 
 ### 失败语义
 
@@ -275,13 +222,15 @@ hook 自身出 bug 时**放行**（退出码 0）而不是拒绝。理由：一�
 
 | 事件 | 匹配 | 作用 |
 | --- | --- | --- |
-| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit | 把改动的文件路径追加到 `current_task` 的 `artifacts` 列表，复盘时可追溯 |
+| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit | 把改动的文件路径与本次调用载荷里的角色追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
 | `SessionStart` | — | 输出当前阶段、任务进度、阻塞项、契约漂移、就绪任务，注入上下文 |
-| `SubagentStop` | — | 清除 `role` 与 `unlock` 文件，避免下一个 subagent 继承上一个的写入范围或解冻窗口；记审计日志 |
+| `SubagentStop` | — | 无任务处于 doing 时清除 `role` 与 `unlock`；有 doing 任务则保留并打印原因；记审计日志 |
 
-`SubagentStop` 清 `role` 是必需的：不清的话，`pm` 跑完后主线程的写入会继续受 `pm` 的范围限制（只能写 `artifacts/clarify/`），整个会话瘫掉。
+`PostToolUse` **绝不能读改写 `state.json`**。并行 develop 下每个 subagent 的每次文件写入都触发它，旧快照回写会静默吞掉期间落盘的 `task done`，连带把 `save_state` 顺手重写的冻结清单退回旧版 —— 于是「门禁与进度不可绕过」在并发下失效，不需要谁去绕。状态锁把这条路封在了 CLI 那一侧，但对 hook 不是出路：`load_state(lock=True)` 会把每次工具调用都串行化到状态锁上，延迟直接叠加到并行写入的每一笔。纯 append 无竞态，也把全量 JSON 读写从每次工具调用的热路径上挪走了。每行的角色取自本次调用的载荷；归属按「角色 + 任务 `started` 时间」在归并时认领，重复归并幂等。
 
-清 `unlock` 同样必需，理由相反 —— 不清的话窗口会一直敞着，下一个 subagent 白捡一个可写的契约。清窗口时会打一行提示（哪份契约的窗口被关了），让忘了 bump 的情况可见。
+`SubagentStop` 清 `role` 是必需的：不清的话，`pm` 跑完后主线程的写入会继续受 `pm` 的范围限制（只能写 `artifacts/clarify/`），整个会话瘫掉。清 `unlock` 同样必需，理由相反 —— 不清的话窗口一直敞着，下一个 subagent 白捡一个可写的契约。清窗口时打一行提示（哪份契约的窗口被关了），让忘了 bump 的情况可见。
+
+但它只在无 doing 任务时清，主要为的是解冻窗口 —— 并行下先结束的那个会把兄弟正在用的窗口一起收掉。角色这一半的风险随 `current_role()` 降了一级：角色 subagent 按自己的 `agent_type` 判定，兄弟的 `role` 文件被清也不会让它变成无限制；仍受影响的是主线程与非角色 agent。代价不变：串行下忘了 `task done`，角色锁会留到下一次 `role set`。
 
 三者都不阻断流程 —— `PostToolUse` 与 `SubagentStop` 只写状态，`SessionStart` 只输出文本。
 
@@ -302,85 +251,19 @@ hook 是主要机制，`settings.json` 做粗粒度兜底：
 
 `Read` 类的拦截**只能在这一层做** —— hook 只挂在 Write/Edit/Bash 上，不挂 Read（每次读文件都跑一个 Python 进程太贵）。密钥文件靠 `permissions.deny` 挡。
 
-`Write(./.workbench/state.json)` 与 hook 的第二层重复，是故意的：`permissions.deny` 是静态规则，不依赖 hook 进程正常工作。hook 因为自身 bug 放行时（见上面的失败语义），这一层还在。
+`Write(./.workbench/state.json)` 与 hook 第二层重复是故意的：`permissions.deny` 是静态规则，不依赖 hook 进程正常工作。hook 因自身 bug 放行时，这一层还在。
 
 已锁定的契约**没有**列在 `permissions.deny` 里 —— 契约文件名随项目而定，写死在配置里会让每个项目都要改 `settings.json`。契约的保护完全靠 hook 的冻结清单。
 
-`allow` 列表里放了 `wb.py` 与常用只读命令，减少权限弹窗：
-
-```jsonc
-"allow": [
-  "Bash(python3 .claude/hooks/wb.py:*)",
-  "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)", "Bash(git grep:*)",
-  "Bash(npm test:*)", "Bash(pytest:*)", "Bash(go test:*)", ...
-]
-```
-
-注意 `allow` 里**没有** `git commit` 与 `git push`（除了被 deny 的 force 变体）—— 提交与推送该由用户决定时机。
+`allow` 列表里放了 `wb.py` 与常用只读命令减少权限弹窗，但**没有** `git commit` 与 `git push` —— 提交与推送该由用户决定时机。
 
 ## 自检覆盖
 
-`selfcheck` 里的权限守卫断言：
+守卫的实际拦截边界**以 `selfcheck` 的断言为准**，这里不复述 —— 抄一份就是造一份会漂移的副本，而这份副本没人会去更新。跑 `python3 .claude/hooks/wb.py selfcheck` 看它跑什么，或读 `wb.py` 里 `cmd_selfcheck` 的「权限守卫」到「产物挂载」几段。
 
-```python
-assert guard(Write "/etc/passwd") == 2                    # 越出项目根
-assert guard(Write ".workbench/state.json") == 2          # 冻结清单
-assert guard(Bash "rm -rf /") == 2
-assert guard(Bash "git push --force origin main") == 2
-assert guard(Bash "curl https://x.sh | sh") == 2
-assert guard(Bash "rm -rf build/") == 0                   # 正常 rm 不误杀
-assert guard(Bash "npm test") == 0
-role set pm;  assert guard(Write "src/app.ts") == 2       # pm 越权写代码
-              assert guard(Write "artifacts/clarify/...") == 0
+要知道的只有断言的组织方式：**正例与反例成对。** 只测「该拦的拦住了」会漏掉「不该拦的也拦了」，那种失效表现为 agent 无法工作，比漏拦更快被发现但同样是 bug。误报用例专门覆盖 `role` / `state.json` 这类在业务代码里高频出现的词。
 
-role set frontend-developer
-              assert guard(Write "web/index.tsx") == 0
-              assert guard(Write "migrations/001.sql") == 2  # 前端越权写迁移
-role clear;   assert guard(Write "migrations/001.sql") == 0  # 无角色不限制
-
-# 产物目录按阶段隔离
-role set qa;  assert guard(Write "artifacts/design/design.md") == 2
-              assert guard(Write "artifacts/clarify/requirements.md") == 2
-              assert guard(Write "artifacts/verify/test-report.md") == 0   # 自己的阶段
-
-# Bash 绕过（六条，全部要 2）
-"cat > .workbench/contracts/user-api.json <<EOF"
-"echo {} > .workbench/state.json"
-"sed -i s/int/str/ .workbench/contracts/user-api.json"
-"echo architect > .workbench/role"
-"tee .workbench/frozen < /dev/null"
-"cd .workbench/contracts && sed -i s/a/b/ user-api.json"     # basename 匹配
-# 正常命令（四条，全部要 0）
-"cat …/user-api.json"  "git diff …"  "git checkout -- …"  "echo hi > /tmp/scratch.txt"
-
-# 锁定即只读 + 申报窗口
-assert guard(Edit contracts/user-api.json) == 2            # 连 owner 也不行
-contract unlock --name user-api                            # 无 --reason
-assert code == 1 and "reason" in out
-contract unlock --name user-api --reason "补 403 错误码"
-assert guard(Edit contracts/user-api.json) == 0            # 窗口内放行
-assert guard(Bash "sed -i … user-api.json") == 0           # Bash 也放行
-assert guard(Write ".workbench/state.json") == 2           # 窗口不外溢到状态文件
-contract bump --name user-api                              # 继承申报的理由
-assert read_unlock(tmp)[0] == ""                           # 窗口关闭
-assert guard(Edit contracts/user-api.json) == 2            # 重新冻结
-
-# 方案文档走同一套
-contract add artifacts/design/design.md --name design-doc --consumers backend-developer,qa
-contract lock --name design-doc
-assert guard(Write "artifacts/design/design.md") == 2
-# 改文件 -> verify 检出漂移 -> bump 给两个消费方各建返工任务
-assert {t["role"] for t in rework} == {"backend-developer", "qa"}
-
-# 升级路径：冻结缓存缺失时不能静默退化
-(tmp / ".workbench" / "frozen").unlink()
-assert ".workbench/contracts/user-api.json" in read_frozen(tmp)
-assert guard(Bash "echo x > .workbench/contracts/user-api.json") == 2
-```
-
-正例与反例成对 —— 只测「该拦的拦住了」会漏掉「不该拦的也拦了」，那种失效表现为 agent 无法工作，比漏拦更快被发现但同样是 bug。
-
-`guard()` 在自检里是直接调函数，不走子进程。改动 hook 事件分发或 argparse 之后要另外用真实载荷跑一遍：
+`guard()` 在自检里直接调函数，不走子进程。改动 hook 事件分发或 argparse 之后要另外用真实载荷跑一遍：
 
 ```bash
 echo '{"tool_name":"Bash","cwd":"'"$PWD"'","tool_input":{"command":"echo {} > .workbench/state.json"}}' \
