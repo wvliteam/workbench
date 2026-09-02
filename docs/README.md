@@ -13,7 +13,8 @@
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
-| [docsvr.md](docsvr.md) | 文档服务器：把文档写入能力从 agent 进程隔离出去的中间层设计（docctl + unix socket + 专用账户） |
+| [wbsvr.md](wbsvr.md) | 契约托管服务：把契约与流程状态搬进 agent 无法寻址的专用账户存储（Go 二进制 + sudo + 字段级托管），含 15 条关键决策点与实测约束 |
+| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：九条可借鉴项、明确不抄的、落地顺序。**全部是未实施提案** |
 
 `review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
 
