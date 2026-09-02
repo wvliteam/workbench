@@ -13,6 +13,7 @@
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
+| [docsvr.md](docsvr.md) | 文档服务器：把文档写入能力从 agent 进程隔离出去的中间层设计（docctl + unix socket + 专用账户） |
 
 `review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
 
