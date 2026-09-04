@@ -1,0 +1,14 @@
+default_permissions = "workbench"
+
+[permissions.workbench]
+extends = ":workspace"
+
+[permissions.workbench.filesystem.":workspace_roots"]
+"**/*.env" = "deny"
+"**/*.pem" = "deny"
+"**/*.key" = "deny"
+"**/id_rsa*" = "deny"
+"secrets/**" = "deny"
+
+[agents]
+max_concurrent_threads_per_session = 3

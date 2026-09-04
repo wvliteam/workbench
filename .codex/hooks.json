@@ -1,0 +1,52 @@
+{
+  "description": "Software workbench lifecycle hooks.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook session-start --format codex; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|shell|exec_command|unified_exec|apply_patch|Write|Edit|NotebookEdit|MultiEdit|write_file|edit_file|Read|read_file|file_read)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook pre-tool --format codex; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|shell|exec_command|unified_exec|apply_patch|Write|Edit|NotebookEdit|MultiEdit|write_file|edit_file)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook post-tool --format codex; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook subagent-stop --format codex; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

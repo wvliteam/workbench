@@ -143,24 +143,25 @@ echo architect > .workbench/role                    # 提权
 sed -i 's/int/str/' .workbench/contracts/api.json   # 契约漂移，且无人申报
 ```
 
-所以 Bash 分支现在也查冻结清单：
+所以 Bash 分支现在也查冻结清单，且有写入目标精确解析：
 
 ```python
-BASH_WRITE = re.compile(
-    r"(>>?|\btee\b|\bsed\s+-i|\bperl\s+-\S*i|\btruncate\b|\bpatch\b|\bdd\b|"
-    r"\bshred\b|\bpython3?\s+-c\b|\bnode\s+-e\b|\bln\s+-\S*[sf])"
-)
+BASH_WRITE = re.compile(r">\s*[^\s]|>>\s*[^\s]|\btee\b|\bsed\b.*-i|\bchmod\b|\bchown\b|\brm\b|\bmv\b|\bcp\b")
 
-if BASH_WRITE.search(cmd):
-    unlocked = unlocked_paths(root)
-    hits = [h for h in frozen_hits(root, cmd) if h not in unlocked]
-    if hits:
-        hook_deny(...)
+if BASH_WRITE.search(cmd) or all_targets:
+    all_targets, outside_targets, uncertain = resolve(cmd, root)
+    # 精确模式：只拦 frozen ∩ all_targets
+    # uncertain 模式：退回旧行为（文本匹配 + 基名误报）
 ```
 
-两段式：**先判命令有没有写入意图，再判它提到的路径在不在冻结清单里。** 只判其一都不行 —— 只判写入意图会拦掉 `echo hi > /tmp/x`，只判路径会拦掉 `cat .workbench/state.json`。
+三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv` 取最后一个非 flag 参数（目标），`sed -i` 取 `-i` 之后的参数，`tee` 取全部参数。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
 
-`frozen_hits()` 返回命令文本里提到的**全部**冻结相对路径，每一个都要落在解冻窗口里才放行。只比对第一个命中会开一个静默的洞：`sed -i s/a/b/ a.json b.json` 里若 `a.json` 在窗口内，`b.json` 就被放过去了。
+`resolve()` 返回三元组 `(all_targets, outside_targets, uncertain)`：
+- `all_targets`：所有写入目标的相对路径（用于冻结检查）
+- `outside_targets`：仅项目根外的目标（用于越根检查）
+- `uncertain`：碰到 `eval`/`xargs`/`$(...)` 等无法可靠解析的构造时为 True，此时退回旧行为
+
+**`uncertain` 退回旧行为**：`BASH_WRITE` + `frozen_hits()` 文本匹配。误报面比精确模式宽（`cp`/`mv` 不分源和目标），但不漏拦。拒绝信息里会注明「写入目标无法解析，已一并拦截」。
 
 先切目录再改（`cd .workbench/contracts && sed -i ... user-api.json`）靠一条兜底覆盖：命中 `BASH_WRITE`、没提到任何完整冻结路径、**且命令里有 `cd`/`pushd` 切进某个 `.workbench` 路径**时拒绝。hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），只能这么兜。
 
@@ -170,7 +171,11 @@ if BASH_WRITE.search(cmd):
 
 `wb.py` 自身不会被这条挡住：它的命令行里不出现 `>`、`tee`、`sed -i` 之类。`python3 -c` 在 `BASH_WRITE` 里但 `python3 .claude/hooks/wb.py` 不是 `-c`。
 
-这条挡不住 `cp` / `mv` / 外部编辑器 / `git checkout` / 用户手改，那是刻意的取舍，兜底是 `contract verify` 的哈希校验 —— 见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。
+这条挡不住外部编辑器 / `git checkout` / 用户手改，那是刻意的取舍，兜底是 `contract verify` 的哈希校验 —— 见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。
+
+`cp` / `mv` / `install` 的源和目标区分已由 `resolve()` 精确处理：`_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标。`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧的文本匹配，误报面略宽但不漏拦。
+
+**safe 目录与项目根的关系**：`resolve()` 跳过 `/dev`、`/tmp` 等系统目录，但先检查路径是否在项目根内。当项目根本身位于 `/tmp/` 下时（如自检的临时目录），项目内部路径不会被 safe 目录过滤掉。
 
 ## 危险命令分级
 
@@ -200,19 +205,23 @@ Bash 调用除了冻结检查，还按命令文本查危险命令，两级：`DE
 }
 ```
 
-路径字段按工具不同取 `file_path`（Write/Edit/MultiEdit）或 `notebook_path`（NotebookEdit）；Bash 取 `tool_input.command`。取不到就放行 —— 未知形态的输入不该被守卫瞎猜。
+路径字段按工具不同取 `file_path`（Write/Edit/MultiEdit）或 `notebook_path`（NotebookEdit）；Codex `apply_patch` 取 `tool_input.command` 中的 patch 标记；Bash 取 `tool_input.command`。已识别 subagent 但缺少 `agent_type` 时拒绝受管写入，未知且无工作台状态的输入才放行。
 
-**载荷里有 subagent 标识，`agent_type` 就是角色名。** 实测（Claude Code 2.1.252）subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 都带 `agent_type` 与 `agent_id`，主线程两个都没有；`session_id` 反而是共享的。文档早期版本写「主线程与 subagent 在所有字段上无法区分」，那是错的，也是角色锁一度被做成单文件的由来。老版本 Claude Code 不带这两个字段时退回读 `.workbench/role`，也就是退回旧行为，不需要版本判断。
+**载荷里有 subagent 标识，`agent_type` 就是角色名。** 实测（Claude Code 2.1.252、Codex CLI 0.152.1）subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 都带 `agent_type` 与 `agent_id`，主线程两个都没有；`session_id` 反而是共享的。`current_role()` 优先按 `agent_type` 判定；已带 `agent_id` 但缺少 `agent_type` 的旧/异常载荷会拒绝受管写入，避免把 subagent 误当主线程放行。
 
 ### 失败语义
 
 ```python
-except Exception as e:  # hook 永不因自身 bug 阻断主流程
+except Exception as e:  # 未初始化目录放行；已初始化工作台阻断并暴露故障
     print(f"[工作台 hook 异常] {type(e).__name__}: {e}", file=sys.stderr)
-    sys.exit(0)
+    try:
+        initialized = state_path(find_root(Path(data.get("cwd") or os.getcwd()))).is_file()
+    except Exception:
+        initialized = False
+    sys.exit(2 if initialized else 0)
 ```
 
-hook 自身出 bug 时**放行**（退出码 0）而不是拒绝。理由：一个写错的守卫会阻塞所有工具调用，让整个会话不可用，且原因难查。放行 + 打异常到 stderr 让问题可见但不致命。
+hook 自身出 bug 时，未初始化目录放行；已初始化工作台**拒绝**（退出码 2）并将异常写到 stderr。这样工作台启用后不会因守卫异常静默放行敏感写入。
 
 `SystemExit` 单独 re-raise，否则 `hook_deny()` 的退出码 2 会被这个 except 吞掉变成 0 —— 那会让所有拒绝静默失效。这是实现中最容易写错的一处。
 
@@ -222,7 +231,7 @@ hook 自身出 bug 时**放行**（退出码 0）而不是拒绝。理由：一�
 
 | 事件 | 匹配 | 作用 |
 | --- | --- | --- |
-| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit | 把改动的文件路径与本次调用载荷里的角色追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
+| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit / apply_patch / Bash | 把静态可解析的改动路径、角色和可用 agent 身份字段追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
 | `SessionStart` | — | 输出当前阶段、任务进度、阻塞项、契约漂移、就绪任务，注入上下文 |
 | `SubagentStop` | — | 无任务处于 doing 时清除 `role` 与 `unlock`；有 doing 任务则保留并打印原因；记审计日志 |
 
@@ -243,15 +252,17 @@ hook 是主要机制，`settings.json` 做粗粒度兜底：
   "Read(./.env)", "Read(./.env.*)",           // 密钥不进上下文
   "Read(./**/*.pem)", "Read(./**/*.key)", "Read(./**/id_rsa*)",
   "Read(./secrets/**)",
-  "Write(./.workbench/state.json)",            // 与 hook 第二层重复，故意的
-  "Write(./.workbench/role)",
+  "Edit(./.workbench/state.json)",             // 与 hook 第二层重复，故意的
+  "Edit(./.workbench/role)",
   "Bash(git push --force:*)", "Bash(git push -f:*)"
 ]
 ```
 
 `Read` 类的拦截**只能在这一层做** —— hook 只挂在 Write/Edit/Bash 上，不挂 Read（每次读文件都跑一个 Python 进程太贵）。密钥文件靠 `permissions.deny` 挡。
 
-`Write(./.workbench/state.json)` 与 hook 第二层重复是故意的：`permissions.deny` 是静态规则，不依赖 hook 进程正常工作。hook 因自身 bug 放行时，这一层还在。
+`Edit(./.workbench/state.json)` 与 hook 第二层重复是故意的：`permissions.deny` 是静态规则，不依赖 hook 进程正常工作。hook 因自身 bug 放行时，这一层还在。
+
+这里必须写 `Edit(...)` 而**不是** `Write(...)`：Claude Code 的文件权限检查只匹配 `Edit(path)` 规则，而 `Edit(path)` 覆盖全部文件编辑工具（Write / Edit / NotebookEdit / MultiEdit）。写成 `Write(path)` 匹配不到任何工具调用，规则静默失效 —— 启动时会报 `is not matched by file permission checks`，那层纵深防御等于不存在。
 
 已锁定的契约**没有**列在 `permissions.deny` 里 —— 契约文件名随项目而定，写死在配置里会让每个项目都要改 `settings.json`。契约的保护完全靠 hook 的冻结清单。
 

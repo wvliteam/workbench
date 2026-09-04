@@ -43,7 +43,7 @@
 | --- | --- | --- |
 | `.workbench/state.json` | 阶段、任务、门禁记录、契约、配置、审计日志 | 与项目同寿，进 git |
 | `.workbench/role` | 角色锁兜底（单行文本）—— subagent 优先按载荷 `agent_type` 判定，这份给主线程与非角色 agent | 单个 subagent 执行期间，`SubagentStop` 在无 doing 任务时清除 |
-| `.workbench/artifacts.jsonl` | 改动流水账（一行一条 JSON：路径 + 角色 + 时间） | 只追加，`task done` 归并进任务的 `artifacts` |
+| `.workbench/artifacts.jsonl` | 改动流水账（一行一条 JSON：路径 + 角色 + 时间，含可用 agent 身份字段） | 只追加，`task done` 归并进任务的 `artifacts` |
 | `.workbench/frozen` | 冻结路径清单（一行一条） | 由 `save_state()` 每次重写，是 `state.json` 的派生缓存 |
 | `.workbench/unlock/` | 解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由） | `contract unlock` 到 `bump`/`lock`（或无 doing 任务时的 `SubagentStop`）之间 |
 
@@ -233,7 +233,7 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 | 内核形态 | 单 Python 文件 | 共享状态不拆、hook 冷启动最快、无依赖 | 文件较长 |
 | 规则表达 | 数据表（`GATES` 等） | 加规则加一行，不加一个类 | 表达力受限于预定义的断言类型 |
 | 角色隔离 | hook 强制，角色取自载荷 `agent_type` | 提示词大部分时候遵守，hook 每次都遵守；并行 subagent 各自判定 | 非角色 agent（`general-purpose` 等）退回读单文件 |
-| 契约校验 | 内容哈希 + 只读守卫 | 语言/格式无关，方案文档与阶段产物零成本复用 | 不懂语法；守卫覆盖不到 `cp`/外部编辑器 |
+| 契约校验 | 内容哈希 + 只读守卫 | 语言/格式无关，方案文档与阶段产物零成本复用 | 不懂语法；守卫覆盖不到外部编辑器与 `git checkout` |
 | 冻结解除 | 申报窗口（理由必填），按契约分片 | 改动理由在改之前留痕；多份契约可同时解冻 | 同一份契约上不区分是谁在申报 |
 | 拒绝机制 | 退出码 2 + stderr | 所有 Claude Code 版本都支持 | 只能 deny，无法 ask |
 | 门禁失败 | 退出码 1，不自动修 | 修哪里是决策，不该由校验器代劳 | 需要主线程多一轮 |
@@ -263,13 +263,17 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 
 ### 冻结防线覆盖不到的写入路径
 
-Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。未纳入的：`cp`、`mv`、`install`、编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
+Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv` / `install` **已纳入**（wbsvr 阶段 0）—— 促成它的是状态文件：`cp` 覆盖 `state.json` 此前直接通过，而状态文件没有任何哈希兜底，契约有 `contract verify`、状态没有。仍未纳入的：`rsync`、编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
 
-**这是刻意的取舍**：把 `cp`/`mv` 加进去会拦掉大量正常的构建与资源拷贝，误报成本高于收益。用户手改则是有意为之 —— 用户是这套机制的所有者，不是被约束的对象。
+**这一节的旧版预测「加进去会拦掉大量正常的构建与资源拷贝」，那个预测错了。** 判定是两段式的：命中 `BASH_WRITE` 只是第一段，还要 `frozen_hits()` 在命令文本里找到冻结路径才拒。`cp dist/x.js public/` 两段都不沾，构建与资源拷贝根本不进第二段。
+
+**`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源与目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
+
+**用户手改不在覆盖范围内**，那是有意为之 —— 用户是这套机制的所有者，不是被约束的对象。
 
 **兜底不是升级路径，是设计的另一半**：`contract verify` 的哈希校验不管改动从哪来，develop 与 verify 门禁都跑它。守卫在改之前拦（能给出可操作的拒绝理由），校验在门禁时抓（能兜住守卫覆盖不到的一切）。两者都留着，不是重复。
 
-要更严就把 `cp|mv|install|rsync` 加进 `BASH_WRITE`，改动一行 —— 加之前先在自己项目上试跑，看误报频率能不能接受。
+**`git checkout`/`git restore` 故意不在 `_GIT_WRITE` 集合里。** 这两个命令恢复的是 git 跟踪的文件内容，不涉及 `.workbench/` 下的状态或契约（那些不在 git 里）。拦截它们只会干扰正常开发流程。`git mv`/`git rm`/`git clean`/`git stash` 则在集合内，因为它们会改变工作区文件的物理位置或删除内容。
 
 ### 路径匹配偏宽松
 

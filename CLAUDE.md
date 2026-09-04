@@ -63,9 +63,9 @@ python3 .claude/hooks/wb.py init --name <需求名>   # 只在外层
 
 ```bash
 python3 .claude/hooks/wb.py config set role_scopes.frontend-developer \
-  '["repos/frontend/**",".workbench/artifacts/develop/**"]'
+  '["repos/frontend/**",".workbench/artifacts/develop/tasks/**"]'
 python3 .claude/hooks/wb.py config set role_scopes.backend-developer \
-  '["repos/backend/**","repos/shared/**",".workbench/artifacts/develop/**"]'
+  '["repos/backend/**","repos/shared/**",".workbench/artifacts/develop/tasks/**"]'
 ```
 
 `config set` 是**整条覆盖不是追加** —— 漏抄一个前缀，那个仓库就换成没人认领，`role scopes` 下一次会点它的名。
@@ -141,7 +141,7 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
 python3 .claude/hooks/wb.py role scopes      # 当前范围 + 冻结清单 + 解冻窗口
 python3 .claude/hooks/wb.py role scopes --reset   # 老项目刷成当前默认值（跨仓库布局会重新按仓库前缀算）
-python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/**","migrations/**",".workbench/artifacts/develop/**"]'
+python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/**","migrations/**",".workbench/artifacts/develop/tasks/**"]'
 ```
 
 ## 已知边界
@@ -151,7 +151,9 @@ python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/*
 - 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
 - 改状态的命令走 `.workbench/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
 - 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式，否则 `*.md` / `*.json` 会跨进产物与契约目录，把阶段隔离绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
-- Bash 冻结检查只按相对路径匹配命令文本，加一条「`cd`/`pushd` 切进 `.workbench` 后写」的兜底。不覆盖 `cp` / `mv` / 外部编辑器 / `git checkout`（误报成本高于收益）。这类改动靠 `contract verify` 的哈希校验在门禁时抓出。角色越权与越根这两类，Bash 只拦重定向到绝对路径 —— 从任意 shell 命令里可靠抽出全部写入目标做不到，做半个检查比不做更坏。所以别把「Bash 没被拦」当成「这个写入是允许的」。
+- Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结、越根和角色范围；`cd`/`pushd` 切进 `.workbench` 后写仍有兜底。动态不可解析命令对 subagent 拒绝，不把「Bash 没被拦」当成「这个写入是允许的」。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。`cp .workbench/contracts/api.yaml /tmp/bak` 的源路径不再误报，目标在 safe 目录时放行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
+- Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。`cp`/`mv` 精确模式下只取最后一个非 flag 参数为写入目标，源路径不误拦。
+- 门禁 `run_check` 三态：exit code 0 且命中 `0 tests`/`No tests ran`/`-DskipTests`/`--passWithNoTests` 等零用例或跳过标记时返回 `unverified` 而非 PASS。`unverified` 在门禁汇总里等同 FAIL，但拒绝信息说明不同：「exit=0 但无独立证据表明测试通过」。
 
 设计取舍与每条边界的理由在 `docs/`，索引见 [docs/README.md](docs/README.md)。

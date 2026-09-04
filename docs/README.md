@@ -14,7 +14,8 @@
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
 | [wbsvr.md](wbsvr.md) | 契约托管服务：把契约与流程状态搬进 agent 无法寻址的专用账户存储（Go 二进制 + sudo + 字段级托管），含 15 条关键决策点与实测约束 |
-| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：九条可借鉴项、明确不抄的、落地顺序。**全部是未实施提案** |
+| [codex-agent-migration.md](codex-agent-migration.md) | 迁移到 Codex 的适配层：工具名与载荷键的差异、输出协议差异。**配置层与守卫内核均已落地** —— `WRITE_TOOL`/`SHELL_TOOL` 覆盖 Codex 工具名、`apply_patch` 目标解析、`--format codex` 驱动 `SubagentStop` JSON 输出 |
+| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：九条可借鉴项、明确不抄的、落地顺序。**第 1 节与跨端抽象已落地，第七节结论是不做，其余仍是提案** |
 
 `review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
 

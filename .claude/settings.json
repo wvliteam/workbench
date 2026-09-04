@@ -27,8 +27,8 @@
       "Read(./**/*.key)",
       "Read(./**/id_rsa*)",
       "Read(./secrets/**)",
-      "Write(./.workbench/state.json)",
-      "Write(./.workbench/role)",
+      "Edit(./.workbench/state.json)",
+      "Edit(./.workbench/role)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)"
     ]
@@ -36,7 +36,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash",
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash|Read",
         "hooks": [
           {
             "type": "command",
@@ -48,7 +48,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|MultiEdit",
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash",
         "hooks": [
           {
             "type": "command",

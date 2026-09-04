@@ -1,8 +1,10 @@
 # 与 ROMA 的对比：可借鉴项
 
-**本文全部是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。任何一条落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
+**第 1 节（shell 写入真解析）与「跨端与自更新」节的跨端抽象已确认要落地（2026-09-03，方案见对应小节的「落地」段），其余各节仍是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。任何一处落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
 
-对比材料是 ROMA v0.3.6 的一份源码快照（百度 `roma-team`，`.claude/` + `.codex/` 双端插件树，约 180 个文件）。快照放在 `output/`，已在 `.gitignore` 里 —— **不进本仓库**，本文是它留下的唯一痕迹。对比日期 2026-09-03。
+**2026-09-03 复核。** 九节断言逐条对过代码，八节仍成立，第 1 节的论据被自己的仓库推翻了一半：`BASH_WRITE` 已补 `cp` / `mv` / `install`（`wb.py:187`，wbsvr 阶段 0），漏报那一半关掉了。但补上它同时**开了一类新误报**，所以第 1 节没有降级 —— 它从「可选优化」变成了这批改动的必要配套，论据已按新事实重写。同期修正：`wb.py` 行数 2257 → 2851（新增的是 wbsvr 托管模式，与本文九节无关）；第 3 节「先采样载荷」的前提已经有答案（见该节代价段）；跨端节引用的 `codex-agent-migration.md` 已自我更正。
+
+对比材料是 ROMA v0.3.6 的一份源码快照（百度 `roma-team`，`.claude/` + `.codex/` 双端插件树，约 180 个文件）。快照打包在 `output/agents.tgz`，`output/` 在 `.gitignore` 里 —— **不进本仓库**，但要复核 ROMA 侧的引述可以解包。对比日期 2026-09-03。
 
 局限先说清楚：只读了代码与 SKILL 文档，没有在真实工作区跑过它，也没有它的失效数据。下面每条判断都基于「代码里写了什么、注释里承认了什么教训」，不是实测对比。
 
@@ -11,7 +13,7 @@
 | | ROMA | 本工作台 |
 | --- | --- | --- |
 | 层级 | workspace **运行时内核** | 开发**流程编排** |
-| 载体 | 三端插件树（Claude Code / Codex / Comate），10 个 skill + 3 个 hook + 共享 lib | 单个 `wb.py`（2257 行）+ 7 个角色 subagent |
+| 载体 | 三端插件树（Claude Code / Codex / Comate），10 个 skill + 3 个 hook + 共享 lib | 单个 `wb.py`（2851 行）+ 7 个角色 subagent |
 | 管什么 | 仓库路由 `repos/`、知识体系 `docs/`、执行产物 `artifacts/`、健康检查、自更新、跨端适配 | 六阶段流水线、契约冻结、门禁、角色隔离 |
 | 唯一的流水线 | `env-init`（环境初始化），G0–G8 门禁 + `INIT-PLAN.json` 任务图 + evidence ledger | clarify → analyze → design → develop → verify → retro |
 | 门禁强制性 | 规则写在 SKILL.md 里靠模型遵守，校验脚本只做 schema 检查 | `phase advance` 退出码挡住阶段推进 |
@@ -20,10 +22,18 @@
 
 ## 一、shell 写入目标真解析 + `uncertain` 三态
 
-**我们的问题。** 从任意 shell 命令抽出全部写入目标，`CLAUDE.md` 与 `permissions.md` 都写了「做不到，做半个检查比不做更坏」。于是现状是二选一：
+**我们的问题。** 守卫里有**两条互不相干**的 shell 检查，各有各的洞。混成一条看会得出错误结论 —— 早期版本的本节就混过。
 
-- `frozen_hits()` 只做 `rel in cmd` 文本匹配 —— 会把 `cat docs/design.md > /tmp/x` 这种纯读误判成写；
-- 越根检查只认 `>` / `>>` 的绝对路径目标 —— `cp` / `mv` 全漏（`BASH_WRITE` 至今不含这两个，见 [wbsvr.md](wbsvr.md) 阶段 0）。
+**冻结检查**（`wb.py:1644`）两段式：`BASH_WRITE` 判有没有写入意图，`frozen_hits()` 判命令文本里有没有提到冻结路径，两段都中才拒。补进 `cp` / `mv` / `install` 之后，`cp 旧文件 .workbench/contracts/api.yaml` 这类真写入不再漏了 —— 但 `frozen_hits()` 只做 `rel in cmd`（`wb.py:1559`），**不分源和目标**，于是换来两类误报：
+
+- `cp .workbench/contracts/api.yaml /tmp/bak` —— 备份契约，纯读，被当成写入拦下。这是补 `cp` / `mv` **新引入**的；
+- `cat 契约.md > /tmp/x`、`grep -R X 契约目录/ > /tmp/o.log` —— 冻结路径在读位置，重定向目标在 `/tmp`，一样拦。这类比 `cp` 更早就在。
+
+heredoc 是第三类：`cat > design.md <<'EOF' … 见 openapi.yaml … EOF`，body 里提到已冻结的契约路径就命中 `frozen_hits()`。body 不是写入目标，拦它没有依据。
+
+**越根检查**（`wb.py:1677`）是另一条路，只扫 `>>?\s*['\"]?(/…)` 这一种形式，**不看 `BASH_WRITE`**。所以 `cp x /etc/foo`、`mv x /etc/foo` 在这条上仍然全漏 —— 补 `BASH_WRITE` 补不到它，两处代码没有关系。它的注释把理由写明了：「任意 shell 命令的写入目标抽不干净……做一个漏一半的检查会让人误以为有防护，所以只认这一种可靠形式」。
+
+三个洞的成因是同一个：**没有真正解析写入目标**。
 
 **ROMA 的做法。** `lib/shell_write_targets.py`，126 行零依赖，返回 `(targets, uncertain)`：
 
@@ -33,7 +43,7 @@
 4. 按命令名分类抽操作数：`tee`/`rm`/`truncate`/`touch`/`mkdir` 取全部参数，`mv`/`cp`/`ln`/`rsync`/`install` 取末参数，`chmod`/`chown` 跳过首参数，`sed -i` 跳过脚本参数，`dd` 取 `of=`，`git` 只在 `checkout`/`restore`/`mv`/`rm`/`clean`/`stash` 后取参数；
 5. 命中 `eval` / `xargs` / `awk` / `sh -c` / `python -c` / `$(...)` / 反引号，或目标含 `$VAR` 时置 `uncertain=True`。
 
-**这就是第三条路。** 不是「精确解析」也不是「粗匹配」，是**能解析就精确判，解析不了就退回粗检查并在拒绝信息里说明「写入目标无法解析，已一并拦截」**。既不漏，也不假装精确 —— 我们当初拒绝做的理由（做半个检查会让人误以为有防护）被 `uncertain` 这个显式出口消掉了。
+**这就是第三条路。** 不是「精确解析」也不是「粗匹配」，是**能解析就精确判，解析不了就退回粗检查并在拒绝信息里说明「写入目标无法解析，已一并拦截」**。我们当初拒绝做的理由（做半个检查会让人误以为有防护）被 `uncertain` 这个显式出口消掉了。第 4 条的末参数规则正好就是源/目标之分 —— 它同时是上面三个洞的解药。
 
 它的注释里留了实测误报清单，可以直接当 `selfcheck` 的用例搬：
 
@@ -45,9 +55,21 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 也留了它自己接受的缺陷：`cp -t DIR src...` 会被末参数规则判错，注释写「rare enough to accept」。抄的时候连这条注释一起抄 —— 已知缺陷写下来才不会变成第二个人重新踩的坑。
 
-**落地。** `frozen_hits()` 换成 `resolve()`：`targets` 非空且 `uncertain=False` 时精确比对冻结清单；`uncertain=True` 时退回现在这套文本匹配，并在拒绝话术里加一句说明。同时补掉 heredoc 误判（architect 用 `cat > design.md <<'EOF'` 写文档是文档里写明的正常操作）。
+**落地（2026-09-03 已确认）。** 用 `resolve()` 补足三处，**三块的风险方向不同，不能一锅端**：
 
-**代价。** 126 行新代码 + 一批用例。`_LAST_ARG` / `_ALL_ARGS` 这几张表会随 shell 用法漂移，得当成需要维护的清单，不是一次写完的常量。
+| 改哪里 | 怎么改 | 方向 | 风险 |
+| --- | --- | --- | --- |
+| 越根检查（`wb.py:1677`） | 目标集从「只扫 `>` 正则」换成 `resolve()` 的 `targets` | 从宽变严 | 低 —— 现在是漏，补上只多拦真写入 |
+| heredoc | `strip_heredocs()` 剥正文后再喂 `frozen_hits()` | 从严变宽 | 低 —— body 不是写入目标，本来就不该拦 |
+| 冻结检查源/目标 | `uncertain=False` 且冻结路径不在 `targets` 里时放行 | 从严变宽 | **中** —— 解析器漏一个写法，原本拦住的就放行了 |
+
+第三块是唯一需要保守处理的：`uncertain=True` 一律退回现有文本匹配，不新增判断（不放行，也不假装精确），拒绝话术里加一句「写入目标无法解析」。
+
+**搬的时候要动一处**：ROMA 的第 4 条把 `git checkout` / `git restore` 的参数算作写入目标，照搬会让 `git checkout -- 契约` 从放行变成拒绝。我们对它的放行是有意的取舍（还原旧版不改动内容，`contract verify` 校验的是内容哈希不是文件状态），所以搬进来时要从 `_GIT_WRITE` 里去掉 `checkout` / `restore` —— 或者接受行为变化并同步改 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)，两者选一，别默认照抄。
+
+**要同步改的文档。** 三块都改动了已锁定的拒绝/放行语义，所以 [permissions.md](permissions.md) 的 `BASH_WRITE` 那节（误报形态）与越根检查那条已知边界、[architecture.md](architecture.md) 的「冻结防线覆盖不到的写入路径」、`CLAUDE.md` 的已知边界都要跟着改。
+
+**代价。** ~126 行新代码 + 一批用例（ROMA 注释里那三条误报清单可以直接搬）。`_LAST_ARG` / `_ALL_ARGS` 这几张表会随 shell 用法漂移，得当成需要维护的清单，不是一次写完的常量。
 
 ## 二、契约争议熔断
 
@@ -71,7 +93,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 三、`__unknown__` 调用者 = 门禁失效告警
 
-**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底。[architecture.md](architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
+**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底（`wb.py:1612`）。[architecture.md](architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
 
 **ROMA 的做法。** 三态而不是两态：
 
@@ -87,11 +109,13 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 **落地。** `current_role()` 加 `UNKNOWN` 分支：载荷里有 subagent 迹象但无 `agent_type` 时不读 `.workbench/role`，直接按告警处理。文件兜底只留给真正的主线程。
 
-**代价。** 会多出一批 ask。如果 Claude Code 某些路径本来就不带 `agent_type`，这条会很吵 —— 落地前得先采样真实载荷确认 `agent_id` 是否可靠区分。
+**代价（2026-09-03 修正：比原先估的小）。** 原先写的是「落地前得先采样真实载荷确认 `agent_id` 是否可靠区分」，那个采样已经做过了 —— `current_role()` 的 docstring 记着实测结论：「（Claude Code 2.1.252）subagent 的 PreToolUse / PostToolUse / SubagentStop 都带 `agent_type` 与 `agent_id`，主线程两个都没有」。所以 `agent_id` 确实能区分，`UNKNOWN` 分支有可靠的判据。
+
+噪音也被高估了：内置的 `Explore` / `general-purpose` / `Plan` **带** `agent_type`（只是不在 `ROLES` 里），走的是「有 `agent_type` 但不是角色名」那条既有分支，不会落到 `UNKNOWN`。真正触发 `UNKNOWN` 的只剩「老版本 Claude Code 不带这个字段」，那本来就该显式告警而不是静默当主线程。这条因此从「观望」升为可做。
 
 ## 四、`stale` 状态与下游自动失效
 
-**我们的问题，也是真漏洞。** 任务只有 `todo` / `doing` / `done` / `blocked`，`deps` 只在派发前挡一次。qa 把某任务打回成 `blocked` 后，**依赖它的任务仍然是 `done`**，`tasks_done:*` 照过。上游被推翻不会让下游失效。
+**我们的问题，也是真漏洞。** 任务只有 `todo` / `doing` / `done` / `blocked`，`deps` 只在派发前挡一次（`ready_tasks` 只对 `status == "todo"` 的任务查 `deps`，`wb.py:720`）。qa 把某任务打回成 `blocked` 后，**依赖它的任务仍然是 `done`**，`tasks_done:*` 只查 `!= "done"`（`wb.py:643`）照过。上游被推翻不会让下游失效。
 
 **ROMA 的做法。** 状态七态：`PENDING` / `IN_PROGRESS` / `PASS` / `FAIL` / `BLOCKED` / `STALE` / `NOT_APPLICABLE`。规则三条：
 
@@ -111,7 +135,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 五、`unverified` 档与反自证校验
 
-**我们的问题。** `run_check` 的 `cmd:` 分支只看退出码。`npm test -- --passWithNoTests` 退 0，`pytest --collect-only` 退 0，`mvn -DskipTests` 退 0 —— 全部记 PASS。门禁在这三种情况下形同虚设，而这正是 `gate_commands` 存在的理由。
+**我们的问题。** `run_check` 的 `cmd:` 分支只看退出码（`return r.returncode == 0, ...`，`wb.py:682`）。`npm test -- --passWithNoTests` 退 0，`pytest --collect-only` 退 0，`mvn -DskipTests` 退 0 —— 全部记 PASS。门禁在这三种情况下形同虚设，而这正是 `gate_commands` 存在的理由。
 
 **ROMA 的做法。** 验证项五态，「测试没跑」单独一档 `UNVERIFIED`，且和 `FAIL` 一样卡准出。`validate_verification_result.py` 拒四类自证：
 
@@ -134,7 +158,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 六、执行与判定的角色分离，落到权限层
 
-**我们的问题。** 硬规则第 4 条「子 agent 说做完了不等于做完了」只是**给编排者的文字约定**。`GATES["develop"]` 的注释也写明 `verification.md` 由编排者写、没有角色 owner —— 但 `DEFAULT_ROLE_SCOPES` 里两个 developer 都有 `.workbench/artifacts/develop/**`。**开发 agent 能自己写那份复核记录。** 意图和机制在这里对不上。
+**我们的问题。** 硬规则第 4 条「子 agent 说做完了不等于做完了」只是**给编排者的文字约定**。`GATES["develop"]` 的注释也写明 `verification.md` 由编排者写、没有角色 owner —— 但 `DEFAULT_ROLE_SCOPES` 里两个 developer 都有 `.workbench/artifacts/develop/**`（`wb.py:149`、`wb.py:156`）。**开发 agent 能自己写那份复核记录。** 意图和机制在这里对不上。
 
 **ROMA 的做法。** 进度文件对主 Agent 独占，拒绝话术直接讲原理：
 
@@ -147,26 +171,16 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 1. `verification.md` 从两个 developer 的范围里摘出去 —— 给 develop 产物目录做文件级例外，或把 developer 的产物范围收成 `.workbench/artifacts/develop/tasks/**`，`verification.md` 留在上一层只给主线程。
 2. subagent 的执行记录按 `<任务号>-<角色名>.md` 命名并只允许写自己那份。这顺带解掉 [scheduling.md](scheduling.md) 里那条已知边界 —— 「产物归属按角色 + 任务 `started` 时间认领，同一角色两个任务并行时分不开」，按文件名归属就不用猜。
 
-## 七、证据账本与分片归并
+第 2 步是这两节里唯一真正解决并行归属的改动，第七节那套账本只是它的重量级版本。
 
-**ROMA 的做法。** `evidence-ledger.jsonl` 是事实级 append-only 日志，一条一个断言：
+## 七、证据账本（结论：不做，只留判据）
 
-```json
-{"stage":"discovery","scope":"api","claim":"入口是 /v1/chat/completions",
- "status":"CONFIRMED","source":"/repo/routes.py:42","artifact":null,"supersedes":null}
-```
+**ROMA 的做法。** `evidence-ledger.jsonl` 是事实级 append-only 日志，一条一个断言，`status` 八态（`CONFIRMED` / `INFERRED` / `CONFLICT` / `UNKNOWN` / `OBSERVED` / `FAIL` / `BLOCKED` / `SUPERSEDED`），被推翻的旧结论用 `supersedes` 标记而不删除。三条规则里两条有普适价值：
 
-`status` 八态：`CONFIRMED` / `INFERRED` / `CONFLICT` / `UNKNOWN` / `OBSERVED` / `FAIL` / `BLOCKED` / `SUPERSEDED`。三条规则：
-
-- 每条必须能追溯到源码位置、命令结果或 artifact；秘密只记变量名不记值；
 - **委派出去的调查写自己的分片文件 `explore-<taskId>.jsonl`，冲突事实只标 `CONFLICT`**；
-- **`supersedes` 裁决只能主 Agent 做**，在专门的归并步骤统一处理。
+- **`supersedes` 裁决只能主 Agent 做**，在专门的归并步骤统一处理 —— 和第六节是同一个原则的两处应用。
 
-被推翻的旧结论用 `supersedes` 标记而不删除。
-
-**对我们的价值。** 分片按 taskId 而非角色，正面解掉上面提到的并行归属问题。「subagent 只报事实、主线程才做裁决」和第六条是同一个原则的两处应用。
-
-**代价。** 这是最重的一条。我们的 `artifacts.jsonl` 是文件写入流水账（低频判断、高频写入），证据账本是断言账本（低频写入、高判断价值），两者不是一个东西，要新造。**建议只在证据归属真的出过问题时再做** —— 现在的痛点是归属不清，那用第六条的文件名归属就够，不需要整套账本。
+**为什么不做。** 我们的 `artifacts.jsonl` 是文件写入流水账（低频判断、高频写入），证据账本是断言账本（低频写入、高判断价值），两者不是一个东西，要新造。而它要解的痛点（并行归属不清）第六节落地第 2 步的文件名归属就够了。**留着这一节是为了记住判据：等归属之外的问题真的出现 —— 比如同一事实被两个 subagent 给出矛盾结论且没人裁决 —— 再回来看它。**
 
 ## 八、长期知识与本次执行的分界
 
@@ -195,30 +209,43 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 九、提醒的会话级去重
 
+**我们的问题。** `hook_post_tool` 的提醒每次命中都发，没有会话级去重。提醒的边际效用递减得极快，重复的无效提醒会连带降低有效提醒的权重 —— 也就是训练模型忽略整类提醒。
+
 **ROMA 的做法。** `PostToolUse` 提醒每会话每类只发一次，靠临时目录里的 marker 文件（`roma-guard-<session>-<platform>-<category>`）去重；版本同步类例外，永远重发。
 
 注释里点了教训：老规则是 `"docs/" in cmd and writeish.search(cmd)`，任何提到 `docs/` 又带 `>` 的命令都误报，结果是「**训练模型忽略这条提醒**」。
 
-**对我们的价值。** 提醒的边际效用递减得极快，重复的无效提醒会连带降低有效提醒的权重。我们 `hook_post_tool` 目前没有会话级去重。改动很小（marker 文件），但前提是先有分类。
+**落地。** marker 文件放 `tempfile.gettempdir()`，名字按 `<session_id>-<提醒类别>`。前提是先给 `WARN_BASH` 的每条规则起个类别名 —— 现在它们只有正则和文案，没有标识，去重无从下手。所以这条的实际工作量在分类那一步，不在 marker。
 
-## 跨端与自更新（战略层，非现在必抄）
+**代价。** 会话 id 取自 hook 载荷，拿不到时退回不去重（宁可多发一次，不要因为拿不到 id 就静默不发）。
 
-两件与我们正在做的事直接相关，记在这里备查：
+## 跨端与自更新（战略层）
 
-**`lib/hookio.py` 的跨端抽象。** 我们仓库已有 `docs/codex-agent-migration.md` 与未提交的 `.codex/`、`.agents/`，在做同一件事。它的做法是松匹配正则一次覆盖两端工具名：
+两件与我们正在做的事直接相关。**跨端抽象已落地，后一件（三方比对）仍备查。**
+
+**跨端抽象（已落地，2026-09-03 复核）。** 共享 `wb.py` 现在同时识别 Claude 与 Codex 工具名：`WRITE_TOOL` / `SHELL_TOOL` 覆盖 `apply_patch`、`exec_command`、`shell` 等；`apply_patch` 目标解析、shell 静态目标解析、角色/冻结/越根检查和审计归属共用同一套逻辑。`.codex/hooks.json` 的四个入口均调用 `--format codex`，`SubagentStop` 输出 `systemMessage` JSON。
+
+复用 `lib/hookio.py` 的跨端思路 —— 其它端只差 key 别名和输出字段，**每端一份 guard 买不到任何东西**（两份 post-tool guard 曾经发生过漂移）：
 
 ```python
 WRITE_TOOL = re.compile(r"edit|write|patch|notebook|delete|move|rename", re.I)
 SHELL_TOOL = re.compile(r"shell|bash|exec|run_command|process", re.I)
 ```
 
-一套实现同时吃 Claude 的 `Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` 和 Codex 的 `apply_patch`/`write_file`/`edit_file`/`shell`/`exec_command`/`unified_exec`。它选这条路的理由写在文件头：两端载荷只差 key 别名、两端只差认哪些输出字段，**每端一份 guard 买不到任何东西，而且已经漂移过**（两份 post-tool guard 曾是近乎相同的文件，只有 Codex 那份认得 `apply_patch`）。
+本项目采用同一套实现同时处理 Claude 的 `Edit`/`Write`/`MultiEdit`/`NotebookEdit`/`Bash` 和 Codex 的 `apply_patch`/`write_file`/`edit_file`/`shell`/`exec_command`/`unified_exec`，具体工具匹配以 `wb.py` 为准：
 
-更值钱的是它记下来的实测输出 schema 差异，这几条不看源码不会知道：
+1. **`--format claude|codex`** 接收。claude 保持现状输出，codex 走下面几条输出协议差异；
+2. **`apply_patch` 工具**：写入目标藏在 `tool_input.command` 的 `*** Add/Update/Delete File:` / `*** Move to:` 标记里，要解析出来（ROMA `patch_targets` 的思路）。`hook_pre_tool` / `hook_post_tool` 对 `apply_patch` 不能 `return` 放行 —— 任一目标越权则整体拒绝；
+3. **键别名**：Codex 载荷的身份线索是 `agent_id`（`agent_type` 缺失时），`current_role` 要能兜底认它 —— 与第 3 节的 `UNKNOWN` 分支是同一处改动，一起做；
+4. **输出协议差异**（这几条不看源码不知道，抄 ROI 最高的部分）。
+
+更值钱的是它记下来的实测输出 schema 差异，这几条不看源码不会知道，落地时直接照抄：
 
 - `PostToolUse` 的输出**不能带 `decision` key** —— 它只接受 `decision: "block"`，填 `"allow"` 会导致根级校验失败、整个载荷被丢弃，提醒一起没了；
 - `SubagentStop` 在 Codex 0.142.2 没有 additional-context 字段，只认 `systemMessage`；
 - `PreToolUse` 的 `ask` 决策 Codex 能解析但没实现，必须降级成 `deny`。
+
+验证入口：`python3 .claude/hooks/wb.py selfcheck` 同时覆盖 Claude 与 Codex 形态 payload。剩余风险是宿主项目未信任/未审核时 hook 不加载，以及 `bypassPermissions` 与 profile 的交互尚未由独立 `codex exec` 实测确认。
 
 **`roma-workspace-update` 的三方比对。** `.roma/installation.json` 记 `baselineVersion` 和每个组件的 `baseHash` / `acceptedHash`，组件策略分 `semantic-merge` / `guidance` / `ignore`，状态里 `safe-replace`（本地哈希等于 `baseHash` 才允许直接覆盖）、`merge-upstream-changed`（必须语义合并）、`accepted-local`。带旧工作区 adopt、backup、rollback。
 
@@ -229,28 +256,33 @@ SHELL_TOOL = re.compile(r"shell|bash|exec|run_command|process", re.I)
 | 它有的 | 为什么不抄 |
 | --- | --- |
 | G0–G8 散文式门禁 | 规则写在 SKILL.md 里靠模型遵守，校验脚本只做 schema 检查。我们把门禁做成 `phase advance` 的退出码 —— 强制性严格更高，别为了对齐它退化成提示词 |
-| `roma-knowledge-taxonomy` 整套知识分类学 | Knowledge Object / 开放式 taxonomy 演进 / 分类索引维护，对多人多仓 workspace 成立，对单人工作台是纯开销。只取第八条那句判据 |
+| `roma-knowledge-taxonomy` 整套知识分类学 | Knowledge Object / 开放式 taxonomy 演进 / 分类索引维护，对多人多仓 workspace 成立，对单人工作台是纯开销。只取第八节那句判据 |
 | `roma-task` | SaaS 侧任务 CRUD（HTTP 调后端 `assignment`），与本地流水线无关 |
 | `run_with_evidence.py` | 它强制所有需退出码的命令走这个包装器以保住真实退出码。我们 `run_check` 已经全量落盘 + 说明里带最后 5 行，同样目的更省事。差别只在 subagent 自跑的校验命令没有这层 —— 那条靠硬规则第 4 条的复核补 |
 | 常驻健康检查与三端插件同步 | 我们只有一份 `.claude/`，没有同步对象 |
+| 证据账本（第七节） | 要新造一套断言账本，而它解的痛点用第六节的文件名归属就够。判据留在第七节 |
 
 ## 落地顺序
 
-按性价比，不按上文顺序：
+按性价比，不按上文顺序。
+
+**已确认落地（同一轮，都进 `wb.py`）**
+
+1. **跨端适配（已落地）** —— `--format codex`、`apply_patch`、身份字段和 JSON 输出协议均由共享 hook 处理。
+2. **shell 写入目标解析（已落地）** —— `resolve()` 覆盖重定向、`cp` / `mv` / `install` 等静态目标，并写入审计流水账。
 
 **先做（各自独立，互不依赖）**
 
-1. **`stale` 状态 + 下游失效**（约 10 行）—— 补的是现在会静默放过的真漏洞，改动最小。
-2. **`run_check` 加 skip 标志与零用例检测**（约 20 行）—— 日志已落盘，扫描免费；修的是 `gate_commands` 的实际盲区。
-3. **`verification.md` 移出 developer 范围**（一行 scope）—— 让机制和 `GATES` 注释里已经写明的意图一致。
-4. **retro 沉淀出口**（一条断言 + 一段提示词）—— 用「换台机器下个月还成立吗」当判据。
+3. **`stale` 状态 + 下游失效**（约 10 行）—— 补的是现在会静默放过的真漏洞，改动最小。
+4. **`run_check` 加 skip 标志与零用例检测**（约 20 行）—— 日志已落盘，扫描免费；修的是 `gate_commands` 的实际盲区。
+5. **`verification.md` 移出 developer 范围**（一行 scope）—— 让机制和 `GATES` 注释里已经写明的意图一致。第 2 步的执行记录改名跟着一起做，顺带解掉 `scheduling.md` 的并行归属边界。
+6. **retro 沉淀出口**（一条断言 + 一段提示词）—— 用「换台机器下个月还成立吗」当判据。
 
-**再做（要改交互约定，单独一轮）**
+**可做（理由已备齐，等排期）**
 
-5. **搬 `shell_write_targets.py`** —— 收益最大但要配一批用例，且 `frozen_hits` 的行为变化要同步改 `permissions.md` 的已知边界一节。
-6. **契约争议熔断** —— 多一个状态维度，`status` 要显示，拒绝话术要重写。
+7. **`UNKNOWN` 调用者告警** —— 原先列为观望，2026-09-03 复核后升级：采样已经做过（结论在 `current_role()` 的 docstring 里），噪音担忧也被高估。与跨端节第 3 条是同一处改动。
+8. **契约争议熔断** —— 多一个状态维度，`status` 要显示，拒绝话术要重写。
 
-**观望**
+**不做**
 
-7. `UNKNOWN` 调用者告警 —— 落地前先采样真实载荷，确认 `agent_id` 在我们的运行环境里真的能区分 subagent 与主线程，否则会很吵。
-8. 证据账本 —— 现在的痛点是归属不清，第 3 条的文件名归属就够；等归属之外的问题真的出现再说。
+9. 证据账本 —— 见第七节与「明确不抄的」。等归属之外的问题真的出现再回来看。

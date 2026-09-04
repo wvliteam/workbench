@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -59,6 +60,10 @@ ROLES = [
     "qa",
     "reviewer",
 ]
+
+# 争议熔断只拦 developer：pm / analyst / architect / qa / reviewer 不在列。
+# architect 需要改契约解除争议，qa 需要跑测试，pm 需要改需求 —— 全拦死没人能善后。
+DEVELOPER_ROLES = ("frontend-developer", "backend-developer")
 
 # 每个阶段的准出条件。artifacts 是必须存在且非空的产物文件，
 # checks 是可执行的断言（见 run_check）。想改规则只动这张表。
@@ -100,7 +105,11 @@ GATES = {
     },
     "retro": {
         "artifacts": ["retro.md"],
-        "checks": ["artifact_contains:retro.md:改进项", "tasks_done:*"],
+        "checks": [
+            "artifact_contains:retro.md:改进项",
+            "artifact_contains:retro.md:可复用",
+            "tasks_done:*",
+        ],
     },
 }
 
@@ -145,14 +154,14 @@ DEFAULT_ROLE_SCOPES = {
         ".workbench/artifacts/design/**", ".workbench/contracts/**", "docs/**",
     ],
     "frontend-developer": [
-        ".workbench/artifacts/develop/**",
+        ".workbench/artifacts/develop/tasks/**",
         "web/**", "frontend/**", "app/**", "src/**", "public/**",
         "components/**", "pages/**", "lib/**", "styles/**",
         "*.json", "*.ts", "*.tsx", "*.js", "*.jsx", "*.vue",
         "*.css", "*.scss", "*.html", "*.md",
     ],
     "backend-developer": [
-        ".workbench/artifacts/develop/**",
+        ".workbench/artifacts/develop/tasks/**",
         "server/**", "backend/**", "api/**", "src/**", "migrations/**",
         "*.json", "*.py", "*.go", "*.java", "*.md",
     ],
@@ -182,11 +191,219 @@ ARTIFACT_LOG = "artifacts.jsonl"
 # wb.py 自己写它不受影响 —— 守卫只拦工具调用，不拦这个进程内的文件写。
 FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG]
 
-# 写入型 shell 动作。命中其一且命令里提到冻结路径 = 试图绕过 Write/Edit 守卫。
+# 写入型 shell 动作。仍保留用于 uncertain=True 时的兜底匹配。
 BASH_WRITE = re.compile(
     r"(>>?|\btee\b|\bsed\s+-i|\bperl\s+-\S*i|\btruncate\b|\bpatch\b|\bdd\b|"
-    r"\bshred\b|\bpython3?\s+-c\b|\bnode\s+-e\b|\bln\s+-\S*[sf])"
+    r"\bshred\b|\bpython3?\s+-c\b|\bnode\s+-e\b|\bln\s+-\S*[sf]|"
+    r"\bcp\b|\bmv\b|\binstall\b)"
 )
+
+# 跨端工具识别：覆盖 Claude 与 Codex 两套工具名。
+# 借鉴 ROMA lib/hookio.py 的做法 —— 一套实现同时吃两套端。
+WRITE_TOOL = re.compile(
+    r"Write|Edit|MultiEdit|NotebookEdit|"
+    r"apply_patch|write_file|edit_file", re.I)
+SHELL_TOOL = re.compile(
+    r"Bash|shell|exec_command|unified_exec", re.I)
+READ_TOOL = re.compile(r"^(?:Read|read_file|file_read)$", re.I)
+
+# --------------------------------------------------------------------------
+# shell 写入目标解析：能解析就精确判，解析不了就显式退回粗检查
+# --------------------------------------------------------------------------
+# 借鉴 ROMA lib/shell_write_targets.py 的思路（126 行零依赖）。
+# 返回 (targets, uncertain)：targets 是写入目标路径集合，uncertain 表示
+# 碰到了 eval/xargs/awk/$(...) 等无法可靠抽目标的构造。
+#
+# cp -t DIR src... 会被末参数规则判错（rare enough to accept）。
+
+# 取全部参数为写入目标的命令
+_ALL_ARGS = frozenset({"tee", "rm", "truncate", "touch", "mkdir", "shred"})
+
+# 取末参数为写入目标的命令（源 -> 目标 的命令族）
+_LAST_ARG = frozenset({"mv", "cp", "ln", "rsync", "install"})
+
+# git 子命令中写入工作区的。有意不含 checkout / restore：
+# 还原旧版不改动内容（契约校验的是内容哈希），放行是有意的取舍。
+_GIT_WRITE = frozenset({"mv", "rm", "clean", "stash"})
+
+# 重定向正则：匹配 > >> >>> >& >>& 等，排除 2>&1 / >&2
+_RE_REDIRECT = re.compile(r"(?:\d+|&)?>{1,2}\|?\s*([^\s;|&<>()]+)")
+
+# 会触发不确定性标记的构造
+_UNCERTAIN_PATTERNS = re.compile(
+    r"\b(eval|xargs|awk)\b|"
+    r"\bsh\s+-c\b|\bbash\s+-c\b|\bzsh\s+-c\b|"
+    r"\bpython3?\s+-c\b|\bnode\s+-e\b|"
+    r"\$\(|`[^`]+`"
+)
+
+# 变量引用（目标含 $VAR 时不可靠）
+_VAR_REF = re.compile(r"\$\{?\w+")
+
+
+def strip_heredocs(cmd: str) -> str:
+    """剥掉 heredoc 正文，只留命令部分。
+
+    heredoc body 里的 markdown 引用 `> 注意` 会被重定向正则误判，
+    冻结路径的文本匹配也会在 body 里命中。两种误判的根因一样：
+    body 不是命令的一部分。
+    """
+    out = []
+    i = 0
+    while i < len(cmd):
+        m = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", cmd[i:])
+        if not m:
+            out.append(cmd[i:])
+            break
+        end_delim = m.group(1)
+        out.append(cmd[i:i + m.start()])
+        rest = cmd[i + m.end():]
+        nl = rest.find("\n")
+        if nl < 0:
+            break
+        body_start = nl + 1
+        search_from = body_start
+        found_end = False
+        while True:
+            nl_pos = rest.find("\n", search_from)
+            if nl_pos < 0:
+                break
+            line = rest[body_start if search_from == body_start else search_from:nl_pos].lstrip("\t")
+            if line.strip() == end_delim:
+                i = i + m.end() + nl_pos + 1
+                found_end = True
+                break
+            search_from = nl_pos + 1
+        if not found_end:
+            break
+    return "".join(out)
+
+
+def _split_pipeline(cmd: str) -> list[str]:
+    """按 || / && / ; / | / 换行切段，每段是一个独立命令。"""
+    segments = []
+    for line in cmd.split("\n"):
+        parts = re.split(r"\s*(\|\||&&|;|\|)\s*", line)
+        for p in parts:
+            p = p.strip()
+            if p and p not in ("||", "&&", ";", "|"):
+                segments.append(p)
+    return segments
+
+
+def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
+    """解析 shell 命令的写入目标。
+
+    返回 (all_targets, outside_targets, uncertain)：
+      - all_targets：所有写入目标的相对路径集合（包括项目根内）
+      - outside_targets：仅项目根外的写入目标（用于越根检查）
+      - uncertain：True 表示碰到无法可靠解析的构造，targets 可能不完整
+
+    设计取舍：能解析就精确判，解析不了就退回粗检查并在拒绝信息里说明。
+    """
+    safe = {Path("/dev").resolve(), Path("/tmp").resolve(), Path(tempfile.gettempdir()).resolve()}
+    rootr = root.resolve()
+    all_targets: set[str] = set()
+    outside_targets: set[str] = set()
+    uncertain = False
+
+    cleaned = strip_heredocs(cmd)
+    segments = _split_pipeline(cleaned)
+
+    for seg in segments:
+        if _UNCERTAIN_PATTERNS.search(seg):
+            uncertain = True
+
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            uncertain = True
+            continue
+
+        if not tokens:
+            continue
+
+        # 1. 重定向目标
+        for m in _RE_REDIRECT.finditer(seg):
+            raw = m.group(1)
+            if raw in ("&1", "&2", "/dev/null"):
+                continue
+            p = Path(raw).resolve() if raw.startswith("/") else (rootr / raw).resolve()
+            inside = (p == rootr or rootr in p.parents)
+            if not inside and any(s == p or s in p.parents for s in safe):
+                continue
+            rel = os.path.relpath(p, rootr).replace(os.sep, "/")
+            all_targets.add(rel)
+            if not inside:
+                outside_targets.add(rel)
+
+        # 2. 按命令名分类抽操作数
+        cmd_name = Path(tokens[0]).name  # 处理 /usr/bin/cp 这种
+        args = tokens[1:]
+
+        if cmd_name == "git" and len(args) >= 1:
+            subcmd = args[0]
+            if subcmd in _GIT_WRITE:
+                _collect_targets(args[1:], all_targets, outside_targets, rootr, safe,
+                                 last_only=(subcmd == "mv"))
+            continue
+
+        if cmd_name in _ALL_ARGS:
+            _collect_targets(args, all_targets, outside_targets, rootr, safe, last_only=False)
+        elif cmd_name in _LAST_ARG:
+            _collect_targets(args, all_targets, outside_targets, rootr, safe, last_only=True)
+        elif cmd_name in ("chmod", "chown"):
+            _collect_targets(args[1:], all_targets, outside_targets, rootr, safe, last_only=False)
+        elif cmd_name == "sed" and _has_i_flag(args):
+            i_idx = _find_sed_i(args)
+            _collect_targets(args[i_idx + 1:], all_targets, outside_targets, rootr, safe,
+                             last_only=False)
+        elif cmd_name == "dd":
+            for tok in args:
+                if tok.startswith("of=") and tok[3:] and tok[3:] != "/dev/null":
+                    of_raw = tok[3:]
+                    p = Path(of_raw).resolve() if of_raw.startswith("/") else (rootr / of_raw).resolve()
+                    inside = (p == rootr or rootr in p.parents)
+                    if not inside and any(s == p or s in p.parents for s in safe):
+                        continue
+                    rel = os.path.relpath(p, rootr).replace(os.sep, "/")
+                    all_targets.add(rel)
+                    if not inside:
+                        outside_targets.add(rel)
+
+    return all_targets, outside_targets, uncertain
+
+
+def _collect_targets(args: list[str], all_targets: set[str], outside_targets: set[str],
+                     rootr: Path, safe: set[Path], last_only: bool) -> None:
+    """从参数列表里抽取写入目标路径。last_only=True 只取最后一个非 flag 参数。"""
+    filtered = [a for a in args if not a.startswith("-")]
+    if not filtered:
+        return
+    candidates = [filtered[-1]] if last_only else filtered
+    for raw in candidates:
+        p = Path(raw).resolve() if raw.startswith("/") else (rootr / raw).resolve()
+        inside = (p == rootr or rootr in p.parents)
+        if not inside and any(s == p or s in p.parents for s in safe):
+            continue
+        rel = os.path.relpath(p, rootr).replace(os.sep, "/")
+        all_targets.add(rel)
+        if not inside:
+            outside_targets.add(rel)
+
+
+def _has_i_flag(args: list[str]) -> bool:
+    """sed 参数列表里有没有 -i（可能带后缀如 -i.bak）。"""
+    return any(a == "-i" or a.startswith("-i") for a in args if a.startswith("-"))
+
+
+def _find_sed_i(args: list[str]) -> int:
+    """找到 -i 在参数列表中的位置。"""
+    for i, a in enumerate(args):
+        if a.startswith("-") and "i" in a:
+            return i
+    return -1
+
 
 # 不可逆 / 灾难性操作，直接拒绝。
 DENY_BASH = [
@@ -333,7 +550,9 @@ def save_state(root: Path, st: dict) -> None:
 def frozen_paths(st: dict) -> list[str]:
     """所有不允许用工具直接写的相对路径。契约一经登记即冻结，锁定与否都要走 wb.py。"""
     out = [f".workbench/{n}" for n in FROZEN_ALWAYS]
-    out += [c["path"] for c in st.get("contracts", [])]
+    # 托管契约没有 agent 侧路径 —— 它的保护来自「地址空间里不存在」，不来自这份清单。
+    # 工作副本 .workbench/wc/<名> 刻意不冻结：改它是 checkout/commit 模型的正常用法。
+    out += [c["path"] for c in st.get("contracts", []) if c.get("path")]
     return out
 
 
@@ -397,6 +616,45 @@ def close_unlock(root: Path, name: str = "") -> None:
             f.unlink(missing_ok=True)
 
 
+def read_disputes(root: Path) -> dict[str, str]:
+    """当前全部争议：{契约名: 争议理由}。无争议返回 {}。
+
+    结构与 read_unlocks 对称：一份契约一个文件，内容是争议理由。
+    争议是「全线停工」信号，比解冻窗口更重 —— 解冻只放行 owner 改一份文件，
+    争议是拦住所有 developer 的所有写入（执行记录与 /tmp 除外）。
+
+    托管模式下从服务端读取（refs 里的 dispute_reason 字段），与本地合并。
+    """
+    result = {}
+    d = wb_dir(root) / "disputes"
+    if d.is_dir():
+        result = {f.name: f.read_text(encoding="utf-8").strip()
+                  for f in sorted(d.iterdir()) if f.is_file()}
+    if hosted(root):
+        try:
+            refs = _svr(root, "list").get("refs") or {}
+            for name, ref in refs.items():
+                if ref.get("dispute_reason"):
+                    result[name] = ref["dispute_reason"]
+        except WbsvrError:
+            pass  # 服务端不可用时退回本地
+    return result
+
+
+def close_dispute(root: Path, name: str = "") -> None:
+    """关掉本地争议哨兵：给 name 只关那一份，不给关全部。
+
+    托管模式下服务端争议由 cmdLock（bump 走它）自动清除，或由用户跑
+    `sudo wbsvrd dispute --clear` 手动清除 —— 本函数只管本地文件。
+    """
+    d = wb_dir(root) / "disputes"
+    if not d.is_dir():
+        return
+    for f in d.iterdir():
+        if f.is_file() and (not name or f.name == name):
+            f.unlink(missing_ok=True)
+
+
 def log(st: dict, event: str, **fields) -> None:
     st["log"].append({"at": now(), "event": event, **fields})
 
@@ -408,9 +666,10 @@ def die(msg: str, code: int = 1) -> "None":
 
 
 def find_task(st: dict, tid: str) -> dict | None:
-    tid = tid.upper()
+    """按 ID 或标题查找任务。ID 匹配不区分大小写。"""
+    tid_upper = tid.upper()
     for t in st["tasks"]:
-        if t["id"].upper() == tid:
+        if t["id"].upper() == tid_upper or t.get("title") == tid:
             return t
     return None
 
@@ -426,6 +685,141 @@ def sha256_file(p: Path) -> str | None:
     if not p.is_file():
         return None
     return hashlib.sha256(p.read_bytes()).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# 托管模式：契约正文与冻结指纹交给 wbsvr 账户保管（设计见 docs/wbsvr.md）
+# --------------------------------------------------------------------------
+
+WBSVRD = "/usr/local/libexec/wbsvrd"
+SVC_USER = "wbsvr"
+
+# 托管的状态字段。这里只做**检测**不做取代 —— 理由见 sealed_audit。
+SEALED_KEYS = ("phase", "phases", "role_scopes", "gate_commands", "gate_timeout")
+
+_hosted_cache: bool | None = None
+
+
+class WbsvrError(Exception):
+    """wbsvrd 非零退出。payload 是它 stdout 上的 JSON —— verify 失败时明细在那里。"""
+
+    def __init__(self, msg: str, payload: dict | None = None):
+        super().__init__(msg)
+        self.payload = payload or {}
+
+
+def _svr(root: Path | None, *args, stdin: str | None = None, raw: bool = False):
+    """调一次 wbsvrd。项目路径永远是第一个位置参数 —— sudoers 匹配的是拼起来的
+    整条 argv，`wbsvrd -p /x read foo` 匹配不上 `wbsvrd read *`，所以没有任何选项。
+    """
+    argv = ["sudo", "-n", "-u", SVC_USER, WBSVRD, str(args[0])]
+    if root is not None:
+        argv.append(str(root.resolve()))
+    argv += [str(a) for a in args[1:]]
+    try:
+        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise WbsvrError(f"调不动 wbsvrd（{e}）") from e
+    if r.returncode != 0:
+        payload = {}
+        try:
+            payload = json.loads(r.stdout)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        raise WbsvrError(
+            r.stderr.strip() or r.stdout.strip() or f"wbsvrd 退出码 {r.returncode}", payload)
+    if raw:
+        return r.stdout
+    return json.loads(r.stdout or "{}")
+
+
+def hosted(root: Path) -> bool:
+    """本项目是否已启用托管。判定权在服务端 —— 存储在不在只有 wbsvr 知道。
+
+    `.workbench/hosted` 只是「这个项目曾经启用过」的备忘：一旦记下，服务端调不通时
+    **硬失败**而不是退回本地状态。静默降级是最坏的失败模式（同 D13）——「以为托管着
+    其实没托管」比「知道没托管」危险。删掉备忘也没用：存储还在，下一次判定又写回来。
+    """
+    global _hosted_cache
+    if _hosted_cache is not None:
+        return _hosted_cache
+    marker = wb_dir(root) / "hosted"
+    # 没装二进制又没启用过 = 绝大多数项目，这时一次 sudo 都不该花。
+    if not marker.is_file() and not Path(WBSVRD).exists():
+        _hosted_cache = False
+        return False
+    try:
+        _svr(root, "list")
+        _hosted_cache = True
+        if not marker.is_file():
+            marker.write_text(now() + "\n", encoding="utf-8")
+    except WbsvrError as e:
+        if marker.is_file():
+            die(f"托管模式已启用，但 wbsvrd 调不通：{e}\n"
+                "这时候不能退回本地状态 —— 那会让冻结静默失效。先跑 wb.py doctor 修服务。")
+        _hosted_cache = False
+    return _hosted_cache
+
+
+def wc_path(root: Path, name: str) -> Path:
+    return wb_dir(root) / "wc" / name
+
+
+def sealed_audit(root: Path, st: dict) -> list[str]:
+    """把本地 sealed 字段与托管权威副本比一遍，不一致就报出来。
+
+    刻意只做**检测**不做取代：完整迁移要在 `load_state` 里每次向服务端取值，而
+    `role_scopes` 在 PreToolUse 的热路径上（D15 就是为这个存在的），每次工具调用加
+    一次 sudo 往返不可接受。检测的天花板是「篡改不再静默通过，下一次门禁撞出来」，
+    不是「改不了」—— 要真正的改不了，得先给 hook 一份 wbsvr 刷的快照。
+    """
+    try:
+        want = _svr(root, "sealed-get")
+    except WbsvrError as e:
+        return [f"sealed 字段读不到：{e}"]
+    bad = []
+    for k, v in want.items():
+        if k in st and st[k] != v:
+            bad.append(f"{k}：本地 {json.dumps(st[k], ensure_ascii=False)} "
+                       f"≠ 托管 {json.dumps(v, ensure_ascii=False)}")
+    return bad
+
+
+def hosted_drift(root: Path, st: dict) -> list[str]:
+    """托管侧比对。hosted 正文 wbsvrd 自己比；repo 正文它只交出期望 sha 由这边比（D7）。"""
+    try:
+        r = _svr(root, "verify")
+    except WbsvrError as e:
+        if not e.payload:
+            return [f"托管验签调不通：{e}"]
+        r = e.payload
+    bad = list(r.get("bad") or [])
+    for name, want in (r.get("expect") or {}).items():
+        c = find_contract(st, name)
+        if not c or c.get("hosted") or not want:
+            continue
+        cur = sha256_file(root / c["path"])
+        if cur is None:
+            bad.append(f"{name}：文件缺失 {c['path']}")
+        elif cur != want:
+            bad.append(f"{name}：漂移，内容已变更但未 bump（托管期望 {want[:12]}）")
+    # 窗口开着不是漂移，但门禁时必须看得见 —— 否则「改到一半就推进阶段」无人拦。
+    bad += [f"{n}：解冻窗口还开着，改完要 contract bump 重新锁定" for n in (r.get("unlocked") or [])]
+    return bad
+
+
+def hosted_lock_args(root: Path, c: dict) -> list[str]:
+    """lock 要额外传给 wbsvrd 的参数。
+
+    托管正文的 sha 由服务端自己重算，**不接受外部值** —— 否则 agent 可以谎报指纹。
+    repo 正文服务端读不到（D7 不写不读 agent 侧路径），只能由这边算出来交上去。
+    """
+    if c.get("hosted"):
+        return []
+    sha = sha256_file(root / c["path"])
+    if sha is None:
+        die(f"文件缺失：{c['path']}")
+    return [sha]
 
 
 def dotted_set(obj: dict, key: str, value) -> None:
@@ -454,6 +848,9 @@ def artifact_path(root: Path, phase: str, fname: str) -> Path:
 def contract_drift(root: Path, st: dict) -> list[str]:
     """返回发生漂移或缺失的契约描述。"""
     bad = []
+    if hosted(root):
+        # 托管时指纹的权威副本在服务端，本地 c["sha"] 只是镜像，比它等于自己跟自己比。
+        return hosted_drift(root, st)
     for c in st["contracts"]:
         p = root / c["path"]
         cur = sha256_file(p)
@@ -498,17 +895,24 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
     if kind == "tasks_done":
         target = rest
         pool = st["tasks"] if target == "*" else [t for t in st["tasks"] if t["phase"] == target]
-        left = [t["id"] for t in pool if t["status"] != "done"]
+        # done 和 skipped 算完成；stale 算未完成（上游被推翻，需要重跑）
+        left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
         label = f"{target} 任务全部完成"
         if not pool:
             return True, label, "无任务（视为通过）"
-        return (not left), label, "全部完成" if not left else f"未完成：{', '.join(left)}"
+        stale_ids = [t["id"] for t in pool if t["status"] == "stale"]
+        if left:
+            detail = f"未完成：{', '.join(left)}"
+            if stale_ids:
+                detail += f"（其中 stale：{', '.join(stale_ids)}，上游被推翻需重跑）"
+            return False, label, detail
+        return True, label, "全部完成"
 
     if kind == "no_blocked":
         pool = st["tasks"] if rest == "*" else [t for t in st["tasks"] if t["phase"] == rest]
-        blocked = [t["id"] for t in pool if t["status"] == "blocked"]
-        label = "无阻塞任务" if rest == "*" else f"{rest} 无阻塞任务"
-        return (not blocked), label, "无" if not blocked else f"阻塞：{', '.join(blocked)}"
+        blocked = [t["id"] for t in pool if t["status"] in ("blocked", "stale")]
+        label = "无阻塞/失效任务" if rest == "*" else f"{rest} 无阻塞/失效任务"
+        return (not blocked), label, "无" if not blocked else f"阻塞/失效：{', '.join(blocked)}"
 
     if kind == "cmd":
         cmd = st["gate_commands"].get(rest)
@@ -537,7 +941,27 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
             # 不捕获会让 `gate check` / `phase advance` 打出 Traceback。
             body = _record(_text(e.stdout) + _text(e.stderr), "TIMEOUT")
             return False, label, f"`{cmd}` 超时（>{limit}s）{body}"
-        return r.returncode == 0, label, f"`{cmd}` exit={r.returncode} " + _record(r.stdout + r.stderr, f"exit={r.returncode}")
+        out_combined = r.stdout + r.stderr
+        if r.returncode == 0:
+            # 退出码 0 不等于测试跑过了 —— 主 Agent 同时是命令的选择者、执行者和判定者。
+            # 退出码因此不是独立证据，需要额外扫描。
+            body = _record(out_combined, f"exit={r.returncode}")
+            # 1. 命令文本含跳过测试的标志
+            skip_flags = re.search(
+                r"-DskipTests|-Dmaven\.test\.skip|--skipTests|--passWithNoTests"
+                r"|--ignore-skipped|-Dskip\.tests",
+                cmd, re.IGNORECASE)
+            if skip_flags:
+                return False, label, f"`{cmd}` 含跳过测试标志（{skip_flags.group()}），记 unverified{body}"
+            # 2. 日志匹配零用例执行
+            zero_tests = re.search(
+                r"0\s+(tests?|passed|specs?)|No\s+tests?\s+ran|"
+                r"collected\s+0\s+items|0\s+selected\s+0\s+collected",
+                out_combined, re.IGNORECASE)
+            if zero_tests:
+                return False, label, f"`{cmd}` 退出码 0 但零用例执行，记 unverified{body}"
+            return True, label, f"`{cmd}` exit={r.returncode} " + body
+        return False, label, f"`{cmd}` exit={r.returncode} " + _record(out_combined, f"exit={r.returncode}")
 
     return False, spec, "未知门禁类型"
 
@@ -551,6 +975,10 @@ def gate_check(root: Path, st: dict, phase: str) -> list[tuple[bool, str, str]]:
         out.append((ok, f"产物 {phase}/{fname}", "已产出" if ok else "缺失或为空"))
     for spec in rules.get("checks", []):
         out.append(run_check(root, st, phase, spec))
+    if hosted(root):
+        bad = sealed_audit(root, st)
+        out.append((not bad, "托管字段一致",
+                    "; ".join(bad) if bad else "本地镜像与托管权威副本一致"))
     return out
 
 
@@ -678,7 +1106,7 @@ def print_unclaimed(root: Path, scopes: dict[str, list[str]]) -> None:
         print("按名字认不出来（认领靠 " + " / ".join(
             sorted({h for hs in REPO_HINTS.values() for h in hs})) + "）。手写认领：")
         print("  wb.py config set role_scopes.backend-developer "
-              f"'[\".workbench/artifacts/develop/**\",\"repos/{un[0]}/**\"]'")
+              f"'[\".workbench/artifacts/develop/tasks/**\",\"repos/{un[0]}/**\"]'")
         print("  （连自己原有的前缀一起写进去，config set 是整条覆盖不是追加）")
 
 
@@ -691,6 +1119,13 @@ def cmd_status(args) -> None:
     # 根路径必须显示：工作区里可以有多个仓库各带一份 .workbench/，
     # 只看项目名分不清当前操作的是哪一份。
     print(f"项目：{st['project']}　根：{root}")
+    if hosted(root):
+        bad = sealed_audit(root, st)
+        print("托管：已启用　契约正文与冻结指纹由 wbsvr 账户保管"
+              + ("" if not bad else "　⚠ 托管字段不一致：" + "; ".join(bad)))
+    elif Path(WBSVRD).exists():
+        # 前提不成立时要常驻显示原因，否则「以为托管着其实没托管」
+        print("托管：未启用（wbsvrd 已安装，本项目还没 init）—— 缺哪一条看 wb.py doctor")
     cur = st["phase"]
     line = []
     for p in st["phases"]:
@@ -725,6 +1160,9 @@ def cmd_status(args) -> None:
     for uname, ureason in read_unlocks(root).items():
         print(f"解冻窗口开启中：{uname} —— {ureason}")
         print(f"  改完必须 `contract bump --name {uname}`，否则窗口悬挂、文档处于无主状态")
+    for dname, dreason in read_disputes(root).items():
+        print(f"⚠ 争议中：{dname} —— {dreason}")
+        print(f"  所有 developer 写入已停工。解除：`wb.py contract dispute --clear --name {dname}`")
     rt = ready_tasks(st, phase=cur)
     if rt:
         print(f"就绪可派发（{cur}）：" + ", ".join(t["id"] for t in rt[: st["max_parallel"]]))
@@ -770,6 +1208,11 @@ def cmd_phase(args) -> None:
         print(load_state(root)["phase"])
         return
     if args.action == "set":
+        if hosted(root):
+            die("托管模式下 phase set 不可用 —— 任意跳阶段会把中间门禁整个跳过。\n"
+                "正常推进用 phase advance；确需回退由用户跑："
+                f"sudo -u {SVC_USER} {WBSVRD} sealed-set {shlex.quote(str(root))} "
+                "phase '\"<阶段名>\"'")
         st = load_state(root, lock=True)
         if args.name not in st["phases"]:
             die(f"未知阶段 {args.name}，可选：{', '.join(st['phases'])}")
@@ -807,6 +1250,10 @@ def cmd_phase(args) -> None:
         save_state(root, st)
         print("已是最后阶段，全链路完成。")
         return
+    # 服务端先落，本地后落。反过来的话服务端拒了（并发下别人已经推过）本地已经变了，
+    # 两份阶段从此不一致，而门禁读的是本地那份 —— 阶段判定就失效了。
+    if hosted(root):
+        _svr(root, "phase-advance", cur, st["phases"][idx + 1])
     st["phase"] = st["phases"][idx + 1]
     log(st, "phase_advance", **{"from": cur, "to": st["phase"], "forced": bool(args.force and not passed)})
     save_state(root, st)
@@ -858,6 +1305,34 @@ def merge_artifacts(root: Path, t: dict) -> int:
             t["artifacts"].append(rel)
             n += 1
     return n
+
+
+def _propagate_stale(st: dict, blocked_id: str) -> None:
+    """blocked_id 被标为 blocked/stale 时，沿 deps 反向图把下游 done 标 stale。
+
+    只影响 done 任务 —— todo/doing/blocked 状态的由各自的依赖检查覆盖。
+    stale 任务不递归传播（第二层下游已经在 tasks_done 里被拦住）。
+    """
+    dependents = [t for t in st["tasks"] if blocked_id.upper() in
+                  [d.upper() for d in t.get("deps", [])]]
+    for t in dependents:
+        if t["status"] == "done":
+            t["status"] = "stale"
+            t["updated"] = now()
+
+
+def _restore_stale(st: dict, restored_id: str) -> None:
+    """restored_id 从 blocked 恢复为 todo 时，把因它变 stale 的下游恢复为 todo。
+
+    只恢复直接下游。stale 任务的再下游已经也是 stale（由 block 时传播），
+    恢复为 todo 让门禁重新检查。
+    """
+    dependents = [t for t in st["tasks"] if restored_id.upper() in
+                  [d.upper() for d in t.get("deps", [])]]
+    for t in dependents:
+        if t["status"] == "stale":
+            t["status"] = "todo"
+            t["updated"] = now()
 
 
 def cmd_task(args) -> None:
@@ -919,9 +1394,18 @@ def cmd_task(args) -> None:
     elif args.action == "block":
         t["status"] = "blocked"
         t["notes"] = args.reason or t["notes"]
+        # 沿依赖反向图把下游 done 任务标 stale
+        _propagate_stale(st, t["id"])
     elif args.action == "reopen":
         t["status"] = "todo"
         t["notes"] = args.note or t["notes"]
+        # 上游解除了，恢复因它变 stale 的下游
+        _restore_stale(st, t["id"])
+    elif args.action == "skip":
+        if not args.reason:
+            die("skip 必须带 --reason")
+        t["status"] = "skipped"
+        t["notes"] = args.reason
     t["updated"] = now()
     log(st, f"task_{args.action}", id=t["id"], role=t["role"])
     save_state(root, st)
@@ -961,7 +1445,36 @@ def cmd_contract(args) -> None:
     # 只在会写状态的分支上锁。impact 在锁里跑 `git grep` 子进程，大仓库要几秒 ——
     # 而 wb-contract 要求改契约前先跑 impact，此时结束的 subagent 的 SubagentStop
     # 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。
-    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump"))
+    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump", "commit"))
+
+    if args.action == "add" and args.hosted:
+        if not hosted(root):
+            die("本项目未启用托管，--hosted 的正文无处安放。先跑 wb.py doctor 看缺哪一条前提。")
+        name = args.name or ""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
+            die("托管契约必须给 --name，且只能用字母、数字、`.`、`_`、`-`，首字符是字母或数字")
+        if find_contract(st, name):
+            die(f"契约 {name} 已存在，改动请走 contract checkout / commit / bump")
+        wc = wc_path(root, name)
+        if not wc.is_file():
+            wc.parent.mkdir(parents=True, exist_ok=True)
+            die(f"先把契约正文写到工作副本再登记：{wc.relative_to(root)}")
+        r = _svr(root, "commit", name, stdin=wc.read_text(encoding="utf-8"))
+        c = {
+            "name": name, "path": "", "hosted": True, "owner": args.owner or "architect",
+            "consumers": [x.strip() for x in (args.consumers or "").split(",") if x.strip()],
+            "version": r["version"], "sha": r["sha"], "locked_at": None, "created": now(),
+        }
+        st["contracts"].append(c)
+        log(st, "contract_add", name=name, path="(hosted)", owner=c["owner"])
+        save_state(root, st)
+        wc.unlink()
+        print(f"已登记托管契约 {name} v{c['version']}  owner={c['owner']}  "
+              f"consumers={','.join(c['consumers']) or '-'}")
+        print(f"正文在托管存储里，agent 侧没有路径。要看：contract read --name {name}；"
+              f"要改：contract checkout --name {name}")
+        print("确认定稿后执行：contract lock " + name)
+        return
 
     if args.action == "add":
         p = Path(args.path)
@@ -996,34 +1509,91 @@ def cmd_contract(args) -> None:
         if not st["contracts"]:
             print("尚无契约。")
             return
-        opened = read_unlocks(root)
+        opened = set(read_unlocks(root))
+        disputed = set(read_disputes(root))
+        refs = {}
+        if hosted(root):
+            try:
+                refs = _svr(root, "list").get("refs") or {}
+            except WbsvrError as e:
+                print(f"（托管状态读不到，下面是本地镜像：{e}）")
+            # 托管下窗口由服务端记时，agent 侧那个目录已经不是权威
+            opened |= {k for k, v in refs.items() if v.get("unlock_until")}
         for c in st["contracts"]:
-            cur = sha256_file(root / c["path"])
-            if not c.get("sha"):
+            r = refs.get(c["name"]) or {}
+            want = r.get("sha") if r else c.get("sha")
+            locked = r.get("locked") if r else bool(c.get("sha"))
+            if not locked:
                 state = "未锁定"
-            elif cur is None:
-                state = "文件缺失"
-            elif cur != c["sha"]:
-                state = "漂移!"
+            elif c.get("hosted"):
+                # 托管正文 agent 读不到，漂移只有 wbsvrd 能判 —— 入口是 contract verify
+                state = "已锁定"
             else:
-                state = "一致"
+                cur = sha256_file(root / c["path"])
+                state = "文件缺失" if cur is None else ("一致" if cur == want else "漂移!")
             if c["name"] in opened:
                 state += "/解冻中"
-            print(f"{c['name']:<20} v{c['version']:<3} {state:<12} {c['owner']:<19} "
-                  f"-> {','.join(c['consumers']) or '-'}  {c['path']}")
+            if c["name"] in disputed:
+                state += "/争议中"
+            print(f"{c['name']:<20} v{r.get('version') or c['version']:<3} {state:<12} "
+                  f"{c['owner']:<19} -> {','.join(c['consumers']) or '-'}  "
+                  f"{c['path'] or '(托管存储)'}")
+        return
+
+    if args.action in ("read", "checkout", "commit"):
+        c = find_contract(st, args.name)
+        if not c:
+            die(f"契约不存在：{args.name}")
+        if not c.get("hosted"):
+            die(f"{c['name']} 的正文在仓库里（{c['path']}），直接读写那个文件就行 —— "
+                "read / checkout / commit 只对托管契约有意义")
+        if not hosted(root):
+            die("托管契约的正文只有 wbsvrd 能交出来，而托管现在不可用。先跑 wb.py doctor")
+        if args.action == "read":
+            sys.stdout.write(_svr(root, "read", c["name"], raw=True))
+            return
+        wc = wc_path(root, c["name"])
+        if args.action == "checkout":
+            wc.parent.mkdir(parents=True, exist_ok=True)
+            wc.write_text(_svr(root, "read", c["name"], raw=True), encoding="utf-8")
+            print(f"工作副本：{wc.relative_to(root)}")
+            print("照常用 Read / Edit / Write 改它 —— 只是权威副本在别处。改完执行："
+                  f"wb.py contract commit --name {c['name']}")
+            return
+        if not wc.is_file():
+            die(f"没有工作副本可提交：{wc.relative_to(root)}"
+                f"（先 contract checkout --name {c['name']}）")
+        r = _svr(root, "commit", c["name"], stdin=wc.read_text(encoding="utf-8"))
+        wc.unlink()
+        log(st, "contract_commit", name=c["name"], sha=r["sha"][:12], bytes=r["bytes"])
+        save_state(root, st)
+        print(f"已提交 {c['name']}  {r['sha'][:12]}  {r['bytes']} 字节，工作副本已删除")
+        if r.get("locked"):
+            print("解冻窗口仍开着。定稿后执行："
+                  f"wb.py contract bump --name {c['name']} --reason '<改了什么>'")
+        else:
+            print(f"尚未锁定。定稿后执行：wb.py contract lock --name {c['name']}")
         return
 
     if args.action == "lock":
         targets = st["contracts"] if args.all else [find_contract(st, args.name or "")]
         if not args.all and not targets[0]:
             die(f"契约不存在：{args.name}")
+        use_svr = hosted(root)
         for c in targets:
-            sha = sha256_file(root / c["path"])
-            if sha is None:
-                die(f"文件缺失：{c['path']}")
-            c["sha"], c["locked_at"] = sha, now()
-            log(st, "contract_lock", name=c["name"], version=c["version"], sha=sha[:12])
-            print(f"已锁定 {c['name']} v{c['version']}  {sha[:12]}")
+            if use_svr:
+                # 托管下指纹与锁定位都由服务端持有：state.json 里那份只是镜像，
+                # 改它没用（服务端不看），所以「重新上锁」这条绕过路径也一起没了。
+                r = _svr(root, "lock", c["name"], *hosted_lock_args(root, c))
+                c["sha"], c["version"] = r["sha"], r["version"]
+            else:
+                sha = sha256_file(root / c["path"])
+                if sha is None:
+                    die(f"文件缺失：{c['path']}")
+                c["sha"] = sha
+            c["locked_at"] = now()
+            log(st, "contract_lock", name=c["name"], version=c["version"], sha=c["sha"][:12])
+            print(f"已锁定 {c['name']} v{c['version']}  {c['sha'][:12]}")
             # 只关自己那一份窗口。`lock --all` 逐个关等于全关，但 `lock --name X`
             # 不能顺手收掉兄弟 agent 正在用的窗口。
             close_unlock(root, c["name"])
@@ -1036,6 +1606,20 @@ def cmd_contract(args) -> None:
             die(f"契约不存在：{args.name}")
         if not args.reason:
             die("unlock 必须给 --reason —— 冻结文档的改动理由要在改之前留痕，不是改完补")
+        if hosted(root):
+            # 刻意不转发：unlock 不在 agent 的 sudoers 里。agent 能自己开窗口的话，
+            # 冻结就只是个建议 —— 用户的 sudo 密码才是凭证（D3）。
+            print(f"托管契约 {c['name']} 的解冻要用户凭证，我这边开不了窗口。")
+            print("把这条命令交给用户跑（会问密码）：")
+            print(f"  sudo -u {SVC_USER} {WBSVRD} unlock {shlex.quote(str(root))} "
+                  f"{c['name']} {shlex.quote(args.reason)}")
+            print(f"跑完之后：contract checkout --name {c['name']} 改，"
+                  f"contract commit --name {c['name']} 提交，"
+                  f"contract bump --name {c['name']} 定稿。")
+            print("窗口由服务端记时，默认 30 分钟自动重锁 —— 不依赖任何 agent 侧钩子。")
+            log(st, "contract_unlock_requested", name=c["name"], reason=args.reason)
+            save_state(root, st)
+            sys.exit(2)
         d = wb_dir(root) / "unlock"
         # 升级前的项目这里是单个文件。不删掉，mkdir 会抛 FileExistsError，
         # 老项目第一次 unlock 就是一条栈追踪。旧文件里只有一份悬挂窗口，丢掉是对的。
@@ -1064,19 +1648,27 @@ def cmd_contract(args) -> None:
         c = find_contract(st, args.name)
         if not c:
             die(f"契约不存在：{args.name}")
-        sha = sha256_file(root / c["path"])
-        if sha is None:
-            die(f"文件缺失：{c['path']}")
         reason = args.reason or read_unlocks(root).get(c["name"], "")
         if not reason:
             die("bump 必须给 --reason（或先 contract unlock 时申报）—— "
                 "变更理由要进审计日志与交付报告")
-        if c.get("sha") == sha:
-            die(f"{c['name']} 内容未变（哈希相同），无需 bump。"
-                f"若只是想关闭解冻窗口，用 contract lock --name {c['name']}")
         old = c["version"]
-        c["version"] += 1
-        c["sha"], c["locked_at"] = sha, now()
+        if hosted(root):
+            r = _svr(root, "lock", c["name"], *hosted_lock_args(root, c))
+            if r["version"] == old and r["sha"] == c.get("sha"):
+                die(f"{c['name']} 内容未变（哈希相同），无需 bump。"
+                    f"若只是想关闭解冻窗口，用 contract lock --name {c['name']}")
+            c["sha"], c["version"], c["locked_at"] = r["sha"], r["version"], now()
+        else:
+            sha = sha256_file(root / c["path"])
+            if sha is None:
+                die(f"文件缺失：{c['path']}")
+            if c.get("sha") == sha:
+                die(f"{c['name']} 内容未变（哈希相同），无需 bump。"
+                    f"若只是想关闭解冻窗口，用 contract lock --name {c['name']}")
+            c["version"] += 1
+            c["sha"], c["locked_at"] = sha, now()
+        sha = c["sha"]
         log(st, "contract_bump", name=c["name"], **{"from": old, "to": c["version"], "reason": reason})
         created = []
         for role in c["consumers"]:
@@ -1095,6 +1687,7 @@ def cmd_contract(args) -> None:
             })
             created.append(f"{tid}({role})")
         close_unlock(root, c["name"])
+        close_dispute(root, c["name"])
         save_state(root, st)
         print(f"{c['name']} v{old} -> v{c['version']}  {sha[:12]}  理由：{reason}")
         print("已为消费方创建返工任务：" + (", ".join(created) or "无消费方"))
@@ -1112,6 +1705,56 @@ def cmd_contract(args) -> None:
         print("代码引用：" + (f"{len(hits)} 处" if hits else "无"))
         for h in hits[:15]:
             print(f"  {h}")
+        return
+
+    if args.action == "dispute":
+        if args.clear:
+            if hosted(root):
+                # 托管模式下解除争议需要用户凭证 —— 与 unlock 同理：
+                # agent 能自己清掉争议的话，争议就只是个建议。
+                if not args.name:
+                    die("托管模式下解除争议必须指定 --name（全部解除太容易误操作）")
+                print(f"托管契约 {args.name} 的争议解除需要用户凭证，我这边开不了窗口。")
+                print("把这条命令交给用户跑（会问密码）：")
+                print(f"  sudo -u {SVC_USER} {WBSVRD} dispute-clear {shlex.quote(str(root))} "
+                      f"--name {shlex.quote(args.name)}")
+                print("跑完之后开发自动恢复。也可以走正式路径：修订契约后 "
+                      f"`wb.py contract bump --name {args.name}` 自动解除。")
+                log(st, "dispute_clear_requested", name=args.name)
+                save_state(root, st)
+                sys.exit(2)
+            if not args.name:
+                close_dispute(root)
+                log(st, "dispute_clear_all")
+                save_state(root, st)
+                print("已解除全部契约争议。开发可恢复。")
+            else:
+                close_dispute(root, args.name)
+                log(st, "dispute_clear", name=args.name)
+                save_state(root, st)
+                print(f"已解除 {args.name} 的争议。开发可恢复。")
+            return
+        c = find_contract(st, args.name)
+        if not c:
+            die(f"契约不存在：{args.name}")
+        if not args.reason:
+            die("dispute 必须给 --reason —— 冲突在哪要说清楚，否则架构师无法判断")
+        if hosted(root):
+            try:
+                _svr(root, "dispute", "--name", c["name"], "--reason", args.reason)
+            except WbsvrError as e:
+                die(f"托管争议设置失败：{e}")
+        else:
+            d = wb_dir(root) / "disputes"
+            d.mkdir(parents=True, exist_ok=True)
+            (d / c["name"]).write_text(args.reason, encoding="utf-8")
+        log(st, "dispute", name=c["name"], reason=args.reason)
+        save_state(root, st)
+        print(f"已落争议哨兵：{c['name']}")
+        print(f"理由：{args.reason}")
+        print("所有 developer 角色的写入已全线停工（执行记录与 /tmp 除外）。")
+        print(f"解除：wb.py contract dispute --clear --name {c['name']}")
+        print(f"或修订契约后：wb.py contract bump --name {c['name']}")
         return
 
 
@@ -1278,6 +1921,86 @@ def resolve_target(cwd: Path, raw: str) -> Path:
         return p
 
 
+def sensitive_read_target(cwd: Path, root: Path, raw: str) -> str | None:
+    """Return a sensitive repository-relative path, if ``raw`` names one."""
+    token = str(raw).strip().strip("'\"")
+    if token.startswith("-") and "=" in token:
+        token = token.split("=", 1)[1]
+    token = token.rstrip(",)")
+    if not token:
+        return None
+    try:
+        rel = os.path.relpath(resolve_target(cwd, token), root).replace(os.sep, "/")
+    except ValueError:
+        return None
+    parts = Path(rel).parts
+    if not parts:
+        return None
+    name = parts[-1]
+    if ((len(parts) == 1 and (name == ".env" or name.startswith(".env."))) or
+            name.endswith((".pem", ".key")) or name.startswith("id_rsa") or
+            parts[0] == "secrets"):
+        return rel
+    return None
+
+
+def sensitive_shell_reads(cwd: Path, root: Path, command: str) -> list[str]:
+    """Find statically named sensitive paths in a shell payload.
+
+    Shell is intentionally conservative here: an unquoted path is easy to
+    identify, while arbitrary command substitution cannot be safely inspected.
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = re.findall(r"[^\s;|&<>]+", command)
+    found = []
+    for token in tokens:
+        hit = sensitive_read_target(cwd, root, token)
+        if hit and hit not in found:
+            found.append(hit)
+    return found
+
+
+def _is_dispute_exempt_bash(cmd: str, root: Path) -> bool:
+    """争议熔断下 Bash 命令是否放行。
+
+    只放行两样：/tmp 下的操作、.workbench/artifacts/develop/ 下自己的执行记录。
+    粗判：命令里提到放行路径就放行。争议时全线停工是第一优先级。
+    """
+    # 只涉及 /tmp 且不碰 .workbench/.claude
+    if re.search(r'\b/tmp/\S', cmd) and not re.search(r'\.(workbench|claude)', cmd):
+        return True
+    # 写自己的执行记录
+    if '.workbench/artifacts/develop/' in cmd:
+        return True
+    return False
+
+
+def _is_dispute_exempt_write(rel: str) -> bool:
+    """争议熔断下 Write/Edit 是否放行。只放行 .workbench/artifacts/develop/ 下的文件。"""
+    return rel.startswith(".workbench/artifacts/develop/")
+
+
+def _dispute_deny(disputes: dict[str, str]) -> "None":
+    """争议熔断的拒绝话术。终止令风格，不是权限错误。
+
+    ROMA 的源码注释写得直白：A denied tool call is not a kill: the wording must read
+    as a termination order, not a permission error, or the agent just retries another path.
+    """
+    names = ", ".join(disputes.keys())
+    reasons = "; ".join(f"{k}: {v}" for k, v in disputes.items())
+    hook_deny(
+        f"契约争议熔断生效（{names}）。立即停止开发。\n"
+        f"争议：{reasons}\n"
+        "不要重试、不要改用其他写入路径、"
+        "不要在实现侧加兼容层绕过冲突。\n"
+        "把已完成到哪一步、哪些文件已改、还差什么写进你自己的执行记录"
+        "（.workbench/artifacts/develop/ 下），然后立即返回，"
+        "由主 Agent 决定是否重新派发架构角色修订契约。"
+    )
+
+
 def frozen_hits(root: Path, cmd: str) -> list[str]:
     """命令文本里提到的全部冻结路径。
 
@@ -1342,6 +2065,9 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
             f"改完 `wb.py contract bump --name {names}` 重新锁定并通知消费方。")
 
 
+UNKNOWN_ROLE = "__unknown__"
+
+
 def current_role(root: Path, data: dict) -> str:
     """当前角色：subagent 优先取 hook 载荷里的 agent_type，主线程退回读 `.workbench/role`。
 
@@ -1350,81 +2076,32 @@ def current_role(root: Path, data: dict) -> str:
     都带 `agent_type` 与 `agent_id`，主线程两个都没有。所以并行 subagent 各自判定，
     不再抢 `.workbench/role` 那个单文件：谁写的由谁的载荷说，与启动顺序无关。
 
-    两种情况退回读文件，也就是退回旧行为：字段缺失（老版本 Claude Code），或
-    `agent_type` 不是角色名（内置的 Explore / general-purpose / Plan）。后者意味着
-    开发活要派给角色 agent —— 用 general-purpose 干开发，角色范围只能按最后一次
-    `role set` 兜底。
+    三态而非两态：
+    - 有 `agent_type` 且是角色名 → 用它
+    - 无 `agent_type` 但有 `agent_id` → UNKNOWN —— 来自某个 subagent 但类型被隐藏
+    - 两者都无 → 读 `.workbench/role`（真正的主线程兜底）
+
+    内置的 Explore / general-purpose / Plan 带 `agent_type`（只是不在 ROLES 里），
+    走「有 agent_type 但不是角色名」那条既有分支，不会落到 UNKNOWN。
+    真正触发 UNKNOWN 的只剩「老版本 Claude Code 不带这个字段」，那本来就该显式告警。
     """
     at = (data.get("agent_type") or "").strip()
     if at in ROLES:
         return at
+    if at:
+        # 有 agent_type 但不是角色名（Explore / general-purpose / Plan）：退回文件兜底
+        f = wb_dir(root) / "role"
+        return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
+    # 无 agent_type：有 agent_id 说明是 subagent（老版本），没有才是主线程
+    if data.get("agent_id"):
+        return UNKNOWN_ROLE
     f = wb_dir(root) / "role"
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
 
-def hook_pre_tool(data: dict) -> None:
-    tool = data.get("tool_name", "")
-    ti = data.get("tool_input") or {}
-    cwd = Path(data.get("cwd") or os.getcwd())
-    root = find_root(cwd)
-
-    if tool == "Bash":
-        cmd = ti.get("command", "") or ""
-        for pat, why in DENY_BASH:
-            if re.search(pat, cmd, re.IGNORECASE):
-                hook_deny(f"{why}。命令：{cmd[:160]}")
-        # Bash 重定向 / sed -i 会绕过 Write 与 Edit 上的全部守卫，必须单独拦。
-        if BASH_WRITE.search(cmd):
-            mentioned = frozen_hits(root, cmd)
-            unlocked = unlocked_paths(root)
-            hits = [h for h in mentioned if h not in unlocked]
-            if hits:
-                hook_deny(
-                    f"{', '.join(hits)} 是冻结文件，不能用 shell 直接写"
-                    f"（这会绕过守卫与哈希校验）。"
-                    f"{frozen_advice(root, hits, current_role(root, data))}命令：{cmd[:120]}"
-                )
-            # `cd .workbench/contracts && sed -i ... user-api.json` 这类先切目录的写法，
-            # 命令文本里看不到完整相对路径，frozen_hits 抓不到，只能按「切进了
-            # .workbench」整类兜住。条件是**切目录**而不是「命令里提到 .workbench」：
-            # 后者会连带拦下 `echo '.workbench/' >> .git/info/exclude`（多仓库布局 A
-            # 的第二步，.workbench 是被写的内容不是写入目标）与 architect 用 heredoc
-            # 新建一份还没登记的契约文件 —— 两个都是文档写明的正常操作，且撞上
-            # 「被拦时不要换等价写法」那条约定后没有出路。
-            if not mentioned and re.search(r"\b(?:cd|pushd)\s+[^\s;|&]*\.workbench\b", cmd):
-                hook_deny(
-                    "先 cd 进 .workbench/ 再写文件这条路不通：切了目录守卫就看不到完整"
-                    "相对路径，所以整类写法一并拒绝，换 sed/tee/重定向都一样。"
-                    "状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
-                    "`wb.py contract unlock --name <契约名> --reason '<为什么要改>'` 申报"
-                    "（契约名用 `wb.py contract list` 查）；写还没登记的新文件用相对"
-                    f"仓库根的完整路径，别 cd。命令：{cmd[:120]}"
-                )
-        # 越根写入：只从重定向目标里抽绝对路径。任意 shell 命令的写入目标抽不干净
-        # （cp / mv / 外部编辑器都漏），做一个漏一半的检查会让人误以为有防护，
-        # 所以只认这一种可靠形式，其余边界见 README 的「已知边界」。
-        rootr = root.resolve()
-        # /dev 与系统临时目录放行：`2>/dev/null`、scratch 文件是常规写法，
-        # 拦它们的误报率远高于收益。这里防的是写进别人的项目或系统路径。
-        safe = (Path("/dev"), Path("/tmp"), Path(tempfile.gettempdir()))
-        for m in re.finditer(r">>?\s*['\"]?(/[^\s'\";|&>]+)", cmd):
-            tgt = Path(m.group(1))
-            if any(s == tgt or s in tgt.parents for s in safe):
-                continue
-            if tgt != rootr and rootr not in tgt.parents:
-                hook_deny(f"重定向写入越出项目根 {rootr}：{tgt}")
-        for pat, why in WARN_BASH:
-            if re.search(pat, cmd, re.IGNORECASE):
-                print(f"[工作台提示] {why}。确认这是你要的操作。")
-        return
-
-    if tool not in ("Write", "Edit", "NotebookEdit", "MultiEdit"):
-        return
-
-    raw = ti.get("file_path") or ti.get("notebook_path")
-    if not raw:
-        return
-    target = resolve_target(cwd, str(raw))
+def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
+    """检查单个写入目标：越根 → 争议熔断 → 冻结 → 角色范围。供 Write/Edit/apply_patch 复用。"""
+    target = resolve_target(cwd, raw_path)
     rootr = root.resolve()
 
     # 1. 不许写出项目根
@@ -1433,15 +2110,17 @@ def hook_pre_tool(data: dict) -> None:
 
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
 
+    # 1.5. 争议熔断：developer 角色全线停工（执行记录除外）
+    disputes = read_disputes(rootr)
+    if disputes:
+        role = current_role(rootr, data)
+        if role in DEVELOPER_ROLES and not _is_dispute_exempt_write(rel):
+            _dispute_deny(disputes)
+
     # 2. 冻结文件：状态、进度、契约、以及被登记为契约的方案文档。
-    #    任何角色都不能直接写 —— 包括 owner 与主线程。
-    #    `.workbench/unlock` 现在是目录，所以也要拦它下面的窗口文件：
-    #    能写 unlock/<契约名> 就能自己给自己发申报，冻结形同虚设。
     frozen = read_frozen(rootr)
     if rel in frozen or any(rel.startswith(f + "/") for f in frozen):
         if rel not in unlocked_paths(rootr):
-            # 精确匹配，不能用 endswith：契约路径若以 role / frozen 结尾
-            # （例如 docs/role），会给出「只能通过 wb.py 命令修改」而不是契约申报指引。
             wbrel = os.path.relpath(wb_dir(rootr), rootr).replace(os.sep, "/")
             always = {f"{wbrel}/{c}" for c in FROZEN_ALWAYS}
             if rel in always or any(rel.startswith(a + "/") for a in always):
@@ -1450,10 +2129,14 @@ def hook_pre_tool(data: dict) -> None:
                 f"{rel} 是已冻结的契约文档，不能直接改。"
                 + frozen_advice(rootr, [rel], current_role(rootr, data))
             )
-        # 在申报窗口内，放行到下一层继续做角色范围检查
 
     # 3. 角色写入范围
     role = current_role(rootr, data)
+    if role == UNKNOWN_ROLE:
+        hook_deny(
+            f"无法验证调用者身份，拒绝写入 {rel}：载荷有 agent_id 但没有可识别的 agent_type。"
+            "升级 Codex/Claude CLI 后重试；主线程应不携带 agent_id。"
+        )
     if not role or not state_path(rootr).is_file():
         return
     try:
@@ -1463,13 +2146,6 @@ def hook_pre_tool(data: dict) -> None:
     globs = (st.get("role_scopes") or {}).get(role)
     if not globs:
         return
-    # `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。
-    # 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`，所以
-    # `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配
-    # `.workbench/contracts/events.json`。两者都绕开了本层的设计意图：产物目录
-    # 按阶段隔离、契约只有 architect 能写。冻结那一层（第二层）补不上这个缺口 ——
-    # 它只认**已锁定**的契约，而强推过的阶段产物不冻结、还没 lock 的契约也不在清单里。
-    # 收窄只影响裸扩展名模式，各角色显式写的 `.workbench/artifacts/<阶段>/**` 照常。
     if rel.startswith(".workbench/"):
         globs = [g for g in globs if g.startswith(".workbench/")] or ["（无）"]
     if not any(fnmatch.fnmatch(rel, g) for g in globs):
@@ -1477,6 +2153,133 @@ def hook_pre_tool(data: dict) -> None:
             f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。"
             f"确需跨界请交给对应角色，或 wb.py config set role_scopes.{role} '<JSON 数组>'"
         )
+
+
+def hook_pre_tool(data: dict) -> None:
+    tool = data.get("tool_name", "")
+    ti = data.get("tool_input") or {}
+    cwd = Path(data.get("cwd") or os.getcwd())
+    root = find_root(cwd)
+
+    if SHELL_TOOL.search(tool):
+        cmd = ti.get("command", "") or ""
+        rootr = root.resolve()
+        sensitive = sensitive_shell_reads(cwd, rootr, cmd)
+        if sensitive:
+            hook_deny("禁止读取敏感路径：" + ", ".join(sensitive))
+        for pat, why in DENY_BASH:
+            if re.search(pat, cmd, re.IGNORECASE):
+                hook_deny(f"{why}。命令：{cmd[:160]}")
+
+        # --- 争议熔断 ---
+        # 任何争议哨兵存在时，developer 角色全线停工。
+        # 放行：自己的执行记录（.workbench/artifacts/develop/）与 /tmp。
+        disputes = read_disputes(rootr)
+        if disputes:
+            role = current_role(rootr, data)
+            if role in DEVELOPER_ROLES and not _is_dispute_exempt_bash(cmd, rootr):
+                _dispute_deny(disputes)
+
+        # 解析写入目标：能精确判就精确判，解析不了退回粗检查。
+        all_targets, outside_targets, uncertain = resolve(cmd, root)
+
+        # --- 冻结检查 ---
+        # heredoc body 已被 strip_heredocs 剥掉，frozen_hits 不再命中 body 里的路径。
+        # uncertain=False 时，冻结路径不在 all_targets 里就放行（如 cp 契约 /tmp/bak）。
+        # uncertain=True 时退回旧行为（BASH_WRITE + frozen_hits 文本匹配）。
+        if BASH_WRITE.search(cmd) or all_targets:
+            cleaned_cmd = strip_heredocs(cmd)
+            mentioned = frozen_hits(root, cleaned_cmd)
+            unlocked = unlocked_paths(root)
+            hits = [h for h in mentioned if h not in unlocked]
+            if hits:
+                if not uncertain:
+                    # 精确模式：冻结路径必须在写入目标里才拦
+                    real_hits = [h for h in hits if h in all_targets]
+                    if real_hits:
+                        hits = real_hits
+                        hint = ""
+                    else:
+                        hits = []  # 全部是误报（如 cp 契约 /tmp/bak），放行
+                else:
+                    # 不确定模式：退回旧行为，但说明原因
+                    hint = "（写入目标无法解析，已一并拦截）"
+            else:
+                hint = ""
+            if hits:
+                hook_deny(
+                    f"{', '.join(hits)} 是冻结文件，不能用 shell 直接写"
+                    f"（这会绕过守卫与哈希校验）。{hint}"
+                    f"{frozen_advice(root, hits, current_role(root, data))}命令：{cmd[:120]}"
+                )
+            # 先切目录再写的兜底：uncertain 时仍生效
+            if not mentioned and re.search(
+                    r"\b(?:cd|pushd)\s+[^\s;|&]*\.workbench\b", cleaned_cmd):
+                hook_deny(
+                    "先 cd 进 .workbench/ 再写文件这条路不通：切了目录守卫就看不到完整"
+                    "相对路径，所以整类写法一并拒绝，换 sed/tee/重定向都一样。"
+                    "状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
+                    "`wb.py contract unlock --name <契约名> --reason '<为什么要改>'` 申报"
+                    "（契约名用 `wb.py contract list` 查）；写还没登记的新文件用相对"
+                    f"仓库根的完整路径，别 cd。命令：{cmd[:120]}"
+                )
+
+        # --- 越根写入 ---
+        # 用 resolve() 的 outside_targets 做精确检查。
+        # uncertain 时保留旧的 > 正则作兜底。
+        if outside_targets:
+            for rel_tgt in outside_targets:
+                tgt = (rootr / rel_tgt).resolve()
+                if tgt != rootr and rootr not in tgt.parents:
+                    hook_deny(f"写入越出项目根 {rootr}：{tgt}")
+        if uncertain:
+            safe_dirs = {Path("/dev").resolve(), Path("/tmp").resolve(),
+                         Path(tempfile.gettempdir()).resolve()}
+            for m in re.finditer(r">>?\s*['\"]?(/[^\s'\";|&>]+)", cmd):
+                tgt = Path(m.group(1))
+                if tgt == rootr or rootr in tgt.parents:
+                    continue  # 项目内部路径，不管是不是 safe 目录都不拦
+                if any(s == tgt or s in tgt.parents for s in safe_dirs):
+                    continue
+                hook_deny(f"重定向写入越出项目根 {rootr}：{tgt}")
+        # 已解析的 shell 目标也必须经过角色范围检查；否则 Bash 会成为
+        # Write/Edit 之外的角色越权通道。无法解析的写入目标不允许由 subagent 猜测放行。
+        role = current_role(root, data)
+        if uncertain and role in ROLES:
+            hook_deny("无法可靠解析 shell 写入目标，无法验证角色范围；请改用明确的文件工具或完整路径命令")
+        for rel_tgt in sorted(all_targets):
+            _check_write_target(rootr, root, rel_tgt, data)
+        for pat, why in WARN_BASH:
+            if re.search(pat, cmd, re.IGNORECASE):
+                print(f"[工作台提示] {why}。确认这是你要的操作。")
+        return
+
+    if READ_TOOL.search(tool):
+        raw = ti.get("file_path") or ti.get("path")
+        hit = sensitive_read_target(cwd, root.resolve(), raw) if raw else None
+        if hit:
+            hook_deny(f"禁止读取敏感路径：{hit}")
+        return
+
+    # apply_patch：Codex 的写入工具，目标藏在 *** Add/Update/Delete File: 标记里
+    if tool == "apply_patch":
+        cmd_text = ti.get("command", "") or ti.get("content", "") or ""
+        for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
+            for line in cmd_text.splitlines():
+                line = line.strip()
+                if line.startswith(marker):
+                    raw = line[len(marker):].strip()
+                    if raw:
+                        _check_write_target(cwd, root, raw, data)
+        return
+
+    if not WRITE_TOOL.search(tool):
+        return
+
+    raw = ti.get("file_path") or ti.get("notebook_path")
+    if not raw:
+        return
+    _check_write_target(cwd, root, str(raw), data)
 
 
 def hook_post_tool(data: dict) -> None:
@@ -1493,20 +2296,57 @@ def hook_post_tool(data: dict) -> None:
     会让两个开发角色的改动全挂到最后一次 `role set` 的那个角色名下。
     """
     ti = data.get("tool_input") or {}
-    raw = ti.get("file_path") or ti.get("notebook_path")
-    if not raw:
-        return
+    tool = data.get("tool_name", "")
     cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
     if not state_path(root).is_file():
         return
+    rootr = root.resolve()
+    role = current_role(root, data)
+
+    def append_entry(rel: str) -> None:
+        entry = {"at": now(), "path": rel, "role": role}
+        for key in ("agent_id", "agent_type", "session_id", "turn_id", "tool_use_id"):
+            value = data.get(key)
+            if value:
+                entry[key] = value
+        with (wb_dir(root) / ARTIFACT_LOG).open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+    # Bash/Codex shell 的文件变更也进入流水账。只能记录静态解析出的目标，
+    # 无法解析的动态写入由 pre-tool 的 uncertain 守卫拒绝。
+    if SHELL_TOOL.search(tool):
+        cmd = ti.get("command", "") or ""
+        targets, _, _ = resolve(cmd, root)
+        for rel in sorted(targets):
+            append_entry(rel)
+        return
+
+    # apply_patch：从标记里提取所有文件路径
+    if tool == "apply_patch":
+        cmd_text = ti.get("command", "") or ti.get("content", "") or ""
+        for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
+            for line in cmd_text.splitlines():
+                line = line.strip()
+                if line.startswith(marker):
+                    raw = line[len(marker):].strip()
+                    if raw:
+                        try:
+                            rel = os.path.relpath(
+                                resolve_target(cwd, raw), rootr).replace(os.sep, "/")
+                            append_entry(rel)
+                        except ValueError:
+                            pass
+        return
+
+    raw = ti.get("file_path") or ti.get("notebook_path")
+    if not raw:
+        return
     try:
-        rel = os.path.relpath(resolve_target(cwd, str(raw)), root.resolve()).replace(os.sep, "/")
+        rel = os.path.relpath(resolve_target(cwd, str(raw)), rootr).replace(os.sep, "/")
     except ValueError:
         return
-    entry = {"at": now(), "path": rel, "role": current_role(root, data)}
-    with (wb_dir(root) / ARTIFACT_LOG).open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    append_entry(rel)
 
 
 def hook_session_start(data: dict) -> None:
@@ -1525,10 +2365,13 @@ def hook_session_start(data: dict) -> None:
     ]
     doing = [t["id"] for t in st["tasks"] if t["status"] == "doing"]
     blocked = [f"{t['id']}({t['notes'][:30]})" for t in st["tasks"] if t["status"] == "blocked"]
+    stale = [t["id"] for t in st["tasks"] if t["status"] == "stale"]
     if doing:
         lines.append(f"进行中：{', '.join(doing)}")
     if blocked:
         lines.append(f"阻塞：{', '.join(blocked)} — 需要先解阻塞")
+    if stale:
+        lines.append(f"失效（stale）：{', '.join(stale)} — 上游被推翻，需 reopen 后重跑")
     bad = contract_drift(root, st)
     if bad:
         lines.append(f"契约漂移 {len(bad)} 处：{'; '.join(bad[:3])} — 用 `contract bump` 走正式变更")
@@ -1541,16 +2384,19 @@ def hook_session_start(data: dict) -> None:
     print("\n".join(lines))
 
 
-def hook_subagent_stop(data: dict) -> None:
+def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
     """子 agent 结束：解除角色锁与解冻窗口，避免下一个 agent 继承上一个的权限。
 
     只在没有别的任务仍处于 doing 时才解除。并行派发下先结束的那个 subagent
     会把仍在运行的兄弟的角色锁与解冻窗口一并清掉，后者随后进入无限制状态
     （角色范围检查在 role 文件缺失时直接跳过）—— 这个清除动作在串行下是缓解，
-    在并行下方向是反的。
+    在并行下方向是反的。Codex 的 SubagentStop 要求 JSON 输出，`fmt="codex"` 时
+    把清理提示包装成 `{"systemMessage": ...}`；Claude 保持原文本。
     """
     root = find_root(Path(data.get("cwd") or os.getcwd()))
     if not state_path(root).is_file():
+        if fmt == "codex":
+            print(json.dumps({"systemMessage": ""}, ensure_ascii=False))
         return
     st = load_state(root, lock=True)
     rolef = wb_dir(root) / "role"
@@ -1559,20 +2405,27 @@ def hook_subagent_stop(data: dict) -> None:
     log(st, "subagent_stop", role=role, doing=",".join(doing))
     save_state(root, st)
 
+    lines = []
     if doing:
-        print(f"[工作台] 子 agent（{role or '未标注角色'}）结束，但 {', '.join(doing)} 仍为 doing，"
-              f"角色锁与解冻窗口保持不变 —— 并行下清掉会打断仍在运行的兄弟 agent。"
-              f"确认产物后执行 `wb.py task done <id>`，最后一个任务收尾时自动解除。")
-        return
-
-    rolef.unlink(missing_ok=True)
-    opened = list(read_unlocks(root))
-    close_unlock(root)
-    if opened:
-        names = ", ".join(opened)
-        print(f"[工作台] 解冻窗口 {names} 已随子 agent 结束关闭。"
-              f"若已改动这些文件，跑 `wb.py contract verify` 确认状态，"
-              f"需要定版就逐个 `wb.py contract bump --name <名> --reason '<理由>'`。")
+        lines.append(
+            f"[工作台] 子 agent（{role or '未标注角色'}）结束，但 {', '.join(doing)} 仍为 doing，"
+            f"角色锁与解冻窗口保持不变 —— 并行下清掉会打断仍在运行的兄弟 agent。"
+            f"确认产物后执行 `wb.py task done <id>`，最后一个任务收尾时自动解除。")
+    else:
+        rolef.unlink(missing_ok=True)
+        opened = list(read_unlocks(root))
+        close_unlock(root)
+        if opened:
+            names = ", ".join(opened)
+            lines.append(
+                f"[工作台] 解冻窗口 {names} 已随子 agent 结束关闭。"
+                f"若已改动这些文件，跑 `wb.py contract verify` 确认状态，"
+                f"需要定版就逐个 `wb.py contract bump --name <名> --reason '<理由>'`。")
+    msg = "\n".join(lines)
+    if fmt == "codex":
+        print(json.dumps({"systemMessage": msg}, ensure_ascii=False))
+    elif msg:
+        print(msg)
 
 
 def cmd_hook(args) -> None:
@@ -1583,18 +2436,337 @@ def cmd_hook(args) -> None:
         data = {}
     try:
         {
-            "pre-tool": hook_pre_tool,
-            "post-tool": hook_post_tool,
-            "session-start": hook_session_start,
-            "subagent-stop": hook_subagent_stop,
+            "pre-tool": lambda d: hook_pre_tool(d),
+            "post-tool": lambda d: hook_post_tool(d),
+            "session-start": lambda d: hook_session_start(d),
+            "subagent-stop": lambda d: hook_subagent_stop(d, fmt=args.format),
         }[args.event](data)
     except KeyError:
         die(f"未知 hook 事件：{args.event}")
     except SystemExit:
         raise
-    except Exception as e:  # hook 永不因自身 bug 阻断主流程
+    except Exception as e:
         print(f"[工作台 hook 异常] {type(e).__name__}: {e}", file=sys.stderr)
+        # 未初始化目录不应被 hook 影响；已初始化工作台宁可阻断并暴露故障，
+        # 也不能在守卫异常时静默放行敏感写入。
+        try:
+            root = find_root(Path(data.get("cwd") or os.getcwd()))
+            if state_path(root).is_file():
+                sys.exit(2)
+        except Exception:
+            pass
         sys.exit(0)
+
+
+# --------------------------------------------------------------------------
+# doctor：托管模式的前提逐条查
+# --------------------------------------------------------------------------
+
+def sealed_payload(st: dict) -> dict:
+    """喂给 `wbsvrd init` 的 sealed.json。只带结构字段，进度字段留在 agent 侧（D9）。"""
+    d = {k: st[k] for k in SEALED_KEYS if k in st}
+    d["tasks_graph"] = [
+        {k: t[k] for k in ("id", "title", "role", "phase", "deps") if k in t}
+        for t in st.get("tasks", [])
+    ]
+    return d
+
+
+def cmd_doctor(args) -> None:
+    import grp
+    import pwd
+
+    root = find_root()
+    if args.sealed:
+        # 管道喂给 wbsvrd init。单独一条子命令是因为 init 要用户凭证，agent 跑不了。
+        print(json.dumps(sealed_payload(load_state(root)), ensure_ascii=False, indent=2))
+        return
+
+    checks: list[tuple[bool, str, str]] = []
+
+    def add(ok, label, detail):
+        checks.append((bool(ok), label, detail))
+
+    def sudo_ok(*argv) -> tuple[bool, str]:
+        try:
+            r = subprocess.run(["sudo", "-n", *argv], capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            return False, str(e)
+        return r.returncode == 0, (r.stderr.strip() or r.stdout.strip())[-200:]
+
+    # 1. 账户
+    try:
+        pw = pwd.getpwnam(SVC_USER)
+        add(True, f"{SVC_USER} 账户存在", f"uid={pw.pw_uid} shell={pw.pw_shell}")
+    except KeyError:
+        pw = None
+        add(False, f"{SVC_USER} 账户存在", "没有这个账户。跑 wbsvr/install.sh 建（要 sudo 密码）")
+
+    # 2. 二进制 + ping
+    exe = Path(WBSVRD)
+    if not exe.exists():
+        add(False, "wbsvrd 已安装", f"{WBSVRD} 不存在。跑 wbsvr/install.sh")
+    else:
+        add(True, "wbsvrd 已安装", f"{WBSVRD}  sha256={sha256_file(exe)[:16]}")
+    ok, detail = sudo_ok("-u", SVC_USER, WBSVRD, "ping")
+    add(ok, f"sudo -n -u {SVC_USER} wbsvrd ping", detail or "通")
+
+    # 3. 核心检查：拿不到 shell。这一条不过，上面全部作废。
+    shell_ok, _ = sudo_ok("-u", SVC_USER, "/bin/sh", "-c", "true")
+    if shell_ok:
+        detail = "**能拿到 shell —— 整套隔离归零**，检查 sudoers 里有没有多余的规则"
+    elif pw is None:
+        # 账户还不存在时这一条必然「通过」，但那不是保护，只是还没到能测的时候
+        detail = f"账户还不存在，这一条尚未真正测到 —— 建完 {SVC_USER} 再跑一次"
+    else:
+        detail = f"sudo -n -u {SVC_USER} /bin/sh 被拒，符合预期"
+    add(not shell_ok, f"agent 拿不到 {SVC_USER} 的 shell", detail)
+
+    # 4. 存储权限。0700 意味着 agent 连 stat 都不行，只能问服务端自己报。
+    store_ok, detail = sudo_ok("-u", SVC_USER, WBSVRD, "selfcheck", str(root.resolve()))
+    add(store_ok, "存储目录权限与 refs 完整性",
+        detail or "0700 + 属主正确 + 每份托管正文都在")
+
+    # 5. 最容易被忽略的一条。见 docs/wbsvr.md「已知边界」。
+    me = pwd.getpwuid(os.getuid()).pw_name
+    mine = {g.gr_name for g in grp.getgrall() if me in g.gr_mem}
+    risky = sorted(mine & {"admin", "wheel", "sudo"})
+    add(not risky, f"agent 账户（{me}）不在 admin / wheel 组",
+        f"在 {', '.join(risky)} 里 —— 用户刚输过密码的 15 分钟内 agent 可以直接 "
+        f"`sudo -u {SVC_USER} /bin/sh`，整套隔离归零。移出去，或接受这个洞并知道它在。"
+        if risky else "不在特权组里")
+
+    # 6. bootstrap 例外：工作台本体就在这个仓库里，.claude/ 必须 agent 可写
+    boot = subprocess.run(
+        ["git", "-C", str(root), "ls-files", "--error-unmatch", ".claude/hooks/wb.py"],
+        capture_output=True).returncode == 0
+    claude = root / ".claude"
+    agent_owns = claude.is_dir() and claude.stat().st_uid == os.getuid()
+    if boot:
+        add(True, ".claude/ 归属", "bootstrap 模式：工作台本体就是这个仓库的源码，"
+                                  ".claude/ 保持 agent 可写 —— 否则改不动 wb.py。本项目不启用托管。")
+    else:
+        add(not agent_owns, ".claude/ 不归 agent 所有",
+            "agent 能改 wb.py 本身，那它就能改掉所有判定 —— 这个洞的正解是保护 wb.py，"
+            "不是把判定挪进服务端（见 D8 后半）" if agent_owns else "属主不是 agent")
+
+    print("托管前提检查")
+    for ok, label, detail in checks:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {label} — {detail}")
+    fails = [l for ok, l, _ in checks if not ok]
+
+    if boot:
+        print("\n结论：bootstrap 模式，不启用托管。退回 hook + 哈希那一档保护。")
+        print("要在别的仓库启用：把 .claude/ 与 wbsvr/ 拷过去，在那边跑 wbsvr/install.sh。")
+        sys.exit(0)
+    if fails:
+        print(f"\n结论：{len(fails)} 条前提不成立，不启用托管，退回 hook + 哈希。")
+        print("修完再跑一次 wb.py doctor。")
+        sys.exit(1)
+    if hosted(root):
+        print("\n结论：全部通过，托管已启用。")
+    else:
+        print("\n结论：前提全部成立，但本项目还没建存储。init 要用户凭证（agent 跑不了）：")
+        print(f"  python3 .claude/hooks/wb.py doctor --sealed | "
+              f"sudo -u {SVC_USER} {WBSVRD} init {shlex.quote(str(root.resolve()))}")
+    sys.exit(0)
+
+
+def selfcheck_hosted() -> str:
+    """托管模式的端到端自检：真的把 wbsvrd 编出来跑一遍完整生命周期。
+
+    只把 `_svr` 里那一层 sudo 摘掉 —— 建 `wbsvr` 账户要用户密码，CI 里测不了；
+    协议、路径校验、锁定判定、版本号、窗口归属全是真的。刻意**不**在 wb.py 里留
+    「换掉 wbsvrd 路径」的环境变量开关：那种开关自己就是绕过整套机制的路（指向一个
+    永远回「没锁」的假二进制），所以替换只发生在进程内、只发生在这个函数里。
+    """
+    import io
+    from contextlib import redirect_stdout, redirect_stderr
+
+    src = Path(__file__).resolve().parent.parent.parent / "wbsvr"
+    if not (src / "main.go").is_file():
+        return "跳过（找不到 wbsvr/ 源码）"
+    if not shutil.which("go"):
+        return "跳过（没有 go 工具链）"
+
+    tmp = Path(tempfile.mkdtemp(prefix="wb-hosted-"))
+    old_cwd = Path.cwd()
+    saved = {k: globals()[k] for k in ("WBSVRD", "_svr", "_hosted_cache")}
+    try:
+        store = tmp / "store"
+        store.mkdir()
+        exe = tmp / "wbsvrd"
+        # storeBase 是包级变量，没有 flag 也没有环境变量（生产上刻意如此），
+        # 测试用 -X 在链接期换掉它。
+        b = subprocess.run(
+            ["go", "build", "-ldflags", f"-X main.storeBase={store}", "-o", str(exe), "."],
+            cwd=src, capture_output=True, text=True)
+        assert b.returncode == 0, "wbsvrd 编不出来：" + b.stderr[-500:]
+
+        def direct(root, *args, stdin=None, raw=False):
+            argv = [str(exe), str(args[0])]
+            if root is not None:
+                argv.append(str(Path(root).resolve()))
+            argv += [str(a) for a in args[1:]]
+            r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60)
+            if r.returncode != 0:
+                payload = {}
+                try:
+                    payload = json.loads(r.stdout)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                raise WbsvrError(r.stderr.strip() or r.stdout.strip() or "非零退出", payload)
+            return r.stdout if raw else json.loads(r.stdout or "{}")
+
+        globals()["WBSVRD"] = str(exe)
+        globals()["_svr"] = direct
+        globals()["_hosted_cache"] = None
+
+        proj = tmp / "proj"
+        proj.mkdir()
+        os.chdir(proj)
+
+        def quiet(*a):
+            buf = io.StringIO()
+            code = 0
+            try:
+                with redirect_stdout(buf), redirect_stderr(buf):
+                    main(list(a))
+            except SystemExit as e:
+                code = e.code or 0
+            return code, buf.getvalue()
+
+        def svr(*a, **kw):
+            return direct(proj, *a, **kw)
+
+        quiet("init", "--name", "hosted-demo")
+        globals()["_hosted_cache"] = None
+        assert not hosted(proj), "存储还没建就认为托管已启用"
+
+        # 建存储：走用户凭证那条路，agent 侧只出 sealed 载荷
+        code, sealed = quiet("doctor", "--sealed")
+        svr("init", stdin=sealed)
+        globals()["_hosted_cache"] = None
+        assert hosted(proj), "存储建好了却没识别成托管"
+        assert (proj / ".workbench" / "hosted").is_file(), "托管备忘没落盘"
+
+        # 登记托管契约：正文先落工作副本，再由 wb.py 交给服务端
+        code, out = quiet("contract", "add", "--hosted", "--name", "user-api")
+        assert code != 0 and "工作副本" in out, out
+        wc = proj / ".workbench" / "wc" / "user-api"
+        wc.write_text("openapi: 3.0.0\n", encoding="utf-8")
+        code, out = quiet("contract", "add", "--hosted", "--name", "user-api",
+                          "--consumers", "frontend-developer")
+        assert code == 0, out
+        assert not wc.exists(), "登记后工作副本应删除 —— 留着就有两份会分叉的副本"
+        st = load_state(proj)
+        c = find_contract(st, "user-api")
+        assert c["hosted"] and c["path"] == "", c
+
+        # 正文不在 agent 地址空间里：冻结清单不该出现空路径
+        assert "" not in frozen_paths(st), "空路径进了冻结清单，会把整个项目根当成冻结文件"
+        assert not (proj / ".workbench" / "contracts" / "user-api.json").exists()
+
+        # read / checkout 拿得到正文
+        code, out = quiet("contract", "read", "--name", "user-api")
+        assert out == "openapi: 3.0.0\n", repr(out)
+        quiet("contract", "checkout", "--name", "user-api")
+        assert wc.read_text(encoding="utf-8") == "openapi: 3.0.0\n"
+
+        # 未锁定时可以自由改
+        wc.write_text("openapi: 3.0.1\n", encoding="utf-8")
+        code, out = quiet("contract", "commit", "--name", "user-api")
+        assert code == 0 and not wc.exists(), out
+
+        code, out = quiet("contract", "lock", "--name", "user-api")
+        assert code == 0 and "已锁定" in out, out
+
+        # 锁定后 commit 必须被拒 —— 这是整套机制的主判定点
+        quiet("contract", "checkout", "--name", "user-api")
+        wc.write_text("openapi: 9.9.9\n", encoding="utf-8")
+        code, out = quiet("contract", "commit", "--name", "user-api")
+        assert code != 0 and "unlock" in out, out
+        assert svr("read", "user-api", raw=True) == "openapi: 3.0.1\n", "被拒的提交改到了正文"
+
+        # unlock 不转发：agent 自己开得了窗口，冻结就只是个建议
+        code, out = quiet("contract", "unlock", "--name", "user-api", "--reason", "补分页")
+        assert code == 2 and "sudo -u wbsvr" in out, out
+        refs = svr("list")["refs"]
+        assert refs["user-api"]["locked"] and not refs["user-api"].get("unlock_until"), \
+            "wb.py 不该能开出解冻窗口"
+
+        # 用户凭证开窗口之后，改 + bump 走通，版本号跟着涨
+        svr("unlock", "user-api", "补分页字段")
+        code, out = quiet("contract", "commit", "--name", "user-api")
+        assert code == 0, out
+        code, out = quiet("contract", "bump", "--name", "user-api", "--reason", "补分页字段")
+        assert code == 0 and "v1 -> v2" in out, out
+        st = load_state(proj)
+        assert find_contract(st, "user-api")["version"] == 2
+        # bump 给消费方建了返工任务
+        assert any("user-api" in t.get("contracts", []) for t in st["tasks"]), "没建返工任务"
+        code, out = quiet("contract", "verify")
+        assert code == 0, out
+
+        # repo 内契约：正文在 git 里，指纹在服务端。改了文件就该报漂移
+        (proj / "openapi.yaml").write_text("v: 1\n", encoding="utf-8")
+        code, out = quiet("contract", "add", "openapi.yaml", "--name", "repo-api")
+        assert code == 0, out
+        quiet("contract", "lock", "--name", "repo-api")
+        code, out = quiet("contract", "verify")
+        assert code == 0, out
+        (proj / "openapi.yaml").write_text("v: 2\n", encoding="utf-8")
+        code, out = quiet("contract", "verify")
+        assert code != 0 and "repo-api" in out, out
+        # 未申报就重新上锁换指纹 —— 那是 repo 契约唯一那档保护的绕过路，必须拒
+        code, out = quiet("contract", "lock", "--name", "repo-api")
+        assert code != 0 and "unlock" in out, out
+
+        # 改本地镜像骗不了门禁：权威副本在服务端
+        (proj / "openapi.yaml").write_text("v: 1\n", encoding="utf-8")
+        st = load_state(proj, lock=True)
+        find_contract(st, "repo-api")["sha"] = "0" * 64
+        save_state(proj, st)
+        code, out = quiet("contract", "verify")
+        assert code == 0, "改本地镜像后 verify 应仍按服务端期望值判定：" + out
+
+        # sealed 字段被本地改动要被检测到
+        st = load_state(proj, lock=True)
+        st["role_scopes"]["pm"] = ["**"]
+        save_state(proj, st)
+        bad = sealed_audit(proj, st)
+        assert any("role_scopes" in b for b in bad), bad
+        code, out = quiet("status")
+        assert "托管字段不一致" in out, out
+        st = load_state(proj, lock=True)
+        st["role_scopes"] = json.loads(json.dumps(svr("sealed-get", "role_scopes")["role_scopes"]))
+        save_state(proj, st)
+        assert not sealed_audit(proj, load_state(proj)), "复原后仍报不一致"
+
+        # 阶段推进两侧同步；phase set 在托管下关掉
+        code, out = quiet("phase", "set", "design")
+        assert code != 0 and "phase advance" in out, out
+        assert svr("sealed-get", "phase")["phase"] == "clarify"
+        code, out = quiet("phase", "advance", "--force")
+        assert code == 0 and "clarify -> analyze" in out, out
+        assert svr("sealed-get", "phase")["phase"] == "analyze", "服务端阶段没跟着推进"
+        assert load_state(proj)["phase"] == "analyze"
+        # 本地阶段被直接改花时：服务端按自己的当前值拒掉这次推进（并发下同理），
+        # 且门禁把两侧不一致点名出来 —— 否则改本地就等于跳过中间阶段的全部门禁。
+        st = load_state(proj, lock=True)
+        st["phase"] = "develop"
+        save_state(proj, st)
+        assert any("phase" in b for b in sealed_audit(proj, st)), "改本地 phase 没被审计出来"
+        code, out = quiet("phase", "advance", "--force")
+        assert code != 0 and "作废" in out, out
+        assert svr("sealed-get", "phase")["phase"] == "analyze", "服务端阶段被跳跃推进了"
+
+        return "通过"
+    finally:
+        os.chdir(old_cwd)
+        for k, v in saved.items():
+            globals()[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # --------------------------------------------------------------------------
@@ -1690,6 +2862,51 @@ def cmd_selfcheck(args) -> None:
         assert code == 1 and "项目根" in out, \
             "越根契约必须拒绝：登记后 Bash 提它就被拦、Write 又先撞越根检查，契约无法维护"
 
+        # 争议熔断：落哨兵 -> developer 写入被拦 -> bump 自动解除 -> --clear 手动解除
+        code, out = quiet("contract", "dispute", "--name", "user-api",
+                          "--reason", "后端字段实际不可能返回")
+        assert code == 0, f"dispute 应成功：{out}"
+        disputes = read_disputes(tmp)
+        assert "user-api" in disputes, f"dispute 应落哨兵：{disputes}"
+        assert disputes["user-api"] == "后端字段实际不可能返回"
+
+        # contract list 应显示争议中
+        code, out = quiet("contract", "list")
+        assert "争议中" in out, f"list 应显示争议中：{out}"
+
+        # status 应显示争议
+        code, out = quiet("status")
+        assert "争议中" in out, f"status 应显示争议：{out}"
+
+        # bump 应自动解除争议
+        cpath.write_text('{"GET /users": {"200": ["id", "name", "email", "avatar"]}}\n',
+                         encoding="utf-8")
+        quiet("contract", "bump", "--name", "user-api", "--reason", "修订字段解除争议")
+        assert not read_disputes(tmp), "bump 应自动解除争议"
+
+        # --clear 手动解除
+        code, out = quiet("contract", "dispute", "--name", "user-api", "--reason", "再次冲突")
+        assert code == 0
+        assert read_disputes(tmp)
+        code, out = quiet("contract", "dispute", "--clear", "--name", "user-api")
+        assert code == 0, f"--clear 应成功：{out}"
+        assert not read_disputes(tmp), "--clear 应解除争议"
+
+        # --clear 不给 name 全部解除
+        quiet("contract", "dispute", "--name", "user-api", "--reason", "冲突A")
+        assert read_disputes(tmp)
+        code, out = quiet("contract", "dispute", "--clear")
+        assert code == 0
+        assert not read_disputes(tmp), "--clear 不给 name 应全部解除"
+
+        # dispute 无 --name 应拒绝
+        code, out = quiet("contract", "dispute")
+        assert code == 1, f"dispute 无 --name 应拒绝：{out}"
+
+        # dispute 无 --reason 应拒绝
+        code, out = quiet("contract", "dispute", "--name", "user-api")
+        assert code == 1 and "reason" in out, f"dispute 无 --reason 应拒绝：{out}"
+
         # 命令门禁
         quiet("config", "set", "gate_commands.test", "exit 1")
         ok, label, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
@@ -1773,10 +2990,30 @@ def cmd_selfcheck(args) -> None:
         last = json.loads((tmp / ".workbench" / ARTIFACT_LOG).read_text(
             encoding="utf-8").strip().splitlines()[-1])
         assert last["role"] == "backend-developer", last
+        assert last["agent_type"] == "backend-developer", last
 
         quiet("role", "clear")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 0, "无角色时不应做角色限制"
+
+        # shell 写入目标也必须经过角色范围检查，并记录到流水账
+        quiet("role", "set", "frontend-developer")
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "agent_type": "frontend-developer", "agent_id": "fe-1",
+                      "tool_input": {"command": "echo x > migrations/blocked.sql"}}) == 2, \
+            "Bash 不应绕过角色范围"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "agent_type": "frontend-developer", "agent_id": "fe-1",
+                      "tool_input": {"command": "echo x > web/shell.tsx"}}) == 0, \
+            "Bash 正常角色范围写入被误拦"
+        hook_post_tool({"tool_name": "Bash", "cwd": cw,
+                        "agent_type": "frontend-developer", "agent_id": "fe-1",
+                        "session_id": "s-1", "turn_id": "t-1",
+                        "tool_use_id": "u-1",
+                        "tool_input": {"command": "echo x > web/shell.tsx"}})
+        last = json.loads((tmp / ".workbench" / ARTIFACT_LOG).read_text(
+            encoding="utf-8").strip().splitlines()[-1])
+        assert last["path"] == "web/shell.tsx" and last["agent_id"] == "fe-1", last
 
         # 各角色的本职写入不能被拦。这六条都是实测出来的误拦，每一条堵的都是
         # 该角色自己的活，而不是跨界 —— 误拦比漏拦更快让 agent 去想办法绕守卫。
@@ -1810,8 +3047,12 @@ def cmd_selfcheck(args) -> None:
                           "tool_input": {"file_path": path}}) == 2, f"{agent} 写 {path} 未被拦（{why}）"
         # 收窄只针对裸扩展名，显式的产物目录模式照常放行
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
-                      "tool_input": {"file_path": ".workbench/artifacts/develop/notes.md"}}) == 0, \
-            "收窄误伤了显式写出的 .workbench/artifacts/<阶段>/** 模式"
+                      "tool_input": {"file_path": ".workbench/artifacts/develop/tasks/notes.md"}}) == 0, \
+            "收窄误伤了显式写出的 .workbench/artifacts/develop/tasks/** 模式"
+        # verification.md 在 develop 上层，developer 不可写（只有主线程可写）
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": ".workbench/artifacts/develop/verification.md"}}) == 2, \
+            "verification.md 应从 developer 范围移出"
 
         # 冻结文档：契约与方案文档不能被随意修改
         DESIGN = ".workbench/artifacts/design/design.md"
@@ -2028,8 +3269,10 @@ def cmd_selfcheck(args) -> None:
         assert not allowed("repos/frontend/src/api.py", "backend-developer"), \
             "裸 *.py 会放行别人仓库的同语言文件"
         assert not allowed("repos/backend/package.json", "frontend-developer")
-        assert allowed(".workbench/artifacts/develop/verification.md", "backend-developer"), \
+        assert allowed(".workbench/artifacts/develop/tasks/T1.md", "backend-developer"), \
             "产物目录在工作区根，不该被加仓库前缀"
+        assert not allowed(".workbench/artifacts/develop/verification.md", "backend-developer"), \
+            "verification.md 应从 developer 范围移出"
         # qa 没有仓库提示词，永远走「任意仓库」分支 —— 裸扩展名模式不能在那个分支被
         # 丢掉，否则它只剩四个测试目录，配不了测试框架（与单仓库下同一个误拦）
         assert allowed("repos/frontend/vitest.config.ts", "qa"), \
@@ -2045,7 +3288,7 @@ def cmd_selfcheck(args) -> None:
         # 手写认领之后不该再点名；而 config set 是整条覆盖，漏抄一个前缀就换成
         # 那个仓库被点名 —— 这正是提示最后一行要说的
         claimed = dict(rs, **{"backend-developer": [
-            ".workbench/artifacts/develop/**", "repos/backend/**", "repos/shared/**"]})
+            ".workbench/artifacts/develop/tasks/**", "repos/backend/**", "repos/shared/**"]})
         assert unclaimed_repos(tmp, claimed) == ["payments-svc"], \
             "整条覆盖漏抄的前缀没有被点名"
         # 全都认不出名字时走「任意仓库」分支，探路径命中，不该误报点名
@@ -2090,6 +3333,17 @@ def cmd_selfcheck(args) -> None:
         hook_subagent_stop({"cwd": cw})
         assert not (tmp / ".workbench" / "role").is_file(), "无 doing 任务时应解除角色锁"
 
+        # Codex SubagentStop 必须输出合法 JSON，且清理逻辑与 Claude 一致
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "codex 自检")
+        assert read_unlocks(tmp)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            hook_subagent_stop({"cwd": cw}, fmt="codex")
+        payload = json.loads(buf.getvalue().strip())
+        assert "systemMessage" in payload and "user-api" in payload["systemMessage"], payload
+        assert not read_unlocks(tmp), "codex 形态也应关闭解冻窗口"
+        assert not (tmp / ".workbench" / "role").is_file()
+
         # 强推的阶段必须与真正过门禁的区分开：status 是最常看的看板
         quiet("phase", "advance", "--force")
         st = load_state(tmp)
@@ -2121,13 +3375,135 @@ def cmd_selfcheck(args) -> None:
             assert st["max_parallel"] == 4 and find_task(st, tid)["status"] == "done", \
                 "子进程拿抢锁前的旧快照写回，盖掉了期间落盘的改动"
 
+        # --- resolve() 误报测试：这些命令不该被冻结/越根检查拦下 ---
+        # ROMA 注释里那三条误报清单 + heredoc body 里提到冻结路径
+        for ok_cmd in [
+            "cat .workbench/artifacts/clarify/requirements.md > /tmp/x.md",
+            "grep -R X .workbench/contracts/ > /tmp/o.log 2>&1",
+            "cp .workbench/contracts/user-api.json /tmp/bak.json",
+            # heredoc body 里提到已冻结路径，但 body 不是写入目标
+            "cat > .workbench/contracts/new-api.yaml <<EOF\n见 user-api.json\nEOF",
+            "cat > /tmp/design.md <<EOF\n参考 .workbench/contracts/user-api.json\nEOF",
+        ]:
+            assert guard({"tool_name": "Bash", "cwd": cw,
+                          "tool_input": {"command": ok_cmd}}) == 0, \
+                f"resolve() 误报：{ok_cmd}"
+
+        # resolve() 真写入仍要拦：这些确实是写冻结文件
+        for bad_cmd in [
+            "sed -i s/a/b/ .workbench/contracts/user-api.json",
+            "tee .workbench/state.json < /dev/null",
+        ]:
+            assert guard({"tool_name": "Bash", "cwd": cw,
+                          "tool_input": {"command": bad_cmd}}) == 2, \
+                f"resolve() 漏报：{bad_cmd}"
+
+        # --- stale / skipped 状态 ---
+        quiet("task", "add", "--title", "上游A", "--phase", "develop",
+              "--role", "backend-developer")
+        stid_a = find_task(load_state(tmp), "上游A")["id"]
+        quiet("task", "add", "--title", "下游B", "--phase", "develop",
+              "--role", "frontend-developer", "--deps", stid_a)
+        stid_b = find_task(load_state(tmp), "下游B")["id"]
+        quiet("task", "start", stid_a)
+        quiet("task", "done", stid_a)
+        quiet("task", "start", stid_b)
+        quiet("task", "done", stid_b)
+        # 上游 block 应传播 stale 到下游
+        quiet("task", "block", stid_a, "--reason", "需求变了")
+        st = load_state(tmp)
+        assert find_task(st, stid_a)["status"] == "blocked"
+        assert find_task(st, stid_b)["status"] == "stale", \
+            "上游 block 未传播 stale 到下游 done 任务"
+        # stale 任务应阻塞门禁
+        pool = [t for t in st["tasks"] if t["phase"] == "develop"]
+        left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
+        assert stid_b in left, "stale 任务应被视为未完成"
+        # reopen 上游应恢复下游
+        quiet("task", "reopen", stid_a)
+        st = load_state(tmp)
+        assert find_task(st, stid_b)["status"] == "todo", \
+            "reopen 上游未恢复下游 stale 为 todo"
+        # skip 必须带理由
+        code, _ = quiet("task", "skip", stid_b)
+        assert code == 1, "skip 不带理由应拒绝"
+        quiet("task", "skip", stid_b, "--reason", "功能取消")
+        assert find_task(load_state(tmp), stid_b)["status"] == "skipped"
+        # skipped 在门禁里等同于 done
+        pool = [t for t in load_state(tmp)["tasks"] if t["phase"] == "develop"]
+        left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
+        assert stid_b not in left, "skipped 任务不应阻塞门禁"
+
+        # --- unverified 检测 ---
+        quiet("config", "set", "gate_commands.test", "echo '0 tests passed'; exit 0")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert not ok and "零用例" in detail, f"零用例未检出：{detail}"
+        quiet("config", "set", "gate_commands.test", "exit 0")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert ok, "正常退出码 0 且非零用例应通过"
+
+        # skip 标志检测
+        quiet("config", "set", "gate_commands.test", "pytest --passWithNoTests; exit 0")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert not ok and "unverified" in detail, f"skip 标志未检出：{detail}"
+        quiet("config", "set", "gate_commands.test", "exit 0")
+
+        # --- UNKNOWN 调用者告警 ---
+        import io as _io
+        from contextlib import redirect_stderr as _redirect_stderr
+        # 有 agent_id 无 agent_type 必须拒绝，不能静默退回主线程权限
+        code = guard({"tool_name": "Write", "cwd": cw,
+                      "agent_id": "a123",
+                      "tool_input": {"file_path": "web/index.tsx"}})
+        assert code == 2, "UNKNOWN 调用者不应放行"
+
+        # 无 agent_id 无 agent_type 应走主线程兜底（不告警）
+        stderr_buf = _io.StringIO()
+        with _redirect_stderr(stderr_buf):
+            code = guard({"tool_name": "Write", "cwd": cw,
+                          "tool_input": {"file_path": "web/index.tsx"}})
+        assert code == 0, "主线程无角色时应放行"
+        assert "门禁失效" not in stderr_buf.getvalue(), "主线程不该触发 UNKNOWN 告警"
+
+        # --- apply_patch 工具识别 ---
+        assert guard({"tool_name": "apply_patch", "cwd": cw,
+                      "tool_input": {"command": "*** Delete File: .workbench/state.json\n---\n"}}) == 2, \
+            "apply_patch 删除冻结文件未被拦"
+        assert guard({"tool_name": "apply_patch", "cwd": cw,
+                      "tool_input": {"command": "*** Add File: web/new.tsx\n---\nconsole.log(1)\n"}}) == 0, \
+            "apply_patch 正常写入被误拦"
+
+        # --- SHELL_TOOL 覆盖 Codex shell 工具 ---
+        assert guard({"tool_name": "shell", "cwd": cw,
+                      "tool_input": {"command": "rm -rf /"}}) == 2, \
+            "Codex shell 工具未被 DENY_BASH 拦截"
+        assert guard({"tool_name": "exec_command", "cwd": cw,
+                      "tool_input": {"command": "echo hi > /tmp/x.txt"}}) == 0, \
+            "Codex exec_command 正常命令被误杀"
+
+        # Codex 没有 Claude settings.json 的 Read deny 时，守卫仍要挡住敏感文件。
+        assert guard({"tool_name": "Read", "cwd": cw,
+                      "tool_input": {"file_path": ".env"}}) == 2, \
+            "敏感 .env 读取未被拦"
+        assert guard({"tool_name": "read_file", "cwd": cw,
+                      "tool_input": {"path": "secrets/api.key"}}) == 2, \
+            "敏感 secrets 读取未被拦"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "cat .env.local"}}) == 2, \
+            "Bash 敏感读取未被拦"
+        assert guard({"tool_name": "Read", "cwd": cw,
+                      "tool_input": {"file_path": "README.md"}}) == 0, \
+            "普通文件读取被误拦"
+
         # 报告可渲染
         code, out = quiet("report")
         assert "交付报告" in out and "user-api" in out
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
-    print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / 并发写状态 / 产物挂载 / 报告")
+    hs = selfcheck_hosted()
+    print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
+          f"并发写状态 / 产物挂载 / 报告　托管模式：{hs}")
 
 
 # --------------------------------------------------------------------------
@@ -2163,7 +3539,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("task", help="任务与进度")
-    p.add_argument("action", choices=["add", "list", "start", "done", "block", "reopen"])
+    p.add_argument("action", choices=["add", "list", "start", "done", "block", "reopen", "skip"])
     p.add_argument("id", nargs="?")
     p.add_argument("--title")
     p.add_argument("--role", choices=ROLES)
@@ -2185,16 +3561,26 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_next)
 
-    p = sub.add_parser("contract", help="契约登记 / 锁定 / 漂移校验 / 申报变更")
+    p = sub.add_parser("contract", help="契约登记 / 锁定 / 漂移校验 / 申报变更 / 争议熔断")
     p.add_argument("action",
-                   choices=["add", "list", "lock", "unlock", "verify", "bump", "impact"])
+                   choices=["add", "list", "lock", "unlock", "verify", "bump", "impact",
+                            "read", "checkout", "commit", "dispute"])
     p.add_argument("path", nargs="?")
     p.add_argument("--name")
     p.add_argument("--owner", choices=ROLES)
     p.add_argument("--consumers", help="逗号分隔的角色名")
-    p.add_argument("--reason", help="unlock / bump 必填：为什么要改这份冻结文档")
+    p.add_argument("--reason", help="unlock / bump / dispute 必填：为什么要改这份冻结文档 / 冲突在哪")
     p.add_argument("--all", action="store_true")
+    p.add_argument("--hosted", action="store_true",
+                   help="add：正文交托管存储保管，不进任何仓库（需要先启用托管）")
+    p.add_argument("--clear", action="store_true",
+                   help="dispute：解除争议哨兵（不给 --name 则全部解除）")
     p.set_defaults(func=cmd_contract)
+
+    p = sub.add_parser("doctor", help="逐条查托管模式的前提；不过就不启用，退回 hook + 哈希")
+    p.add_argument("--sealed", action="store_true",
+                   help="打印喂给 `wbsvrd init` 的 sealed.json 到 stdout")
+    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("artifact", help="产物目录")
     p.add_argument("action", choices=["path", "list"])
@@ -2227,6 +3613,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("hook", help="hook 入口，从 stdin 读 JSON")
     p.add_argument("event", choices=["pre-tool", "post-tool", "session-start", "subagent-stop"])
+    p.add_argument("--format", choices=["claude", "codex"], default="claude",
+                   help="调用端格式（claude 默认，codex 走 apply_patch 等差异）")
     p.set_defaults(func=cmd_hook)
 
     p = sub.add_parser("selfcheck", help="自检：跑一遍全链路并断言")
@@ -2243,12 +3631,20 @@ def main(argv: list[str] | None = None) -> None:
         die("phase set 需要阶段名")
     if args.cmd == "config" and args.action == "set" and (not args.key or args.value is None):
         die("config set 需要 <key> <value>")
-    if args.cmd == "contract" and args.action == "add" and not args.path:
-        die("contract add 需要契约文件路径")
+    if args.cmd == "contract" and args.action == "add" and not args.path and not args.hosted:
+        die("contract add 需要契约文件路径（或用 --hosted --name <名> 登记托管契约）")
+    if args.cmd == "contract" and args.action in ("read", "checkout", "commit") and not args.name:
+        die(f"contract {args.action} 需要 --name")
     if args.cmd == "contract" and args.action in ("bump", "impact", "unlock") and not args.name:
         die(f"contract {args.action} 需要 --name")
+    if args.cmd == "contract" and args.action == "dispute" and not args.clear and not args.name:
+        die("contract dispute 需要 --name（或 --clear 解除）")
     try:
         args.func(args)
+    except WbsvrError as e:
+        # 托管服务的拒绝理由本身就是给 agent 看的（里面有该跑的申报命令），
+        # 抛栈追踪等于把它埋掉。
+        die(f"wbsvrd 拒绝了这次操作：\n{e}")
     finally:
         release_state_lock()
 
