@@ -8,7 +8,7 @@ wbsvr 把工作台的**流程状态与契约文档**从 agent 可寻址的文件
 
 现有机制（`contract lock` 哈希冻结 + `PreToolUse` 守卫 + `contract verify`）已经挡住了「agent 守规矩时改不了冻结文档」。它的结构性盲区有两条：
 
-**盲区一：Bash 写入路径无法枚举。** 守卫靠正则匹配命令文本，`BASH_WRITE` 目前覆盖 `>` / `tee` / `sed -i` / `patch` / `dd` 等，但**不含 `cp` 与 `mv`**。更根本的是，`git checkout`、外部编辑器、任意脚本这些路径原理上就抽不出写入目标 —— 做半个检查比不做更坏，因为它让人误以为有保护。
+**盲区一：Bash 写入路径无法枚举。** 守卫靠正则匹配命令文本，`BASH_WRITE` 覆盖 `>` / `tee` / `sed -i` / `patch` / `dd` / `cp` / `mv` / `install`（后三个是阶段 0 补的）。把 `cp` / `mv` 补进去反而把问题照得更清楚：它只关掉了被枚举到的那几个写法，同时因为匹配不分源和目标，开了一类新误报（`cp .workbench/contracts/api.yaml /tmp/bak` 这种纯读备份被拦）。更根本的是，`git checkout`、外部编辑器、任意脚本这些路径原理上就抽不出写入目标 —— 做半个检查比不做更坏，因为它让人误以为有保护。
 
 **盲区二：哈希校验有结构性盲点。** agent 改文件 → 干完活 → `git checkout` 还原 → 哈希一致，全程检测不到。哈希只能告诉你「现在不一样」，不能告诉你「中间被动过」。
 
@@ -255,3 +255,21 @@ func expireUnlocks(refs map[string]*Ref, now int64) {
 - `config set` 按 key 分流
 
 **bootstrap 例外**：开发工作台自身时 `.claude/` 保持 agent 可写，不启用托管 —— 否则改不动 `wb.py`。`doctor` 识别这种情况并明说。
+
+## 实施现状（2026-09-03）
+
+阶段 0 / 1 / 2 全部落地，阶段 3 只落了检测那一半。代码在 `wbsvr/main.go`（纯 stdlib，20 个测试）、`wbsvr/wbsvr.sudoers`、`wbsvr/install.sh`，以及 `wb.py` 里的托管分支。`wb.py selfcheck` 末尾会真的跑一遍完整托管生命周期 —— 用 `-ldflags -X main.storeBase` 换掉存储根、进程内替掉 `_svr` 去掉 sudo 那一跳，协议、路径校验、锁定判定、版本与窗口都是真的；没有 go 工具链时报「跳过」。刻意不留环境变量开关：那个开关本身就是绕过口（指向一个永远回答「没锁」的假二进制）。
+
+**偏离 D15：没有单独的快照文件，复用现有的冻结清单，由 wb.py 写。** 原设计要 wbsvrd 刷一份 `wbsvr:work 0444` 的快照，但 wbsvr 是非 root，往 agent 属主的 `.workbench/` 里建文件得先放宽那个目录的权限 —— 为一份性能缓存去松掉被保护侧的权限，方向反了。现在这份清单跟着 `save_state` 原子替换（`write_frozen`），托管契约不往里贡献路径（它的保护来自不可寻址，不来自清单），清单文件自己是冻结项。代价是它仍在 agent 可寻址的路径上、只有正则这一道 —— 与 D12 同档，不是新洞。
+
+**阶段 3 落成检测，不是取代。** `role_scopes` 在 `PreToolUse` 热路径上（D15 存在的原因就是这个），每次工具调用一次 sudo 往返不能接受。现在 `sealed.json` 是权威副本、`state.json` 是镜像，`sealed_audit()` 在 `gate check` 与 `status` 里比对两侧，不一致就 FAIL 并点名字段。天花板写在函数 docstring 里：**篡改不再静默通过，下一次门禁撞出来 —— 但不是「改不了」**。要真正改不了，得先给 hook 一份 wbsvrd 刷的快照，也就是先解掉上面那条 D15 偏离。
+
+`phase set` 在托管下直接关掉（能跳阶段 = 能跳门禁），要回退阶段走用户凭证的 `sealed-set`。`phase advance` **先调服务端再写本地**：反过来的话服务端拒了（并发下别人已经推过）两份就分叉，而门禁读的是本地那份。
+
+**托管启用与否由服务端说了算。** `.workbench/hosted` 只是「这个项目曾经启用过」的备忘，一旦记下，服务端调不通时**硬失败**而不是退回本地状态 —— 静默降级是最坏的失败模式（同 D13）。删掉备忘也没用：存储还在，下一次判定又写回来。没装二进制又没启用过的项目一次 sudo 都不花。
+
+**`install.sh` 是用户步骤。** 建 `wbsvr` 账户、装 sudoers 都要 sudo 密码，agent 跑不了也不该能跑。`doctor` 在账户还不存在时对第 3 条（`sudo -n -u wbsvr /bin/sh` 必须失败）明说「尚未真正测到」而不是报 PASS —— 拿不到不存在账户的 shell 不是保护。
+
+**本仓库就是 bootstrap 那个例外**：这里改的是 `wb.py` 本身，`.claude/` 必须保持 agent 可写，所以不启用托管。`doctor` 认出这种情况后仍逐条报六个前提（本机第 5 条真的不过 —— agent 账户在 admin 组），结论是「bootstrap 模式，不启用托管」，退出 0。
+
+**session-start hook 在托管下花一次 sudo**（`contract_drift` 要问服务端）。每会话一次，可接受；`hook_pre_tool` / `hook_post_tool` 两条热路径上一次都没有。

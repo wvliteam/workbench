@@ -107,7 +107,7 @@ wb.py config set gate_commands.lint 'npx @redocly/cli lint .workbench/contracts/
 
 **没有豁免角色。** owner 不行，主线程不行。理由：能豁免的机制等于没有机制 —— 「我是 owner 所以我可以直接改」正是要防的那件事。owner 与其他人的区别只在**有权申报**，不在能跳过申报。
 
-叠起来的结果：**私自改契约会在动手时就被拦下，拦不住的（外部编辑器、`cp`、用户手改）会在门禁时被抓出。**
+叠起来的结果：**私自改契约会在动手时就被拦下，拦不住的（外部编辑器、`git checkout`、用户手改）会在门禁时被抓出。**
 
 ### 申报窗口
 
@@ -233,7 +233,7 @@ $ wb.py contract impact --name user-api
 
 | 现象 | 根因 | 处置 |
 | --- | --- | --- |
-| `verify` 报漂移 | 改动走了守卫覆盖不到的路径：外部编辑器、`cp`/`mv`、`git checkout`、用户手改 | `git diff` 看改了什么。有意变更 → `unlock --reason` 补申报再 `bump`；误改 → 还原文件 |
+| `verify` 报漂移 | 改动走了守卫覆盖不到的路径：外部编辑器、`git checkout`、`rsync`、用户手改 | `git diff` 看改了什么。有意变更 → `unlock --reason` 补申报再 `bump`；误改 → 还原文件 |
 | 守卫拦住了但该改 | 忘了申报 | `contract unlock --name X --reason '...'`。**不要换等价写法绕** —— Bash 路径也被拦，且绕过意图会留在日志里 |
 | `bump` 说「内容未变」 | 申报了但没真改，或改完又改回去了 | 确认要不要改。不改就 `contract lock --name X` 关掉窗口 |
 | 门禁「尚未登记任何契约」 | 确实没有跨角色接口，或漏了登记 | 前者 `phase advance --force` 并说明；后者补 `add` + `lock`。`design-doc` 本身该登记，所以 design 之后这条基本不出现 |
@@ -243,7 +243,7 @@ $ wb.py contract impact --name user-api
 | 升级 `wb.py` 后契约的 Bash 防线失效 | 老项目没有 `.workbench/frozen` 缓存 | 已修：缺失**或为空**时从 `state.json` 现算。老项目顺手跑 `role scopes --reset` 刷新角色范围 |
 | 契约明明锁了，某次工具调用却放行了 | `.workbench/frozen` 被读到中间态（旧版就地截断重写它） | 已修：`write_frozen` 改成原子替换，见 [architecture.md](architecture.md#写入原子性与并发) |
 
-冻结机制本身覆盖不到的写入路径（`cp` / `mv` / 外部编辑器 / 用户手改）与那些取舍的理由，见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。共同点：**守卫防的是模型主动绕过，不是防人。** 兜底始终是 `contract verify` 的哈希校验 —— 它不管改动从哪来。
+冻结机制本身覆盖不到的写入路径（外部编辑器 / `git checkout` / `rsync` / 用户手改）与那些取舍的理由，见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。共同点：**守卫防的是模型主动绕过，不是防人。** 兜底始终是 `contract verify` 的哈希校验 —— 它不管改动从哪来。
 
 ## 版本策略
 
