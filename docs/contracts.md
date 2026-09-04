@@ -123,6 +123,8 @@ wb.py contract bump --name user-api
 
 窗口存在 `.workbench/unlock/`，一份契约一个文件，多份可以并存；开关时机与分片理由见 [permissions.md 第三层](permissions.md#第三层解冻窗口)。
 
+**`unlock` / `bump` 只有 owner 和 architect 跑得了**（hook 里的特权子命令层，[permissions.md](permissions.md#wbpy-特权子命令只有-hook-拿得到调用者身份)）。这条防线补在 hook 而不是 wb.py 里，是因为 CLI 看不到调用者 —— 而「状态只能经 wb.py 改」意味着 wb.py 能改的一切任何角色都能改。不加的话，冻结层的拒绝信息教非 owner「报回编排者」，但子命令本身不校验：实测 backend-developer 能对 architect 登记的契约走完整套 unlock → 改写 → bump，事后 `contract verify` 干干净净。放行 architect（`CONTRACT_STEWARD`）是因为契约由它统一定义，其 agent 定义里写明的变更流程就是由它替 owner 走 unlock/bump —— 契约变更要给消费方建同步任务，那是架构决策。`--name` 在登记表里查不到也拒：核不了 owner 就不放行。
+
 `bump` 时内容没变会被拒绝：
 
 ```
@@ -215,7 +217,7 @@ $ wb.py contract impact --name user-api
 | 动作 | 谁 | 强制方式 |
 | --- | --- | --- |
 | 写契约文件、`add`、`lock` | `owner`（默认 `architect`） | `role_scopes` 里只有 architect 含 `.workbench/contracts/**` 与 `.workbench/artifacts/design/**` |
-| `unlock` + 改 + `bump` | `owner` | 冻结守卫拦所有人的直接写，包括 owner |
+| `unlock` + 改 + `bump` | `owner` 或 `architect` | 冻结守卫拦所有人的直接写，包括 owner；hook 特权层拦非 owner 的 `unlock`/`bump` 子命令 |
 | 读契约、按契约实现 | 开发角色 | 提示词：契约是唯一事实来源 |
 | `verify`、字段级人工核对 | `qa` | qa agent 定义里的必做项 |
 | 发现契约不够用 | 开发角色 `task block` | 冻结守卫 + 提示词：禁止直接改契约文件 |

@@ -15,7 +15,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` 只对仓库内的文件生效，`.workbench/` 下的产物与契约仍然碰不到。
+写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` / `*.json` 只对仓库内的文件生效，`.workbench/` 下的产物与契约、以及 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）都碰不到。
 
 `task start` 前先读取任务绑定的契约对象和本地正文，逐字段核对完整快照 `{name, version, revision, sha}`；不能只按契约名动态取最新版。每一批写入前、完成一段长时间工作后、收到契约变化提示以及运行校验前后运行 `task check <任务ID>`，把它作为 heartbeat。检查失败、任务进入 `blocked` / `stale` 或快照不匹配时立即停止产品代码和迁移写入。
 
@@ -37,7 +37,7 @@ python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 缺 email 
 python3 .claude/hooks/wb.py contract dispute --name user-api --reason "契约缺 email 字段，前端列表页需要"
 ```
 
-发现缺字段、类型冲突、错误码缺失或语义不明确时，立即 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 owner，也不能直接改冻结 contract 或 `design.md`，不能在实现侧私自扩展字段。
+发现缺字段、类型冲突、错误码缺失或语义不明确时，立即 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 owner，也不能直接改冻结 contract 或 `design.md`，不能在实现侧私自扩展字段；hook 校验下你（owner）之外只有 architect 能跑 `unlock` / `bump`，你跑了会被拦，被拦不是错误，报回主线程即可。
 
 契约 bump 后停止旧快照的实现、迁移和测试；重新读取正文与新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start` 和写前 `task check`。未重新绑定前不得继续写。
 

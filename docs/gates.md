@@ -74,6 +74,10 @@ if not isinstance(cmd, str) or not cmd.strip():
 
 命令执行：`shell=True`，`cwd=项目根`，超时取 `config` 里的 `gate_timeout`（默认 1800 秒）。
 
+**`shell=True` 意味着门禁命令是一条从不经过 Bash 守卫的 shell。** 它不撞 `PreToolUse` hook（不是工具调用）、不撞冻结清单（`config` 键不是契约）、不撞角色范围（subprocess 没有 `agent_type`）。谁能写 `gate_commands.*`，谁就有一段任意代码执行 —— 所以特权子命令层把 `config set` 收窄到**只有 qa 能设 `gate_commands.*`**，其余键任何角色都设不了（[permissions.md](permissions.md#wbpy-特权子命令只有-hook-拿得到调用者身份)）。
+
+qa 也不能设任意值。`cmd_config` 写入前、`run_check` 执行前都会用 `catastrophic_command()` 筛一遍命令值（删根删家目录、force push、`DROP`/`TRUNCATE`、下载远端脚本直接进 shell、直写块设备、格式化文件系统、fork bomb 那一套，与 Bash 分支共用同一张表）。写入时筛一遍防新增，执行时再筛一遍防**存量** —— 这层加上之前配进 `state.json` 的值不在当时任何检查里。筛掉的是灾难性模式，不是任意代码执行本身：qa 配一条 `npm test` 就是一条 `npm test`，这是流程要它干的事；这层的上限是「catastrophic 模式进不了门禁」，不是「qa 只能配已知命令」。后者做不了 —— 门禁命令天然是任意的（每个项目的测试命令都不同），把白名单写死在 wb.py 里等于让门禁只对已知技术栈的项目存在。
+
 **完整输出落盘 `.workbench/gate-<键>.log`，detail 只带最后 5 行加日志路径。** 之前只带最后一行，而测试框架的最后一行通常是汇总行（`2 failed, 8 passed in 3.2s`）—— 哪两个用例失败、为什么失败全部丢失，诊断只能手动重跑一遍刚跑完的命令。
 
 **超时是一条 FAIL，不是崩溃。** `subprocess.TimeoutExpired` 被捕获转成 FAIL。不捕获的话 hook 路径有 `cmd_hook` 的兜底 try，但 CLI 路径没有 —— `gate check` 与 `phase advance` 会打出 Traceback，退出码恰好也是 1，自动化脚本看不出区别，人看到的是崩溃。
@@ -102,7 +106,7 @@ $ echo $?
 ```bash
 wb.py phase advance          # 跑当前阶段门禁，通过才推进
 wb.py phase advance --force  # 门禁不通过也推进
-wb.py phase set <阶段>       # 直接跳，不跑门禁（回退用）
+wb.py phase set <阶段> --reason '<为什么>'   # 直接跳，不跑门禁（回退用；理由必填）
 wb.py gate check --phase X   # 只校验不推进（会执行该阶段的 cmd:* 门禁）
 ```
 
@@ -115,6 +119,8 @@ wb.py gate check --phase X   # 只校验不推进（会执行该阶段的 cmd:* 
 ```
 
 `forced` 与 `failures` 会出现在 `wb.py report` 生成的交付报告里，也是复盘阶段 `reviewer` 的重点材料 —— **每一次强推都是一次流程摩擦，记录下来才能改进规则**。
+
+**`phase set` 是回退通道，不是 `advance` 的快捷方式。** 它一条门禁都不跑，所以 `--reason` 必填（不给直接拒绝，与 `contract unlock` 同一条约定：理由必须在跳之前写）。向前跳时被跨过的每个阶段都补一条门禁记录 `{passed: false, forced: true, skipped_by_set: true}`，`failures` 里写明「门禁未运行：phase set 直接跳到 X（理由）」。没有这条记录时 `status` 只显示「当前阶段 develop」，被跳过的 clarify / analyze / design 既没有 gates 记录也没有 `forced` 标记 —— **「门禁不通过不推进」就有了一条不留痕的旁路**，而 `permissions.allow` 里的 `Bash(python3 .claude/hooks/wb.py:*)` 对所有角色开放。理由与跳跃方向也进 `phase_set` 日志。
 
 门禁**真**通过时 `advance` 顺带把该阶段产物登记成契约并锁定，打一行提示：
 

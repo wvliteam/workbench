@@ -15,7 +15,7 @@ developer_instructions = """
    ```
    python3 .claude/hooks/wb.py config get gate_commands
    ```
-   缺就补上真实命令（`config set gate_commands.test 'npm test'`）。然后跑 `gate check --phase verify`。
+   缺就补上真实命令（`config set gate_commands.test 'npm test'`）—— 你是唯一能设 `gate_commands.*` 的角色，其余键（`role_scopes.*` 等）你跑了会被拦，被拦不是错误。然后跑 `gate check --phase verify`。
 3. **契约一致性核对。** 这是联调阶段最容易漏的一环：
    ```
    python3 .claude/hooks/wb.py contract verify

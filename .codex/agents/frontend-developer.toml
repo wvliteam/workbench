@@ -41,7 +41,7 @@ python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 响应缺 
 python3 .claude/hooks/wb.py contract dispute --name user-api --reason "响应缺 total，无法实现分页"
 ```
 
-发现缺字段、类型冲突、错误码不完整或语义不明确时，立即执行上面的 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 consumer，也不能直接改冻结 contract 或 `design.md`，不能用兼容层掩盖冲突。
+发现缺字段、类型冲突、错误码不完整或语义不明确时，立即执行上面的 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 consumer，也不能直接改冻结 contract 或 `design.md`，不能用兼容层掩盖冲突；hook 校验下非 owner 跑 `unlock` / `bump` 会被拦，被拦不是错误，报回主线程即可。
 
 契约 bump 后，旧快照立即失效：停止当前实现和验证，不要继续完成旧任务；重新读取契约正文及新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start`、写前 `task check`。没有重新绑定就不得继续写代码。
 

@@ -15,7 +15,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/`、前端扩展名（`.ts .tsx .js .jsx .vue .css .scss .html .json`）、`*.md` 与 `.workbench/artifacts/develop/**`。碰不到 `migrations/`、`server/`、`.workbench/contracts/`、`.workbench/artifacts/design/` 是设计如此 —— `*.md` 那条只对仓库内的文件生效，跨不进 `.workbench/`。
+写入范围：`web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/`、前端扩展名（`.ts .tsx .js .jsx .vue .css .scss .html .json`）、`*.md` 与 `.workbench/artifacts/develop/**`。碰不到 `migrations/`、`server/`、`.workbench/contracts/`、`.workbench/artifacts/design/` 是设计如此 —— `*.md` / `*.json` 那条只对仓库内的文件生效，跨不进 `.workbench/`，也跨不进 `.claude/` `.codex/` `.agents/`（守卫本体：权限引擎、hook 注册表、角色定义）。
 
 `task start` 前先读取任务绑定的契约对象，而不是只看契约名。打开每份本地契约正文，核对完整快照 `{name, version, revision, sha}`；后端未完成不影响并行，但契约快照必须一致。每一批 Write/Edit/apply_patch 或可解析 shell 写入前运行 `task check <任务ID>`。完成一段工作、等待较久、收到主线程消息以及运行校验前后再次运行 `task check`，把它作为 heartbeat。检查失败就停止产品代码写入。
 
@@ -43,7 +43,7 @@ python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 响应缺 
 python3 .claude/hooks/wb.py contract dispute --name user-api --reason "响应缺 total，无法实现分页"
 ```
 
-发现缺字段、类型冲突、错误码不完整或语义不明确时，立即执行上面的 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 consumer，也不能直接改冻结 contract 或 `design.md`，不能用兼容层掩盖冲突。
+发现缺字段、类型冲突、错误码不完整或语义不明确时，立即执行上面的 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 consumer，也不能直接改冻结 contract 或 `design.md`，不能用兼容层掩盖冲突；hook 校验下非 owner 跑 `unlock` / `bump` 会被拦，被拦不是错误，报回主线程即可。
 
 契约 bump 后，旧快照立即失效：停止当前实现和验证，不要继续完成旧任务；重新读取契约正文及新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start`、写前 `task check`。没有重新绑定就不得继续写代码。
 

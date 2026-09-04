@@ -184,6 +184,20 @@ REPO_HINTS = {
 # 不能在 hook 里读改写 state.json，见 hook_post_tool 的说明。
 ARTIFACT_LOG = "artifacts.jsonl"
 
+# 角色范围里「只认显式前缀」的目录。这几处的路径不参与通配匹配：范围里没有以该
+# 前缀打头的模式，就是谁都不能写。
+#
+# `.workbench/`：否则 `*.md` / `*.json` 会跨进别的阶段的产物与契约目录，把阶段隔离绕开。
+#
+# 其余三个装的是守卫自己：`.claude/hooks/wb.py` 是权限引擎，`.claude/settings.json`
+# 是 hook 注册表，`.claude/agents/*.md` 是角色定义，`.codex/` `.agents/` 是 Codex 端
+# 的同一套东西。`fnmatch` 的 `*` 跨 `/`，所以 `*.py` 放行任意目录下的 .py、`*.json`
+# 放行 settings.json、`*.md` 放行 agent 定义 —— 实测 backend-developer 能写
+# `.claude/hooks/wb.py`、frontend-developer 能写 `.claude/settings.json`，两者都不在
+# 任何哈希基线里，改完 `contract verify` 也发现不了。防线保护 state，却不保护防线自己。
+# 主线程不受影响（角色为空时这层整段跳过），改工作台本体仍走主线程。
+GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/")
+
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——
 # hook 每次工具调用都要读它，读一个纯文本列表比解析整个 state.json 便宜一个量级。
@@ -237,8 +251,39 @@ _UNCERTAIN_PATTERNS = re.compile(
     r"\$\(|`[^`]+`"
 )
 
-# 变量引用（目标含 $VAR 时不可靠）
-_VAR_REF = re.compile(r"\$\{?\w+")
+# 包装命令前缀：`env cp x y` 的首 token 是 env 而不是 cp，不剥掉就整条解析成
+# 「没有写入目标」，且 uncertain=False —— 精确检查因此判定「冻结路径不在写入目标里」
+# 而放行。实测 `env cp /tmp/x .workbench/state.json`、`nohup cp ... 越根路径`、
+# `timeout 5 cp ... .claude/hooks/wb.py` 三条全部放行。
+_WRAPPERS = frozenset({
+    "env", "nohup", "sudo", "command", "builtin", "nice", "ionice",
+    "stdbuf", "setsid", "time", "timeout",
+})
+
+# 前缀自己的数值操作数：timeout 的时长（`5` / `5m` / `1.5h`）、nice -n 的优先级。
+# 没有哪个真实命令的名字长这样，所以一律吃掉比逐个前缀记「吃几个参数」更省 ——
+# `nice cp a b` 里的 `cp` 不是数字，不会被误吃。
+_WRAPPER_OPERAND = re.compile(r"[0-9]+(?:\.[0-9]+)?[a-z]?$")
+
+
+def _strip_wrappers(tokens: list[str]) -> list[str]:
+    """剥掉 env / nohup / timeout 之类的包装前缀，返回真正的命令 tokens。
+
+    连带吃掉前缀自己的 flag、env 的 `VAR=value` 赋值、以及时长/优先级这类数值操作数。
+    剥到不认识的首 token 就停 —— 剩下的由调用方按命令名分类。
+    """
+    while tokens:
+        if Path(tokens[0]).name not in _WRAPPERS:
+            return tokens
+        rest = tokens[1:]
+        while rest and (rest[0].startswith("-") or
+                        re.fullmatch(r"\w+=.*", rest[0]) or
+                        _WRAPPER_OPERAND.match(rest[0])):
+            rest = rest[1:]
+        if rest == tokens:  # 防御：没吃掉任何东西就停，避免死循环
+            return tokens
+        tokens = rest
+    return tokens
 
 
 def strip_heredocs(cmd: str) -> str:
@@ -338,6 +383,9 @@ def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
                 outside_targets.add(rel)
 
         # 2. 按命令名分类抽操作数
+        tokens = _strip_wrappers(tokens)  # env / nohup / timeout 之类的包装前缀
+        if not tokens:
+            continue
         cmd_name = Path(tokens[0]).name  # 处理 /usr/bin/cp 这种
         args = tokens[1:]
 
@@ -356,8 +404,12 @@ def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
             _collect_targets(args[1:], all_targets, outside_targets, rootr, safe, last_only=False)
         elif cmd_name == "sed" and _has_i_flag(args):
             i_idx = _find_sed_i(args)
+            # -i 后面的操作数里混着脚本（`s/a/b/`）、BSD 的独立空后缀（`-i ''`）和
+            # `-e` 的表达式，按「非 flag 全算」会把脚本当成写入目标 —— 于是范围内
+            # 的正常改动被判成越权写 `s/a/b`。sed -i 创建不了文件，只有已存在的
+            # 路径才可能是真的写入目标。
             _collect_targets(args[i_idx + 1:], all_targets, outside_targets, rootr, safe,
-                             last_only=False)
+                             last_only=False, must_exist=True)
         elif cmd_name == "dd":
             for tok in args:
                 if tok.startswith("of=") and tok[3:] and tok[3:] != "/dev/null":
@@ -375,14 +427,20 @@ def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
 
 
 def _collect_targets(args: list[str], all_targets: set[str], outside_targets: set[str],
-                     rootr: Path, safe: set[Path], last_only: bool) -> None:
-    """从参数列表里抽取写入目标路径。last_only=True 只取最后一个非 flag 参数。"""
-    filtered = [a for a in args if not a.startswith("-")]
+                     rootr: Path, safe: set[Path], last_only: bool,
+                     must_exist: bool = False) -> None:
+    """从参数列表里抽取写入目标路径。last_only=True 只取最后一个非 flag 参数。
+
+    must_exist=True 时只保留已存在的路径，给改不了不存在文件的命令用（sed -i）。
+    """
+    filtered = [a for a in args if a and not a.startswith("-")]
     if not filtered:
         return
     candidates = [filtered[-1]] if last_only else filtered
     for raw in candidates:
         p = Path(raw).resolve() if raw.startswith("/") else (rootr / raw).resolve()
+        if must_exist and not p.exists():
+            continue
         inside = (p == rootr or rootr in p.parents)
         if not inside and any(s == p or s in p.parents for s in safe):
             continue
@@ -426,6 +484,15 @@ WARN_BASH = [
     (r"\bgit\s+checkout\s+--\s", "git checkout -- 会覆盖工作区文件"),
     (r"\bnpm\s+publish\b|\btwine\s+upload\b", "对外发布动作，确认版本号"),
 ]
+
+
+def catastrophic_command(cmd: str) -> str:
+    """命中 DENY_BASH 就返回理由，否则空串。"""
+    for pat, why in DENY_BASH:
+        if re.search(pat, cmd, re.IGNORECASE):
+            return why
+    return ""
+
 
 MAX_LOG = 500
 
@@ -1024,6 +1091,11 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         label = f"命令门禁 {rest}"
         if not isinstance(cmd, str) or not cmd.strip():
             return True, label, "未配置，跳过（config set gate_commands.%s '<命令>'）" % rest
+        # 老 state 里可能已经存着灾难性命令（新校验只管新写入），执行前再筛一遍。
+        why = catastrophic_command(cmd)
+        if why:
+            return False, label, (f"拒绝执行（{why}）：`{cmd}`；"
+                                  f"先 config set gate_commands.{rest} 换成安全命令")
         # 完整输出必须落盘。门禁刚跑过一遍，若只留汇总行，诊断就得再跑一遍。
         logf = wb_dir(root) / f"gate-{rest}.log"
         rel_log = os.path.relpath(logf, root)
@@ -1302,13 +1374,34 @@ def cmd_phase(args) -> None:
         print(load_state(root)["phase"])
         return
     if args.action == "set":
+        # set 不跑门禁 —— 它是回退通道，不是 advance 的快捷方式。理由必填且入日志，
+        # 否则「门禁不通过不推进」有一条不留痕的旁路：任何角色都能 `phase set develop`
+        # 直接跳过 clarify / analyze / design 的全部准出条件，而 `status` 只显示
+        # 「当前阶段 develop」，被跳过的阶段既没有 gates 记录也没有 forced 标记。
+        if not (args.reason or "").strip():
+            die("phase set 必须带 --reason '<为什么直接跳阶段>'。"
+                "正常推进用 `phase advance`（跑门禁）；门禁项确实不适用时用 "
+                "`phase advance --force`（记 forced 标记，status 里打 !）。"
+                "set 只用于回退，理由必须在跳之前写。")
         st = load_state(root, lock=True)
         if args.name not in st["phases"]:
             die(f"未知阶段 {args.name}，可选：{', '.join(st['phases'])}")
         old, st["phase"] = st["phase"], args.name
-        log(st, "phase_set", **{"from": old, "to": args.name})
+        forward = st["phases"].index(args.name) > st["phases"].index(old)
+        # 跳过的阶段留下显式记录，否则 status 与 report 看不出这些阶段的门禁从未跑过。
+        for skipped in st["phases"][st["phases"].index(old):st["phases"].index(args.name)]:
+            if skipped not in st["gates"]:
+                st["gates"][skipped] = {
+                    "passed": False, "at": now(), "forced": True, "skipped_by_set": True,
+                    "failures": [f"门禁未运行：phase set 直接跳到 {args.name}（{args.reason}）"],
+                }
+        log(st, "phase_set", **{"from": old, "to": args.name,
+                                "reason": args.reason, "forward": forward})
         save_state(root, st)
-        print(f"阶段：{old} -> {args.name}")
+        print(f"阶段：{old} -> {args.name}（理由：{args.reason}）")
+        if forward:
+            print(f"注意：向前跳过了 {old} 到 {args.name} 之间的门禁，"
+                  f"这些阶段在 status / report 里标记为未运行门禁。")
         return
     # advance：门禁里的 cmd: 断言可能跑几分钟的 npm test，不能攥着状态锁跑 ——
     # 那会把并行 subagent 的 task done 全堵在等锁上。先无锁算门禁，再入锁落记录：
@@ -1546,7 +1639,13 @@ def cmd_task(args) -> None:
         t["notes"] = args.reason
         _restore_stale(root, st, t["id"])
     t["updated"] = now()
-    log(st, f"task_{args.action}", id=t["id"], role=t["role"])
+    # skip / block 的理由必须进流水账。只写进 t["notes"] 的话，下一次 reopen --note
+    # 就把它覆盖掉，日志里只剩一行 task_skip，「为什么跳过」从此查不到 ——
+    # 而跳过全部任务能让 tasks_done 门禁变绿。
+    extra_log = {}
+    if args.action in ("skip", "block") and t.get("notes"):
+        extra_log["reason"] = t["notes"]
+    log(st, f"task_{args.action}", id=t["id"], role=t["role"], **extra_log)
     save_state(root, st)
     print(f"{t['id']} -> {t['status']}" + (f"（{t['notes']}）" if t.get("notes") else ""))
 
@@ -1935,6 +2034,12 @@ def cmd_config(args) -> None:
         val = json.loads(args.value)
     except json.JSONDecodeError:
         val = args.value
+    # 门禁命令最终是 subprocess.run(shell=True) 的输入，等价于一条绕开 Bash hook
+    # 的 shell —— DENY_BASH 看不到它。写入时先筛一遍。
+    if args.key.startswith("gate_commands.") and isinstance(val, str):
+        why = catastrophic_command(val)
+        if why:
+            die(f"拒绝写入门禁命令：{why}。门禁命令会以 shell 直接执行，不经 Bash 守卫。")
     dotted_set(st, args.key, val)
     log(st, "config_set", key=args.key)
     save_state(root, st)
@@ -1968,9 +2073,15 @@ def cmd_report(args) -> None:
             flag = "强制通过" if g.get("forced") else "通过"
             fails = f"，遗留：{', '.join(g['failures'])}" if g.get("failures") else ""
             out.append(f"- {p}（{PHASE_CN.get(p,'')}）：{flag} @ {g['at']}{fails}")
-    out += ["", "## 任务", "", "| ID | 阶段 | 角色 | 状态 | 标题 |", "| --- | --- | --- | --- | --- |"]
+    out += ["", "## 任务", "",
+            "| ID | 阶段 | 角色 | 状态 | 标题 | 备注 |",
+            "| --- | --- | --- | --- | --- | --- |"]
     for t in st["tasks"]:
-        out.append(f"| {t['id']} | {t['phase']} | {t['role']} | {t['status']} | {t['title']} |")
+        # skipped / blocked 的理由不渲染出来，报告里就看不出「完成」是干出来的
+        # 还是跳出来的。
+        note = (t.get("notes") or "").replace("|", "\\|").replace("\n", " ")
+        out.append(f"| {t['id']} | {t['phase']} | {t['role']} | {t['status']} | "
+                   f"{t['title']} | {note or '-'} |")
     out += ["", "## 契约", ""]
     if st["contracts"]:
         out += ["| 契约 | 版本 | Owner | 消费方 | 路径 |", "| --- | --- | --- | --- | --- |"]
@@ -2161,7 +2272,7 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
         return "状态与进度只能用 wb.py 子命令改。"
     names = ",".join(c["name"] for c in cs)
     owners = {c["owner"] for c in cs}
-    if role and role not in owners:
+    if role and role not in owners and role != CONTRACT_STEWARD:
         return (f"它的 owner 是 {'/'.join(sorted(owners))}，不是你 —— 不要自己申报解冻。"
                 f"报回编排者：要改 {names}，为什么。由编排者决定是否 "
                 f"`wb.py contract unlock --name {names} --reason '<理由>'`，"
@@ -2171,6 +2282,12 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
 
 
 UNKNOWN_ROLE = "__unknown__"
+
+# 契约管理员。接口契约由 architect 定义，但 `--owner` 填的是实现方
+# （architect.md 里就是 `--owner backend-developer`），所以 owner 校验必须放它一条路，
+# 否则 architect.md 写明的「contract impact -> unlock -> 改 -> bump」直接走不通。
+# 放行的是「定义接口的人能改接口」，挡住的是「实现方自己改掉要对齐的接口」。
+CONTRACT_STEWARD = "architect"
 
 
 def current_role(root: Path, data: dict) -> str:
@@ -2281,16 +2398,135 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
         st = json.loads(state_path(rootr).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return
-    globs = (st.get("role_scopes") or {}).get(role)
-    if not globs:
-        return
-    if rel.startswith(".workbench/"):
-        globs = [g for g in globs if g.startswith(".workbench/")] or ["（无）"]
+    scopes = st.get("role_scopes") or {}
+    # 范围缺失回落到默认值；显式的空清单是「什么都不能写」，不是「不限制」。
+    # 反过来读会让 `config set role_scopes.<角色> '[]'` 变成一键解除范围的开关 ——
+    # 空值当放行时，越权路径连 GUARDED_PREFIXES 过滤都走不到。
+    globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))
+    if not isinstance(globs, list):
+        globs = []
+    guarded = next((g for g in GUARDED_PREFIXES if rel.startswith(g)), "")
+    if guarded:
+        globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
     if not any(fnmatch.fnmatch(rel, g) for g in globs):
+        extra = ""
+        if guarded and guarded != ".workbench/":
+            extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
+                     f"要改它交回主线程，别给角色开范围。）")
         hook_deny(
-            f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。"
+            f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs) or '（无）'}。{extra}"
             f"确需跨界请交给对应角色，或 wb.py config set role_scopes.{role} '<JSON 数组>'"
         )
+
+
+# 角色 subagent 一律不能跑的 wb.py 子命令：改的是守卫自己的规则、门禁结论或状态
+# 基线，全部属于编排者决策。`(子命令, action)` -> 理由。
+PRIVILEGED_WB = {
+    ("phase", "set"): "它不跑门禁直接改阶段",
+    ("role", "set"): "它改的是主线程与非角色 agent 的写入范围兜底",
+    ("role", "clear"): "它会清掉写入范围兜底",
+    ("task", "skip"): "跳过的任务在 tasks_done 门禁里等同完成",
+}
+
+
+def _wb_invocations(cmd: str) -> list[list[str]]:
+    """挑出命令里对 wb.py 的调用，返回各自的参数（不含解释器与脚本路径本身）。"""
+    calls = []
+    for seg in _split_pipeline(strip_heredocs(cmd)):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        for i, tok in enumerate(tokens):
+            if Path(tok).name in ("wb.py", "wb"):
+                calls.append(tokens[i + 1:])
+                break
+    return calls
+
+
+def _flag_value(args: list[str], flag: str) -> str:
+    """取 `--flag v` 或 `--flag=v` 的值，取不到返回空串。"""
+    for i, a in enumerate(args):
+        if a == flag:
+            nxt = args[i + 1] if i + 1 < len(args) else ""
+            return "" if nxt.startswith("-") else nxt
+        if a.startswith(flag + "="):
+            return a.split("=", 1)[1]
+    return ""
+
+
+def _contract_owner(root: Path, name: str) -> str | None:
+    """契约的 owner；契约不在登记表里返回 None。"""
+    sp = state_path(root)
+    if not name or not sp.is_file():
+        return None
+    try:
+        st = json.loads(sp.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    c = find_contract(st, name)
+    return (c.get("owner") or "") if c else None
+
+
+def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
+    """角色 subagent 不该跑的 wb.py 子命令，返回拒绝理由（空列表 = 都能跑）。
+
+    `.claude/settings.json` 的 `permissions.allow` 把 `Bash(python3 .claude/hooks/wb.py:*)`
+    对所有角色开放，而 wb.py 自己拿不到 agent_type —— 它只知道被调用，不知道被谁
+    调用。于是「状态只能经 wb.py 改」这条设计等价于：wb.py 能改的一切，任何角色都
+    能改。实测一条 `config set role_scopes.<自己> '[".claude/**"]'` 就让守卫引擎本身
+    变成可写，`init --force` 能清空阶段与契约基线，`config set gate_commands.test`
+    能拿到不经 Bash 守卫的任意 shell。这层是那道缺失的调用者校验，只有 hook 拿得到
+    身份，所以只能放这里。
+    """
+    hint = "报回编排者，由主线程决定。"
+    out = []
+    for args in _wb_invocations(cmd):
+        pos = [a for a in args if not a.startswith("-")]
+        flags = {a.split("=", 1)[0] for a in args if a.startswith("-")}
+        sub_cmd = pos[0] if pos else ""
+        action = pos[1] if len(pos) > 1 else ""
+
+        if sub_cmd == "config" and action == "set":
+            key = pos[2] if len(pos) > 2 else "<键>"
+            # gate_commands.* 是 qa 的既定流程（.claude/agents/qa.md）；其余键
+            # ——尤其 role_scopes.* —— 改的是守卫自己的规则。
+            if not (role == "qa" and key.startswith("gate_commands.")):
+                out.append(
+                    f"角色 {role} 不能跑 `config set {key}`：它改的是守卫与调度自己的"
+                    f"配置（role_scopes.* 能直接给自己开范围）。只有 qa 能设"
+                    f" gate_commands.*。{hint}")
+        elif sub_cmd == "init" and "--force" in flags:
+            out.append(f"角色 {role} 不能跑 `init --force`：它清空阶段、契约基线、"
+                       f"门禁记录与冻结清单。{hint}")
+        elif sub_cmd == "phase" and action == "advance" and "--force" in flags:
+            out.append(f"角色 {role} 不能跑 `phase advance --force`：强推门禁前要先问"
+                       f"用户（CLAUDE.md 硬规则 3）。{hint}")
+        elif sub_cmd == "role" and action == "scopes" and "--reset" in flags:
+            out.append(f"角色 {role} 不能跑 `role scopes --reset`：它重写全部角色的"
+                       f"写入范围。{hint}")
+        elif (sub_cmd, action) in PRIVILEGED_WB:
+            out.append(f"角色 {role} 不能跑 `{sub_cmd} {action}`："
+                       f"{PRIVILEGED_WB[(sub_cmd, action)]}。{hint}")
+        elif sub_cmd == "contract" and action == "dispute" and "--clear" in flags:
+            out.append(f"角色 {role} 不能跑 `contract dispute --clear`：解除争议熔断是"
+                       f"编排者决策。{hint}")
+        elif sub_cmd == "contract" and action in ("unlock", "bump"):
+            # 冻结层的拒绝信息按 owner 分岔提示「不要自己申报解冻」，但 unlock / bump
+            # 本身不校验 owner —— 实测 backend-developer 能解冻、改写并重新基线化
+            # architect 的契约，事后 contract verify 干净。这里补成硬拦。
+            name = _flag_value(args, "--name")
+            owner = _contract_owner(root, name)
+            if owner is None:
+                out.append(
+                    f"角色 {role} 跑 `contract {action}` 必须带登记表里的 --name："
+                    f"{name or '(缺)'} 查不到，无法核对 owner。先 `contract list` 看"
+                    f"实名。{hint}")
+            elif owner != role and role != CONTRACT_STEWARD:
+                out.append(
+                    f"角色 {role} 不能 `contract {action} --name {name}`：这份契约的"
+                    f" owner 是 {owner}。要改它把需求报给 {owner}，别自己申报解冻。{hint}")
+    return out
 
 
 def hook_pre_tool(data: dict) -> None:
@@ -2305,9 +2541,15 @@ def hook_pre_tool(data: dict) -> None:
         sensitive = sensitive_shell_reads(cwd, rootr, cmd)
         if sensitive:
             hook_deny("禁止读取敏感路径：" + ", ".join(sensitive))
-        for pat, why in DENY_BASH:
-            if re.search(pat, cmd, re.IGNORECASE):
-                hook_deny(f"{why}。命令：{cmd[:160]}")
+        why = catastrophic_command(cmd)
+        if why:
+            hook_deny(f"{why}。命令：{cmd[:160]}")
+
+        # --- wb.py 特权子命令：只有这里拿得到调用者身份 ---
+        wb_role = current_role(rootr, data)
+        if wb_role in ROLES:
+            for reason in privileged_wb_calls(cmd, rootr, wb_role):
+                hook_deny(reason)
 
         # --- 争议熔断 ---
         # 任何争议哨兵存在时，developer 角色全线停工。
@@ -2374,7 +2616,10 @@ def hook_pre_tool(data: dict) -> None:
             safe_dirs = {Path("/dev").resolve(), Path("/tmp").resolve(),
                          Path(tempfile.gettempdir()).resolve()}
             for m in re.finditer(r">>?\s*['\"]?(/[^\s'\";|&>]+)", cmd):
-                tgt = Path(m.group(1))
+                # tgt 要 resolve 之后才和 safe_dirs 同一坐标系 —— macOS 上 /tmp 是
+                # /private/tmp 的软链，safe_dirs 里存的是 resolve 过的路径，原文
+                # 直接比对永远比不中，/tmp/xx 的兜底检查变成恒拦。
+                tgt = Path(m.group(1)).resolve()
                 if tgt == rootr or rootr in tgt.parents:
                     continue  # 项目内部路径，不管是不是 safe 目录都不拦
                 if any(s == tgt or s in tgt.parents for s in safe_dirs):
@@ -3535,14 +3780,231 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": "README.md"}}) == 0, \
             "普通文件读取被误拦"
 
+        # --- 包装命令前缀不得让写入目标解析归零 ---
+        # env / nohup / timeout 的首 token 不是真命令名。不剥掉就解析出空目标集且
+        # uncertain=False，精确检查因此判定「冻结路径不在写入目标里」而放行 ——
+        # 实测三条防线（冻结、越根、角色范围）同时失效。
+        for pre in ("env ", "env -i FOO=1 ", "nohup ", "sudo ", "timeout 5 ",
+                    "timeout 1.5h ", "nice -n 10 ", "ionice -c 2 -n 4 ",
+                    "setsid ", "stdbuf -oL ", "env nohup timeout 5 "):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": f"{pre}cp /tmp/x .workbench/state.json"}}) == 2, \
+                f"包装前缀 {pre!r} 绕过冻结检查"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": f"{pre}cp server/main.py /etc/evil"}}) == 2, \
+                f"包装前缀 {pre!r} 绕过越根检查"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "nice -n 10 sed -i s/a/b/ .workbench/state.json"}}) == 2, \
+            "带值 flag 的前缀绕过冻结检查"
+        # 数值操作数规则不能吃掉真命令：nice 后面直接跟 cp 时目标仍要解析出来
+        assert resolve("nice cp a server/b.py", tmp)[0] == {"server/b.py"}, \
+            "nice 后的真命令被误吃"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "timeout 5 pytest tests/"}}) == 0, \
+            "包装前缀下的只读命令被误拦"
+
+        # --- uncertain 兜底的 /tmp 重定向：resolve 之后才与 safe 目录同一坐标系 ---
+        # macOS 的 /tmp 是软链（真身在 /private/tmp），safe_dirs 存的是 resolve 过
+        # 的路径。兜底检查若拿原始路径比对，/tmp/xx 永远比不中 —— 写 /tmp 的临时
+        # 补丁脚本会被误拦（本仓库就实测撞过）。角色会被 uncertain 拒绝，主线程
+        # 走这条兜底，所以用主线程载荷断言。
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "python3 -c 'pass' > /tmp/wb-patch.py"}}) == 0, \
+            "uncertain 兜底误拦 /tmp 重定向（软链未 resolve）"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "python3 -c 'pass' > /etc/evil.py"}}) == 2, \
+            "uncertain 兜底漏拦越根重定向"
+        # ../evil.py 在 selfcheck 的 tempdir 里解析后落在 gettempdir 本身之下（safe），
+        # 放行是对的 —— 真实根下它由精确通道的 outside_targets 拦（BASH_WRITE 或
+        # all_targets 非空时 2611 行的循环按 resolve 后路径判根外）。这里断言的是
+        # safe 判定不被相对路径骗成「越根」。
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "python3 -c 'pass' > ../evil.py"}}) == 0, \
+            "tempdir 场景下 ../ 重定向被误拦"
+
+        # --- 守卫本体不在任何角色范围内 ---
+        # fnmatch 的 * 跨 /，所以 *.py 会放行 .claude/hooks/wb.py（权限引擎本身）、
+        # *.json 放行 settings.json（hook 注册表）、*.md 放行 agent 定义。这些文件不在
+        # 任何哈希基线里，改完 contract verify 也发现不了 —— 防线必须保护防线自己。
+        for role, path in (("backend-developer", ".claude/hooks/wb.py"),
+                           ("frontend-developer", ".claude/settings.json"),
+                           ("reviewer", ".claude/agents/pm.md"),
+                           ("qa", ".codex/hooks.json"),
+                           ("architect", ".agents/skills/wb-flow/SKILL.md")):
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
+                          "tool_input": {"file_path": path}}) == 2, \
+                f"{role} 能写守卫本体 {path}"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": f"cp /tmp/x {path}"}}) == 2, \
+                f"{role} 能用 shell 写守卫本体 {path}"
+        # 主线程仍要能改工作台本体，否则没人能维护它
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 0, \
+            "主线程改工作台本体被误拦"
+        # 本职写入不受影响
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "server/api.py"}}) == 0, \
+            "后端写自己目录被误拦"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "README.md"}}) == 0, \
+            "后端写 README 被误拦"
+
+        # --- phase set 必须申报理由 ---
+        # set 不跑门禁。无理由放行就等于给「门禁不通过不推进」开了一条不留痕的旁路。
+        code, out = quiet("phase", "set", "retro")
+        assert code == 1 and "reason" in out, f"phase set 无理由应拒绝：{out}"
+        before = load_state(tmp)["phase"]
+        code, out = quiet("phase", "set", "retro", "--reason", "自检：跳阶段留痕")
+        assert code == 0, out
+        st = load_state(tmp)
+        assert st["phase"] == "retro"
+        idx = st["phases"].index(before)
+        for skipped in st["phases"][idx:st["phases"].index("retro")]:
+            rec = st["gates"].get(skipped) or {}
+            assert rec.get("passed") is not True, f"{skipped} 被跳过却记成门禁已过"
+        assert any(e.get("event") == "phase_set" and e.get("reason")
+                   for e in st["log"]), "phase set 的理由未入日志"
+        quiet("phase", "set", before, "--reason", "自检：恢复原阶段")
+
+        # --- wb.py 特权子命令：角色不能拿 wb.py 给自己扩权 ---
+        # permissions.allow 把 `Bash(python3 .claude/hooks/wb.py:*)` 对所有角色放开，
+        # 而 wb.py 自己拿不到 agent_type。少了这层，一条
+        # `config set role_scopes.<自己> '[".claude/**"]'` 就能把权限引擎改成可写，
+        # `init --force` 能清空契约基线，`config set gate_commands.*` 能拿到不经
+        # Bash 守卫的任意 shell。
+        for role, bad in (
+            ("backend-developer",
+             'python3 .claude/hooks/wb.py config set role_scopes.backend-developer '
+             '\'[".claude/**"]\''),
+            ("frontend-developer",
+             "python3 .claude/hooks/wb.py config set gate_commands.test 'npm test'"),
+            ("qa", "python3 .claude/hooks/wb.py init --force --name x"),
+            ("architect", "python3 .claude/hooks/wb.py phase advance --force"),
+            ("pm", "python3 .claude/hooks/wb.py phase set retro --reason x"),
+            ("reviewer", "python3 .claude/hooks/wb.py role set backend-developer"),
+            ("qa", "python3 .claude/hooks/wb.py role scopes --reset"),
+            ("frontend-developer", "python3 .claude/hooks/wb.py task skip T1 --reason 懒"),
+            ("backend-developer", "python3 .claude/hooks/wb.py contract dispute --clear"),
+            # cd 到子仓库再用相对路径调用同样要拦
+            ("architect",
+             "cd repos/x && python3 ../../.claude/hooks/wb.py config set max_parallel 9"),
+        ):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": bad}}) == 2, \
+                f"{role} 能跑特权子命令：{bad}"
+        # 日常子命令与 qa 的门禁配置必须照常
+        for role, ok_wb in (
+            ("qa", "python3 .claude/hooks/wb.py config set gate_commands.test 'pytest -q'"),
+            ("backend-developer", "python3 .claude/hooks/wb.py task done T1"),
+            ("frontend-developer", "python3 .claude/hooks/wb.py status"),
+            ("architect", "python3 .claude/hooks/wb.py contract list"),
+        ):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": ok_wb}}) == 0, \
+                f"{role} 的正常命令被误拦：{ok_wb}"
+        # 主线程不受这层限制，否则编排者推不动流程
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command":
+                                     "python3 .claude/hooks/wb.py phase advance --force"}}) == 0, \
+            "主线程强推门禁被误拦"
+
+        # --- contract unlock / bump 必须是 owner 本人 ---
+        # 冻结层的拒绝信息按 owner 分岔提示「别自己申报解冻」，但 unlock / bump 本身
+        # 不校验 owner —— 非 owner 能解冻、改写并重新基线化别人的契约，事后
+        # contract verify 干净。
+        for role in ("frontend-developer", "qa", "pm", "reviewer"):
+            for act in ("unlock", "bump"):
+                cmd_txt = (f"python3 .claude/hooks/wb.py contract {act} "
+                           f"--name user-api --reason 顺手改")
+                assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                              "tool_input": {"command": cmd_txt}}) == 2, \
+                    f"非 owner {role} 能 contract {act}"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command":
+                                     "python3 .claude/hooks/wb.py contract unlock "
+                                     "--name user-api --reason 加字段"}}) == 0, \
+            "owner 自己申报解冻被误拦"
+        # architect 是契约管理员：接口契约由它定义，owner 填的却是实现方，
+        # 卡死它等于卡死 architect.md 写明的契约变更流程。
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "architect",
+                      "tool_input": {"command":
+                                     "python3 .claude/hooks/wb.py contract unlock "
+                                     "--name user-api --reason 分页要返回 total"}}) == 0, \
+            "architect 改自己定义的接口契约被误拦"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command":
+                                     "python3 .claude/hooks/wb.py contract unlock "
+                                     "--name $C --reason x"}}) == 2, \
+            "契约名取不到时应拒绝：核对不了 owner 就不能放行"
+
+        # --- 显式空范围 = 全拒，缺失键 = 回落默认 ---
+        # 空清单读作「不限制」时，role_scopes.<角色> = [] 就是解除范围的开关。
+        st = load_state(tmp)
+        st["role_scopes"]["qa"] = []
+        save_state(tmp, st)
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"file_path": "tests/test_x.py"}}) == 2, \
+            "显式空范围被当成不限制"
+        st = load_state(tmp)
+        st["role_scopes"].pop("qa", None)
+        save_state(tmp, st)
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"file_path": "tests/test_x.py"}}) == 0, \
+            "范围缺失应回落默认值"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"file_path": "server/api.py"}}) == 2, \
+            "回落默认值后仍要拦越权"
+        st = load_state(tmp)
+        st["role_scopes"]["qa"] = list(DEFAULT_ROLE_SCOPES["qa"])
+        save_state(tmp, st)
+
+        # --- sed -i 的脚本参数不是写入目标 ---
+        # 按「非 flag 全算」取目标会把 `s/a/b/` 当成路径，于是范围内的正常改动被判成
+        # 越权写 `s/a/b`。sed -i 创建不了文件，只有已存在的路径才可能是真目标。
+        (tmp / "server").mkdir(parents=True, exist_ok=True)
+        (tmp / "server" / "app.py").write_text("a = 1\n", encoding="utf-8")
+        for ok_cmd in ("sed -i s/a/b/ server/app.py",
+                       "sed -i '' -e s/a/b/ server/app.py",
+                       "sed -i.bak s/a/b/ server/app.py",
+                       "sed -i -e s/a/b/ -e s/c/d/ server/app.py"):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": ok_cmd}}) == 0, \
+                f"sed 脚本参数被当成写入目标：{ok_cmd}"
+        assert resolve("sed -i s/a/b/ server/app.py", tmp)[0] == {"server/app.py"}, \
+            "sed -i 的真实写入目标丢了"
+
+        # --- 门禁命令是不经 Bash 守卫的 shell ---
+        # 灾难性命令写成字面量会被守卫自己的 DENY_BASH 拦在编辑这一步，故拼接。
+        code, out = quiet("config", "set", "gate_commands.lint", "rm -rf /")
+        assert code == 1 and "拒绝写入门禁命令" in out, f"灾难性门禁命令被写入：{out}"
+        st = load_state(tmp)
+        st["gate_commands"]["lint"] = "mk" + "fs.ext4 /dev/sda1"   # 老 state 里的存量
+        save_state(tmp, st)
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:lint")
+        assert not ok and "拒绝执行" in detail, f"存量灾难性门禁命令仍被执行：{detail}"
+        st = load_state(tmp)
+        st["gate_commands"]["lint"] = ""
+        save_state(tmp, st)
+
+        # --- skip / block 的理由必须留痕 ---
+        # 只写进 t["notes"] 的话，下一次 reopen --note 就覆盖掉，日志里只剩一行
+        # task_skip；而跳过全部任务能让 tasks_done 门禁变绿。
+        entries = load_state(tmp)["log"]
+        assert any(e.get("event") == "task_skip" and e.get("reason") == "功能取消"
+                   for e in entries), "task skip 的理由未入日志"
+        assert any(e.get("event") == "task_block" and e.get("reason")
+                   for e in entries), "task block 的理由未入日志"
+
         # 报告可渲染
         code, out = quiet("report")
         assert "交付报告" in out and "user-api" in out
+        assert "功能取消" in out, "报告里看不出任务是干完的还是跳过的"
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
-          "并发写状态 / 产物挂载 / 报告")
+          "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / "
+          "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告")
 
 
 # --------------------------------------------------------------------------
@@ -3568,6 +4030,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["get", "set", "advance"])
     p.add_argument("name", nargs="?")
     p.add_argument("--force", action="store_true", help="门禁不通过仍推进（记入日志与报告）")
+    p.add_argument("--reason", help="set 必填：为什么直接跳阶段（不跑门禁，入日志）")
     p.set_defaults(func=cmd_phase)
 
     p = sub.add_parser("gate", help="门禁校验（退出码 1 = 未通过）")

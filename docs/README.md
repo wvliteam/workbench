@@ -10,7 +10,7 @@
 | [roles.md](roles.md) | 七个角色的矩阵与写入范围、协作协议、交接格式、定制与新增 |
 | [gates.md](gates.md) | 门禁引擎：八种断言的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
 | [contracts.md](contracts.md) | 契约机制：哈希冻结 + 只读守卫、申报窗口、生命周期、`bump` 的影响面传播、失效模式 |
-| [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、危险命令分级、hook 载荷与失败语义 |
+| [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、wb.py 特权子命令层、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
 | [wbsvr.md](wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |

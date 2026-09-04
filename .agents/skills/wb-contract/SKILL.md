@@ -81,7 +81,8 @@ python3 .claude/hooks/wb.py contract verify      # 退出码 1 = 有漂移或开
 python3 .claude/hooks/wb.py contract impact --name user-api               # 1. 先看影响面
 python3 .claude/hooks/wb.py contract unlock --name user-api \
     --reason "分页要返回 total，前端无法渲染页码"                          # 2. 预先申报
-# 现在这一个文件可以改
+# 现在这一个文件可以改（hook 校验：unlock/bump 只有 owner 与 architect 跑得了，
+# 你是主线程不受影响；派 subagent 去改时派 architect，不是实现者）
 python3 .claude/hooks/wb.py task check <受影响任务ID>                       # 3. 工作中的任务确认快照
 python3 .claude/hooks/wb.py contract bump --name user-api                 # 4. 重新锁定并传播失效
 ```

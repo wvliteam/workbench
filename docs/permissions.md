@@ -79,19 +79,26 @@ def unlocked_paths(root):
 
 ```python
 role = current_role(rootr, data)          # 载荷 agent_type 优先，取不到才读 .workbench/role
-globs = st["role_scopes"].get(role)
+globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))   # 缺 key 才回落默认，显式 [] 是全拒
 rel = os.path.relpath(target, rootr).replace(os.sep, "/")
-if rel.startswith(".workbench/"):         # 裸扩展名模式不得跨进状态目录
-    globs = [g for g in globs if g.startswith(".workbench/")]
+guarded = next((g for g in GUARDED_PREFIXES if rel.startswith(g)), "")
+if guarded:                               # 裸扩展名模式不得跨进状态目录与守卫本体
+    globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
 if not any(fnmatch.fnmatch(rel, g) for g in globs):
     hook_deny(f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。…")
 ```
 
+**`role_scopes` 里缺 key 和显式空清单是两个不同的意思。** 缺 key 回落 `DEFAULT_ROLE_SCOPES`（升级前建的项目、手写过 `state.json` 的项目都会缺），显式的 `[]` 是「什么都不能写」。早期版本两者都当成「不限制」（`globs = st["role_scopes"].get(role)` 取到 `None` 或 `[]` 后 `any(...)` 恒假之前先被一句 `if not globs: return` 放过），于是 `config set role_scopes.qa '[]'` 就是一键解除本层 —— 而 `config set` 本来就是角色跑得到的命令（现在这条也被[特权子命令层](#wbpy-特权子命令只有-hook-拿得到调用者身份)拦住了）。空值当放行时越权路径连 `GUARDED_PREFIXES` 收窄都走不到，`.claude/hooks/wb.py` 直接可写。两个方向各有断言：`qa` 显式空范围写 `tests/x.py` 被拒，`role_scopes` 整个删掉后 `qa` 写 `tests/x.py` 照常放行。
+
 **角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-**`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。** 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
+**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/`）。范围里没有以该前缀打头的模式，就是谁都不能写。
+
+没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
 第二层补不上这个缺口：它只认**已锁定**的契约，而强推过的阶段产物不冻结（那个阶段并没真做完）、还没 `lock` 的契约也不在清单里。所以「开发角色的写入范围不含 `.workbench/contracts/`」这条断言在收窄之前对 `*.json` 并不成立 —— 收窄不只是为新加的 `*.md` 铺路，它同时补掉了 `*.json` 一直存在的同类缺口。收窄只影响裸扩展名，各角色显式写出的 `.workbench/artifacts/<阶段>/**` 照常放行，两个方向都有断言。
+
+**另外三个前缀装的是守卫自己**：`.claude/hooks/wb.py` 是权限引擎，`.claude/settings.json` 是 hook 注册表，`.claude/agents/*.md` 是角色定义，`.codex/` `.agents/` 是 Codex 端的同一套。同样因为 `*` 跨 `/`，收窄之前 `*.py` 放行任意目录下的 `.py`、`*.json` 放行 `settings.json`、`*.md` 放行 agent 定义 —— 实测 `backend-developer` 能写 `.claude/hooks/wb.py`、`frontend-developer` 能写 `.claude/settings.json`。这些文件都不在任何哈希基线里，`contract verify` 也发现不了：**防线保护 state，却不保护防线自己。** 拒绝信息在这三个前缀上多打一句「要改它交回主线程，别给角色开范围」。主线程不受影响 —— 角色取不到时本层整段跳过，改工作台本体仍走主线程。
 
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
@@ -154,14 +161,16 @@ if BASH_WRITE.search(cmd) or all_targets:
     # uncertain 模式：退回旧行为（文本匹配 + 基名误报）
 ```
 
-三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv` 取最后一个非 flag 参数（目标），`sed -i` 取 `-i` 之后的参数，`tee` 取全部参数。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
+三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv` 取最后一个非 flag 参数（目标），`sed -i` 只取 `-i` 之后真实存在的文件（操作数里的脚本 `s/a/b/`、BSD 版 sed 的独立空后缀 `-i ''` 都不是路径，早期按「非 flag 全算」会把脚本当写入目标 —— 存在不存在的路径不可能，按存在性过滤即可剥干净），`tee` 取全部参数。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
 
 `resolve()` 返回三元组 `(all_targets, outside_targets, uncertain)`：
 - `all_targets`：所有写入目标的相对路径（用于冻结检查）
 - `outside_targets`：仅项目根外的目标（用于越根检查）
 - `uncertain`：碰到 `eval`/`xargs`/`$(...)` 等无法可靠解析的构造时为 True，此时退回旧行为
 
-**`uncertain` 退回旧行为**：`BASH_WRITE` + `frozen_hits()` 文本匹配。误报面比精确模式宽（`cp`/`mv` 不分源和目标），但不漏拦。拒绝信息里会注明「写入目标无法解析，已一并拦截」。
+**`uncertain` 退回旧行为**：`BASH_WRITE` + `frozen_hits()` 文本匹配，外加一条只认 `/` 开头的重定向兜底正则做越根检查。误报面比精确模式宽（`cp`/`mv` 不分源和目标），但不漏拦。拒绝信息里会注明「写入目标无法解析，已一并拦截」。
+
+兜底正则里的目标与 safe 目录比对前先 `resolve()` —— 修一处实测误拦：macOS 的 `/tmp` 是 `/private/tmp` 的软链，safe 集合里存的是 resolve 过的路径，原始路径直接比对永远比不中，结果是「往 /tmp 写临时补丁脚本」这类正当操作被恒拦（命令尾部带 `python3 -c` 之类的不可解析构造时才会走到这条兜底）。相对路径的重定向不在兜底正则覆盖内，由 `outside_targets` 的精确检查拦 —— selfcheck 的项目根建在系统临时目录里时 `../evil.py` 解析进 safe 区放行是对的，真实根下它落在根外被拦，两个方向都有断言。
 
 先切目录再改（`cd .workbench/contracts && sed -i ... user-api.json`）靠一条兜底覆盖：命中 `BASH_WRITE`、没提到任何完整冻结路径、**且命令里有 `cd`/`pushd` 切进某个 `.workbench` 路径**时拒绝。hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），只能这么兜。
 
@@ -176,6 +185,44 @@ if BASH_WRITE.search(cmd) or all_targets:
 `cp` / `mv` / `install` 的源和目标区分已由 `resolve()` 精确处理：`_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标。`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧的文本匹配，误报面略宽但不漏拦。
 
 **safe 目录与项目根的关系**：`resolve()` 跳过 `/dev`、`/tmp` 等系统目录，但先检查路径是否在项目根内。当项目根本身位于 `/tmp/` 下时（如自检的临时目录），项目内部路径不会被 safe 目录过滤掉。
+
+## wb.py 特权子命令：只有 hook 拿得到调用者身份
+
+「状态只能经 wb.py 改」这条设计有个隐含漏洞：`.claude/settings.json` 的 `permissions.allow` 把 `Bash(python3 .claude/hooks/wb.py:*)` 对所有角色开放（这是流程要跑起来的前提），而 wb.py 自己看不到调用者 —— CLI 只知道被调用，不知道被谁调用。于是这条设计等价于：**wb.py 能改的一切，任何角色都能改**，而 wb.py 能改的东西比「状态」宽得多：
+
+- `config set role_scopes.<自己> '[".claude/**"]'` —— 直接给守卫引擎本身开写权限（实测当时可行）
+- `init --force` —— 清空阶段、契约基线与冻结清单
+- `phase set` —— 不跑门禁直接改阶段，事后不留任何记录
+- `config set gate_commands.test '任意命令'` —— 门禁命令以 `subprocess.run(cmd, shell=True)` 执行，是一条**从不经过 Bash 守卫的 shell**（见 [gates.md](gates.md)）
+- `contract unlock` / `contract bump` —— 冻结层的拒绝信息教非 owner「报回编排者」，但子命令本身不校验 owner，实测 backend-developer 能解冻、改写并重新基线化 architect 的契约
+
+所以身份校验只能放在 hook 里 —— **载荷里的 `agent_type` 是唯一拿得到调用者身份的地方**。Bash 分支在危险命令检查之后多了一层：
+
+```python
+wb_role = current_role(rootr, data)
+if wb_role in ROLES:
+    for reason in privileged_wb_calls(cmd, rootr, wb_role):
+        hook_deny(reason)
+```
+
+`privileged_wb_calls()` 把命令剥掉 heredoc、按管道切段、`shlex` 分词，挑出每一段里的 wb.py 调用及其参数，逐条核对。角色 subagent 一律不能跑的：
+
+| 子命令 | 拒绝理由 |
+| --- | --- |
+| `phase set` | 不跑门禁直接改阶段 |
+| `phase advance --force` | 强推门禁前要先问用户（硬规则 3） |
+| `role set` / `role clear` | 改的是主线程与非角色 agent 的范围兜底 |
+| `role scopes --reset` | 重写全部角色的写入范围 |
+| `task skip` | 跳过的任务在 `tasks_done` 门禁里等同完成 |
+| `init --force` | 清空阶段、契约基线、门禁记录与冻结清单 |
+| `contract dispute --clear` | 解除争议熔断是编排者决策 |
+| `config set <除 gate_commands.* 外的任何键>` | `role_scopes.*` 能直接给自己开范围，改的都是守卫自己的配置 |
+
+唯一例外：**qa 可以 `config set gate_commands.*`**（补上门禁命令是它的既定流程）。即使如此，`cmd_config` 在写入前、`run_check` 在执行前都会用 `catastrophic_command()` 筛一遍值 —— 见 [gates.md](gates.md)。
+
+`contract unlock` / `bump` 加的是 owner 校验：`--name` 必须能在登记表里查到 owner，owner 不是自己也不放行。唯一放行的是 `architect`（`CONTRACT_STEWARD`）—— 接口契约由它定义，`.claude/agents/architect.md` 里写明的流程就是由它替 owner 走 unlock/bump（契约变更要给消费方建同步任务，那是架构决策，不是实现者的局部动作）。`--name` 查不到（比如 flag 值是个变量）也拒：核不了 owner 就不放行。
+
+主线程不受这层影响 —— 载荷没有 `agent_type` 时 `current_role()` 走 `.workbench/role` 兜底，主线程正常情况下没有兜底角色。这也解释了为什么这层放在 hook 而不是 wb.py 里：wb.py 里写这层没有任何身份可校。
 
 ## 危险命令分级
 
@@ -270,7 +317,7 @@ hook 是主要机制，`settings.json` 做粗粒度兜底：
 
 ## 自检覆盖
 
-守卫的实际拦截边界**以 `selfcheck` 的断言为准**，这里不复述 —— 抄一份就是造一份会漂移的副本，而这份副本没人会去更新。跑 `python3 .claude/hooks/wb.py selfcheck` 看它跑什么，或读 `wb.py` 里 `cmd_selfcheck` 的「权限守卫」到「产物挂载」几段。
+守卫的实际拦截边界**以 `selfcheck` 的断言为准**，这里不复述 —— 抄一份就是造一份会漂移的副本，而这份副本没人会去更新。跑 `python3 .claude/hooks/wb.py selfcheck` 看它跑什么，或读 `wb.py` 里 `cmd_selfcheck` 的「权限守卫」到「产物挂载」几段 —— 覆盖范围以跑出来的清单为准，正文不逐一列。
 
 要知道的只有断言的组织方式：**正例与反例成对。** 只测「该拦的拦住了」会漏掉「不该拦的也拦了」，那种失效表现为 agent 无法工作，比漏拦更快被发现但同样是 bug。误报用例专门覆盖 `role` / `state.json` 这类在业务代码里高频出现的词。
 
