@@ -1,5 +1,20 @@
 # wbsvr：契约托管服务
 
+> **历史设计警告（2026-09-04）**：本文完整保留的是已放弃的历史方案。`wbsvr` 服务、系统账户、sudoers 配置和安装脚本均已移除；它不是当前安装手册，也不是当前工作台可选能力。当前实现只使用仓库文件、`.workbench`、本地 `wb.py`、hook 和哈希/冻结机制。
+>
+> **迁移背景**：如果旧环境曾从 hosted 存储导出契约正文，应把正文作为普通本地文件重新登记，而不是迁移旧服务状态。示例：
+>
+> ```bash
+> mkdir -p .workbench/contracts
+> cp /path/to/export/user-api.yaml .workbench/contracts/user-api.yaml
+> python3 .claude/hooks/wb.py contract add .workbench/contracts/user-api.yaml \
+>   --name user-api --owner backend-developer --consumers frontend-developer
+> python3 .claude/hooks/wb.py contract lock --name user-api
+> python3 .claude/hooks/wb.py contract verify
+> ```
+>
+> 导出文件必须先人工确认内容、owner、consumers 和路径；每份文件分别 `contract add` 后再 `contract lock`，由本地 SHA 建立新的基线。不要把旧服务的 refs、sealed 状态或系统配置当作当前状态导入。
+
 wbsvr 把工作台的**流程状态与契约文档**从 agent 可寻址的文件系统里搬走，交给一个 agent 无法触达的专用账户保管。它不是又一层 hook，是把「能不能改」的判定从「猜命令」升级成「操作系统权限」。
 
 > 本文取代早期的 docsvr 设计（本文件的前一版本，`git log --follow docs/wbsvr.md` 可查）。那一版的常驻 daemon、unix socket、bearer token 三样都被推翻了，理由见 [关键决策点](#关键决策点) D3、D4。
@@ -256,20 +271,22 @@ func expireUnlocks(refs map[string]*Ref, now int64) {
 
 **bootstrap 例外**：开发工作台自身时 `.claude/` 保持 agent 可写，不启用托管 —— 否则改不动 `wb.py`。`doctor` 识别这种情况并明说。
 
-## 实施现状（2026-09-03）
+## 实施现状：移除前记录（2026-09-03；已于 2026-09-04 移除）
 
-阶段 0 / 1 / 2 全部落地，阶段 3 只落了检测那一半。代码在 `wbsvr/main.go`（纯 stdlib，20 个测试）、`wbsvr/wbsvr.sudoers`、`wbsvr/install.sh`，以及 `wb.py` 里的托管分支。`wb.py selfcheck` 末尾会真的跑一遍完整托管生命周期 —— 用 `-ldflags -X main.storeBase` 换掉存储根、进程内替掉 `_svr` 去掉 sudo 那一跳，协议、路径校验、锁定判定、版本与窗口都是真的；没有 go 工具链时报「跳过」。刻意不留环境变量开关：那个开关本身就是绕过口（指向一个永远回答「没锁」的假二进制）。
+以下内容只记录 **2026-09-03 移除前版本**的实现状态和验证方式，不代表当前仓库状态，也不是当前安装、部署或运行手册。2026-09-04 已移除：`wbsvr/` 下的 Go 服务代码及测试、`wbsvr.sudoers`、`install.sh`、`wb.py` 中的 hosted/sealed/托管分支、`doctor` 相关入口，以及针对这些组件的对应自检逻辑。当前不存在可运行或可部署的 `wbsvr` 服务，也不存在可供安装的系统账户、sudoers 或托管模式。
 
-**偏离 D15：没有单独的快照文件，复用现有的冻结清单，由 wb.py 写。** 原设计要 wbsvrd 刷一份 `wbsvr:work 0444` 的快照，但 wbsvr 是非 root，往 agent 属主的 `.workbench/` 里建文件得先放宽那个目录的权限 —— 为一份性能缓存去松掉被保护侧的权限，方向反了。现在这份清单跟着 `save_state` 原子替换（`write_frozen`），托管契约不往里贡献路径（它的保护来自不可寻址，不来自清单），清单文件自己是冻结项。代价是它仍在 agent 可寻址的路径上、只有正则这一道 —— 与 D12 同档，不是新洞。
+**移除前实现记录（2026-09-03）。** 当时阶段 0 / 1 / 2 被记录为已落地，阶段 3 只落成检测那一半。移除前的实现文件曾包括 `wbsvr/main.go`（纯 stdlib，20 个测试）、`wbsvr/wbsvr.sudoers`、`wbsvr/install.sh`，以及 `wb.py` 里的托管分支；这些文件和分支已于 2026-09-04 删除。移除前版本的 `wb.py selfcheck` 末尾曾运行完整托管生命周期：通过 `-ldflags -X main.storeBase` 替换存储根、在进程内替换 `_svr` 以跳过 sudo，验证协议、路径校验、锁定判定、版本与窗口；没有 Go 工具链时当时会报告「跳过」。这些是删除前版本的历史验证记录，当前自检不再运行该生命周期。
 
-**阶段 3 落成检测，不是取代。** `role_scopes` 在 `PreToolUse` 热路径上（D15 存在的原因就是这个），每次工具调用一次 sudo 往返不能接受。现在 `sealed.json` 是权威副本、`state.json` 是镜像，`sealed_audit()` 在 `gate check` 与 `status` 里比对两侧，不一致就 FAIL 并点名字段。天花板写在函数 docstring 里：**篡改不再静默通过，下一次门禁撞出来 —— 但不是「改不了」**。要真正改不了，得先给 hook 一份 wbsvrd 刷的快照，也就是先解掉上面那条 D15 偏离。
+**移除前的 D15 偏离记录。** 删除前版本没有单独的快照文件，而是复用由旧版 `wb.py` 写入的冻结清单。原设计曾要求 wbsvrd 刷一份 `wbsvr:work 0444` 的快照，但当时判断 wbsvr 是非 root，往 agent 属主的 `.workbench/` 里建文件得先放宽该目录权限 —— 为一份性能缓存去松掉被保护侧的权限，方向相反。删除前版本的清单曾跟着 `save_state` 原子替换（`write_frozen`），托管契约不向其中贡献路径（保护来自不可寻址，而不是清单），清单文件本身是冻结项。该代价和取舍只属于移除前设计，与当前实现无关。
 
-`phase set` 在托管下直接关掉（能跳阶段 = 能跳门禁），要回退阶段走用户凭证的 `sealed-set`。`phase advance` **先调服务端再写本地**：反过来的话服务端拒了（并发下别人已经推过）两份就分叉，而门禁读的是本地那份。
+**移除前阶段 3 的检测记录。** 删除前版本曾在 `PreToolUse` 热路径检查 `role_scopes`；当时认为每次工具调用一次 sudo 往返不可接受。删除前版本曾以 `sealed.json` 作为权威副本、`state.json` 作为镜像，并由 `sealed_audit()` 在 `gate check` 与 `status` 中比对两侧，不一致时报告 FAIL 并点名字段。该版本的函数 docstring 曾记录「篡改不再静默通过，下一次门禁撞出来 —— 但不是改不了」；由于对应 sealed 实现和分支已经删除，这里仅保留设计取舍，不描述当前行为。
 
-**托管启用与否由服务端说了算。** `.workbench/hosted` 只是「这个项目曾经启用过」的备忘，一旦记下，服务端调不通时**硬失败**而不是退回本地状态 —— 静默降级是最坏的失败模式（同 D13）。删掉备忘也没用：存储还在，下一次判定又写回来。没装二进制又没启用过的项目一次 sudo 都不花。
+**移除前的阶段控制记录。** 删除前版本曾在托管模式下关闭 `phase set`（跳阶段等于跳门禁），回退阶段需要用户凭证执行 `sealed-set`；`phase advance` 曾先调用服务端再写本地，以避免并发推进时服务端与本地分叉。这些命令和服务端协调逻辑已随托管分支删除，当前流程只遵循本地 `wb.py` 的现行契约与阶段命令。
 
-**`install.sh` 是用户步骤。** 建 `wbsvr` 账户、装 sudoers 都要 sudo 密码，agent 跑不了也不该能跑。`doctor` 在账户还不存在时对第 3 条（`sudo -n -u wbsvr /bin/sh` 必须失败）明说「尚未真正测到」而不是报 PASS —— 拿不到不存在账户的 shell 不是保护。
+**移除前的启用逻辑记录。** 删除前版本曾由服务端决定是否启用托管，并用 `.workbench/hosted` 记录项目曾经启用过；服务不可用时曾硬失败而不是退回本地状态，删除前版本也没有提供静默降级。`.workbench/hosted`、服务端启用判定和相关硬失败逻辑均已删除，当前不存在该备忘文件或服务端。
 
-**本仓库就是 bootstrap 那个例外**：这里改的是 `wb.py` 本身，`.claude/` 必须保持 agent 可写，所以不启用托管。`doctor` 认出这种情况后仍逐条报六个前提（本机第 5 条真的不过 —— agent 账户在 admin 组），结论是「bootstrap 模式，不启用托管」，退出 0。
+**移除前的安装与 doctor 记录。** 删除前版本曾把 `install.sh` 作为用户步骤，用于创建 `wbsvr` 账户和安装 sudoers；`doctor` 曾在账户不存在时将 `sudo -n -u wbsvr /bin/sh` 的结果标为「尚未真正测到」而不是 PASS。`install.sh`、系统账户创建路径、sudoers 和 `doctor` 入口均已删除，本文不能据此执行安装或诊断。
 
-**session-start hook 在托管下花一次 sudo**（`contract_drift` 要问服务端）。每会话一次，可接受；`hook_pre_tool` / `hook_post_tool` 两条热路径上一次都没有。
+**移除前的 bootstrap 例外记录。** 删除前版本曾把本仓库视为 bootstrap 例外：因为这里修改的是 `wb.py` 本身，`.claude/` 必须保持 agent 可写，所以不启用托管；当时的 `doctor` 曾报告六个前提并以「bootstrap 模式，不启用托管」退出 0。这是删除前实现的行为记录，当前没有 `doctor` 或托管模式可供启用。
+
+**移除前的 session-start 记录。** 删除前版本的 session-start hook 曾在托管模式下为 `contract_drift` 调用一次服务端；当时认为每会话一次可以接受，而 `hook_pre_tool` / `hook_post_tool` 两条热路径不调用服务端。该服务调用和对应托管分支已删除，当前 hook 不具备 hosted/sealed 服务通信能力。

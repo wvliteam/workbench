@@ -20,18 +20,26 @@ python3 .claude/hooks/wb.py next --all --json
 
 按 `next` 的结果分支：
 
-**有就绪任务** → 同一条消息里多个 subagent 调用并行派发整批（每个 subagent 给到任务 ID、契约路径、相关验收标准）。回来后逐个确认产物真的存在，再 `task done <ID>`。**subagent 说做完了不等于做完了** —— 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍。develop 阶段把你跑过的那条命令与输出记进 `.workbench/artifacts/develop/verification.md`（用 `apply_patch`，读出现有内容连着新的一起写；subagent 各自写会互相覆盖，shell 追加被守卫拦），门禁要求它非空。
+**有就绪任务** → 同一条消息里多个 subagent 调用并行派发整批。每个 subagent 必须收到任务 ID、契约路径、相关验收标准和绑定的完整 `{name,version,revision,sha}` 快照，并被要求在每批写入前运行 `task check <ID>`。回来后先确认产物和契约检查，再由编排者独立复核文件与验证命令，最后执行 `task done <ID>`。**subagent 说做完了不等于做完了** —— 不得把自报结果当成完成证据。develop 阶段把编排者实际复核的命令与输出记进 `.workbench/artifacts/develop/verification.md`（用 `Write`，读出现有内容后连着新的一起写；这份文件属于编排者，subagent 不得写；shell 追加被守卫拦），门禁要求它非空。
 
 **无就绪任务、有进行中** → 上一批还没回。等它回，不要重复派发。
 
-**无就绪任务、有阻塞** → 停下，进入「停止」。
+**无就绪任务、有阻塞或 stale** → 停下，进入「停止」。先查阻塞原因、依赖闭包和契约快照；不要让旧快照任务继续写。
 
 **全部完成** →
+
 ```
 python3 .claude/hooks/wb.py gate check
 ```
+
 - 通过 → `phase advance`，回到循环开头。
 - 不通过 → 能靠派 subagent 补齐的（缺产物、缺章节、测试失败）就派，回到循环开头；否则进入「停止」。
+
+依赖语义统一为：`done` 与带理由的 `skipped` 满足依赖，`blocked` / `stale` 不满足。阻塞或失效任务必须递归使全部传递下游 stale，包括已 done 的任务；只有依赖全部恢复后才可 `task reopen`，并刷新任务的契约快照。
+
+## 契约变化
+
+开发角色发现契约冲突时必须停止，运行 `task check`，并留下 `task block` / `contract dispute`。由 `architect` 处理 `impact` -> `unlock --reason` -> 修改 -> `bump`。bump 后所有旧快照实现停止；相关任务重新读取 `{name,version,revision,sha}`，再 `task reopen`、`task start`，并在写入前 `task check`。loop 不自行绕过争议或强行恢复下游。
 
 ## 必须停下来的情况
 
@@ -42,10 +50,10 @@ python3 .claude/hooks/wb.py gate check
 3. 需要 `--force` 强推。
 4. 同一个任务失败两次 —— 第三次还是同样的失败，说明理解错了，不是手滑。停下来说清失败在哪。
 5. QA 报出 blocker 级缺陷。
-6. 契约或方案文档漂移（改动走了守卫之外的路径：外部编辑器、`cp`、`git checkout`、用户手改）。判断是有意还是误改需要人。
+6. 契约或方案文档漂移（改动走了守卫之外的路径或用户手改）。
 7. 走完 retro 阶段 —— 流程结束。
 
-subagent 报告「被守卫拦了改不了 X」不在必停列表里 —— 那是机制在工作。按 `wb-flow` 的阻塞处理走：该改的走 `contract unlock --reason` 申报，不该改的说明理由。**不要放宽 `role_scopes` 或改 `settings.json` 来放行。**
+subagent 报告「被守卫拦了改不了 X」不在必停列表里 —— 那是机制在工作。按 `wb-flow` 的阻塞处理走：该改的走申报流程，不该改的说明理由。**不要放宽 `role_scopes` 或改 `settings.json` 来放行。**
 
 ## 循环次数上限
 

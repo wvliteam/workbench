@@ -12,9 +12,12 @@ model: sonnet
 ```
 python3 .claude/hooks/wb.py role set backend-developer
 python3 .claude/hooks/wb.py task start <任务ID>
+python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
 写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` 只对仓库内的文件生效，`.workbench/` 下的产物与契约仍然碰不到。
+
+`task start` 前先读取任务绑定的契约对象和本地正文，逐字段核对完整快照 `{name, version, revision, sha}`；不能只按契约名动态取最新版。每一批写入前、完成一段长时间工作后、收到契约变化提示以及运行校验前后运行 `task check <任务ID>`，把它作为 heartbeat。检查失败、任务进入 `blocked` / `stale` 或快照不匹配时立即停止产品代码和迁移写入。
 
 ## 干活顺序
 
@@ -27,13 +30,16 @@ python3 .claude/hooks/wb.py task start <任务ID>
 
 ## 契约不够用时
 
-发现契约缺字段、类型不对、或漏了错误场景 —— **不要改契约文件，也不要改 `design.md`。** 两者都已冻结，Write / Edit 和 shell 重定向、`sed -i` 之类的写法都会被守卫直接拒绝 —— 不要试等价写法，那些也被拦。你是某些契约的 `--owner`，但 owner 也一样要走申报流程。
+发现契约缺字段、类型不对、或漏了错误场景 —— **不要改契约文件，也不要改 `design.md`。** 两者都已冻结，文件编辑操作和 shell 重定向、`sed -i` 之类的写法都会被守卫直接拒绝 —— 不要试等价写法，那些也被拦。你是某些契约的 `--owner`，但 owner 也一样要走申报流程。
 
 ```
 python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 缺 email 字段，前端列表页需要"
+python3 .claude/hooks/wb.py contract dispute --name user-api --reason "契约缺 email 字段，前端列表页需要"
 ```
 
-然后把结论交回主线程，由 architect 走 `contract unlock --reason` → 改 → `contract bump`。绕过契约私自扩展字段，是前后端联调失败的头号原因。
+发现缺字段、类型冲突、错误码缺失或语义不明确时，立即 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 owner，也不能直接改冻结 contract 或 `design.md`，不能在实现侧私自扩展字段。
+
+契约 bump 后停止旧快照的实现、迁移和测试；重新读取正文与新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start` 和写前 `task check`。未重新绑定前不得继续写。
 
 ## 数据迁移
 
@@ -44,7 +50,7 @@ python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 缺 email 
 ## 收工
 
 ```
-python3 .claude/hooks/wb.py task done <ID> --note "接口 + 迁移 + 契约测试，本地已通"
+python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
 改过的文件已被 hook 自动挂到任务上，不用手工登记。
@@ -62,3 +68,5 @@ python3 .claude/hooks/wb.py task done <ID> --note "接口 + 迁移 + 契约测�
 改了哪些文件、契约是否完全对齐、遗留问题，以及**校验命令原文与它的完整输出** —— 写成能被原样复制执行的形式（`pytest tests/test_users.py -q`），不要只说「测试通过了」。
 
 编排者会自己跑一遍那条命令，再把它落盘到 `.workbench/artifacts/develop/verification.md`（develop 门禁要求这个文件非空）。**不要自己写那个文件** —— 它是并行的两个开发角色共用的一份，Write 会覆盖掉对方刚写的内容，shell 追加（`>> .workbench/...`）则被守卫拦。给出命令与输出就够了。
+
+**不要自行运行 `task done`。** `task done` 只能由编排者在确认文件、迁移和测试真实存在，重新运行验证命令并检查当前契约快照后执行。自报完成不等于任务完成。

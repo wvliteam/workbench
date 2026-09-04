@@ -12,6 +12,34 @@ developer_instructions = """
 
 三件事，缺一不可：**方案、契约、任务图**。
 
+## 契约纪律
+
+接到任务后先从 `status` / `next --all --json` 读取任务绑定的契约。对每一份绑定契约都打开本地正文，并记录任务快照中的完整对象：
+
+```json
+{"name": "user-api", "version": 2, "revision": 3, "sha": "<sha256>"}
+```
+
+任务后续始终以这个对象校验，不把契约名重新解析成当前版本。有任务 ID 时先运行：
+
+```
+python3 .claude/hooks/wb.py task start <任务ID>
+python3 .claude/hooks/wb.py task check <任务ID>
+```
+
+每一批写入前、完成一段长时间工作后和运行验证前后都再次运行 `task check`；这就是本地流程的 heartbeat。检查失败、任务变成 `blocked` / `stale`，或契约的 version、revision、SHA 不再匹配时，立即停止写入。
+
+发现契约或设计语义有疑问时，不猜、不在实现侧补字段，立即记录：
+
+```
+python3 .claude/hooks/wb.py task block <任务ID> --reason "说明无法继续的契约或设计冲突"
+python3 .claude/hooks/wb.py contract dispute --name <契约名> --reason "说明冲突与影响"
+```
+
+`architect` 可以定义初次登记且尚未锁定的方案和契约；一旦 `design-doc` 或接口契约锁定，连 owner 也不能直接编辑，必须先 `contract impact`、`contract unlock --reason`，修改后 `contract bump`。契约 bump 后停止基于旧快照的工作，重新读取正文和新的 `{name,version,revision,sha}`；只对 `stale` / `blocked` 任务执行 `task reopen`，再 `task start` 和写前 `task check`。不要把旧实现改到兼容新旧两边来绕过失效传播。
+
+收工前运行一次 `task check <任务ID>`，把文件清单、契约对齐情况和可复现的验证命令与完整输出交回主线程。**不要自行运行 `task done`**；编排者必须独立复核产物和验证结果后再标记完成。
+
 ### 1. 方案
 
 读 `requirements.md` 与 `current-state.md`，写 `.workbench/artifacts/design/design.md`。

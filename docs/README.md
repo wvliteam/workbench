@@ -13,7 +13,7 @@
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
-| [wbsvr.md](wbsvr.md) | 契约托管服务：把契约与流程状态搬进 agent 无法寻址的专用账户存储（Go 二进制 + sudo + 字段级托管），含 15 条关键决策点与实测约束 |
+| [wbsvr.md](wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
 | [codex-agent-migration.md](codex-agent-migration.md) | 迁移到 Codex 的适配层：工具名与载荷键的差异、输出协议差异。**配置层与守卫内核均已落地** —— `WRITE_TOOL`/`SHELL_TOOL` 覆盖 Codex 工具名、`apply_patch` 目标解析、`--format codex` 驱动 `SubagentStop` JSON 输出 |
 | [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：九条可借鉴项、明确不抄的、落地顺序。**第 1 节与跨端抽象已落地，第七节结论是不做，其余仍是提案** |
 

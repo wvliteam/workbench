@@ -61,7 +61,7 @@
 | --- | --- |
 | `version` | schema 版本。字段**只增不改语义**，要改语义就升它并写迁移 |
 | `seq` | 任务 ID 自增计数器，只增不减 —— 删过任务后 ID 不复用 |
-| `tasks[].deps` | 前置任务 ID，全部 `done` 才算就绪。只写真依赖（[scheduling.md](scheduling.md)） |
+| `tasks[].deps` | 前置任务 ID，全部处于满足依赖的终态（`done` 或带明确理由的 `skipped`）才算就绪；`blocked` 与 `stale` 不满足依赖。只写真依赖（[scheduling.md](scheduling.md)） |
 | `gates[].forced` | `true` = 门禁未过但强推了。`passed` 记真实结果，两个字段不能合并 |
 | `gates[].failures` | 强推时遗留的 FAIL 项，进交付报告 |
 | `contracts[].path` | 相对项目根，同时是冻结清单的来源 |
@@ -196,15 +196,15 @@ architect: 写 design.md
            contract lock --all                 （哈希冻结 + 守卫只读）
            task add ×N                          （只写真依赖）
         ↓
-wb.py next --all --json                    → 就绪集合（依赖全 done）
+wb.py next --all --json                    → 就绪集合（依赖全部满足）
         ↓
 主线程同一条消息多个 Agent 调用             → fe-dev 与 be-dev 并行
         ↓ 各自
-role set → task start → 读契约 → 写代码 → 自检 → task done
+role set → task start → 读契约 → 写代码 → 自检 → task check → 回报编排者
         ↓
 PostToolUse hook 把改动追加到 artifacts.jsonl（角色取自载荷 agent_type，不看单文件）
-        ↓ task done 时按角色 + 任务 started 归并进任务的 artifacts
-主线程把 subagent 报的校验命令自己跑一遍 → 写 artifacts/develop/verification.md
+        ↓ 编排者复核后
+主线程把 subagent 报的校验命令自己跑一遍 → 写 artifacts/develop/verification.md → task done
         ↓
 wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd:lint/build）
 ```
@@ -255,7 +255,7 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 
 早期版本的角色锁也是 `.workbench/role` 一个文件，并行 subagent 各自 `role set` 会互相覆盖。后果不是精度下降而是**非确定性误拒**：backend-developer 写自己的 `migrations/` 会撞上前端的范围被拒，成败取决于两个 subagent 谁后启动。当时给的根因「hook 载荷里没有 subagent 标识」是错的。
 
-实测（Claude Code 2.1.252）：subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 载荷都带 `agent_type` 与 `agent_id`，主线程两个都没有；而 `session_id` 是**共享**的 —— 所以早期设想的「按 `session_id` 分片」本来也不通。`agent_type` 的值就是 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名，零映射。
+实测（Claude Code 2.1.252）：subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 载荷都带 `agent_type` 与 `agent_id`，主线程两个都没有；而 `session_id` 是**共享的** —— 所以早期设想的「按 `session_id` 分片」本来也不通。`agent_type` 的值就是 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名，零映射。
 
 `current_role()` 因此优先取载荷的 `agent_type`，取不到或不是角色名才退回读文件。并行 subagent 各自判定，与启动顺序无关；产物归属（`artifacts.jsonl` 的 `role`）同样按载荷取，不再全挂到最后一次 `role set` 的角色名下。
 
@@ -263,15 +263,15 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 
 ### 冻结防线覆盖不到的写入路径
 
-Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv` / `install` **已纳入**（wbsvr 阶段 0）—— 促成它的是状态文件：`cp` 覆盖 `state.json` 此前直接通过，而状态文件没有任何哈希兜底，契约有 `contract verify`、状态没有。仍未纳入的：`rsync`、编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
+Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv` / `install` 已纳入当前本地 `wb.py` hook 的 `resolve()` 解析；这些规则最初曾在已移除的 `wbsvr` 历史设计阶段 0 中被提出，但当前能力不依赖、也不调用该服务 —— 促成它的是状态文件：`cp` 覆盖 `state.json` 此前直接通过，而状态文件没有任何哈希兜底，契约有 `contract verify`、状态没有。仍未纳入的：`rsync`、编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
 
 **这一节的旧版预测「加进去会拦掉大量正常的构建与资源拷贝」，那个预测错了。** 判定是两段式的：命中 `BASH_WRITE` 只是第一段，还要 `frozen_hits()` 在命令文本里找到冻结路径才拒。`cp dist/x.js public/` 两段都不沾，构建与资源拷贝根本不进第二段。
 
-**`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源与目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
+**`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源和目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
 
 **用户手改不在覆盖范围内**，那是有意为之 —— 用户是这套机制的所有者，不是被约束的对象。
 
-**兜底不是升级路径，是设计的另一半**：`contract verify` 的哈希校验不管改动从哪来，develop 与 verify 门禁都跑它。守卫在改之前拦（能给出可操作的拒绝理由），校验在门禁时抓（能兜住守卫覆盖不到的一切）。两者都留着，不是重复。
+**兜底不是升级路径，是设计的另一半**：`contract verify` 的哈希校验不管改动从哪来，develop 与 verify 两个阶段的门禁都跑它。守卫在改之前拦（能给出可操作的拒绝理由），校验在门禁时抓（能兜住守卫覆盖不到的一切）。两者都留着，不是重复。
 
 **`git checkout`/`git restore` 故意不在 `_GIT_WRITE` 集合里。** 这两个命令恢复的是 git 跟踪的文件内容，不涉及 `.workbench/` 下的状态或契约（那些不在 git 里）。拦截它们只会干扰正常开发流程。`git mv`/`git rm`/`git clean`/`git stash` 则在集合内，因为它们会改变工作区文件的物理位置或删除内容。
 

@@ -176,18 +176,25 @@ wb.py contract bump --name user-api
 `bump` 是这套机制真正有牙齿的地方。它做四件事：
 
 ```python
-c["version"] += 1                    # 1. 版本递增
-c["sha"], c["locked_at"] = sha, now()  # 2. 重新冻结
-for role in c["consumers"]:           # 3. 给每个消费方角色建同步任务
+c["version"] += 1                    # 1. 面向人的版本递增
+c["revision"] += 1                  # 2. 内部修订号单调递增
+c["sha"], c["locked_at"] = sha, now()
+snapshot = {                         # 3. 任务绑定完整快照，不按名称动态解析
+    "name": name,
+    "version": c["version"],
+    "revision": c["revision"],
+    "sha": c["sha"],
+}
+for role in c["consumers"]:
     st["tasks"].append({
-        "title": f"同步契约 {name} v{new} 变更：{reason}",
+        "title": f"同步契约 {name} v{snapshot['version']} 变更：{reason}",
         "role": role, "phase": "develop", "status": "todo",
-        "contracts": [name], "notes": "由 contract bump 自动创建",
+        "contracts": [snapshot], "notes": "由 contract bump 自动创建",
     })
-log(st, "contract_bump", name=..., **{"from": old, "to": new, "reason": ...})  # 4. 审计
+log(st, "contract_bump", name=..., **{"from": old, "to": c["version"], "reason": ...})  # 4. 审计
 ```
 
-第三步是关键。契约变更最常见的失败模式不是「没人发现契约变了」，而是「发现了但忘了通知下游」。自动建任务让下游的返工进入任务表 —— 任务表是主线程每轮都读的东西，报告不是。
+第三步是关键。契约变更最常见的失败模式不是「没人发现契约变了」，而是「发现了但忘了通知下游」。自动建任务让下游的返工进入任务表 —— 任务表是主线程每轮都读的东西，报告不是。任务携带创建时的完整 `{name, version, revision, sha}` 快照，执行者必须核对该快照与当前契约一致；不能只保存契约名称并在执行时解析最新版本。
 
 `impact` 给出三类影响面：
 

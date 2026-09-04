@@ -523,11 +523,18 @@ def load_state(root: Path, lock: bool = False) -> dict:
         die(f"未初始化工作台。先运行：python3 .claude/hooks/wb.py init --name <项目名>")
     if lock:
         acquire_state_lock(root)
-    st = json.loads(p.read_text(encoding="utf-8"))
-    # 向前兼容：补齐新增字段
+    try:
+        st = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        die(f"state.json 无法解析：{e}")
+    if not isinstance(st, dict):
+        die("state.json 顶层必须是对象")
+    # 向前兼容：补齐新增字段。旧的字符串契约引用由迁移检查标记为不可安全重绑，
+    # 只有显式 task reopen 才允许刷新为当前完整快照。
     base = default_state(st.get("project", "unnamed"))
     for k, v in base.items():
         st.setdefault(k, v)
+    migrate_contract_refs(st)
     return st
 
 
@@ -548,11 +555,14 @@ def save_state(root: Path, st: dict) -> None:
 
 
 def frozen_paths(st: dict) -> list[str]:
-    """所有不允许用工具直接写的相对路径。契约一经登记即冻结，锁定与否都要走 wb.py。"""
+    """所有不允许用工具直接写的相对路径。
+
+    登记只是建立元数据；首次 lock 才建立哈希基线并冻结契约正文。这样 architect
+    可以先写完正文再登记/锁定，后续修改必须经过 unlock -> bump。
+    """
     out = [f".workbench/{n}" for n in FROZEN_ALWAYS]
-    # 托管契约没有 agent 侧路径 —— 它的保护来自「地址空间里不存在」，不来自这份清单。
-    # 工作副本 .workbench/wc/<名> 刻意不冻结：改它是 checkout/commit 模型的正常用法。
-    out += [c["path"] for c in st.get("contracts", []) if c.get("path")]
+    out += [c["path"] for c in st.get("contracts", [])
+            if c.get("path") and c.get("sha")]
     return out
 
 
@@ -590,6 +600,39 @@ def read_frozen(root: Path) -> list[str]:
     return frozen_paths(st)
 
 
+def read_unlock_records(root: Path) -> dict[str, dict]:
+    """读取每份契约自己的解冻记录。
+
+    新格式把申报理由和窗口建立时的旧 SHA 一起写进对应文件。旧版本只有纯文本
+    理由，仍可显示和关闭，但不能被 `bump` 消费；这样兼容旧状态不会把一次没有
+    基线的修改伪装成正式变更。
+    """
+    d = wb_dir(root) / "unlock"
+    if not d.is_dir():
+        return {}
+    out = {}
+    for f in sorted(d.iterdir()):
+        if not f.is_file():
+            continue
+        try:
+            raw = f.read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        record = {"reason": raw, "sha": None}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            payload = None
+        if isinstance(payload, dict):
+            record["reason"] = str(payload.get("reason") or "")
+            record["sha"] = payload.get("sha")
+            for key in ("version", "revision", "opened_at"):
+                if key in payload:
+                    record[key] = payload[key]
+        out[f.name] = record
+    return out
+
+
 def read_unlocks(root: Path) -> dict[str, str]:
     """当前全部解冻窗口：{契约名: 申报理由}。无窗口返回 {}。
 
@@ -598,12 +641,12 @@ def read_unlocks(root: Path) -> dict[str, str]:
     architect），两者并行改各自那份冻结产物时后一个 `unlock` 覆盖前一个 ——
     前者刚申报完就被拒，拒绝理由还是「先申报」。产物冻结让这条路径从
     「理论可能」变成「bump 之后必然发生」，所以窗口必须按契约分开。
+
+    这里保留旧的字符串返回形状给显示路径；需要验证窗口基线的变更命令使用
+    `read_unlock_records()`，避免把 SHA 丢掉。
     """
-    d = wb_dir(root) / "unlock"
-    if not d.is_dir():
-        return {}
-    return {f.name: f.read_text(encoding="utf-8").strip()
-            for f in sorted(d.iterdir()) if f.is_file()}
+    return {name: record.get("reason", "")
+            for name, record in read_unlock_records(root).items()}
 
 
 def close_unlock(root: Path, name: str = "") -> None:
@@ -619,34 +662,18 @@ def close_unlock(root: Path, name: str = "") -> None:
 def read_disputes(root: Path) -> dict[str, str]:
     """当前全部争议：{契约名: 争议理由}。无争议返回 {}。
 
-    结构与 read_unlocks 对称：一份契约一个文件，内容是争议理由。
-    争议是「全线停工」信号，比解冻窗口更重 —— 解冻只放行 owner 改一份文件，
-    争议是拦住所有 developer 的所有写入（执行记录与 /tmp 除外）。
-
-    托管模式下从服务端读取（refs 里的 dispute_reason 字段），与本地合并。
+    一份契约一个文件。争议是「全线停工」信号，比解冻窗口更重 —— 解冻只放行
+    owner 改一份文件，争议是拦住所有 developer 的所有写入（执行记录与 /tmp 除外）。
     """
-    result = {}
     d = wb_dir(root) / "disputes"
-    if d.is_dir():
-        result = {f.name: f.read_text(encoding="utf-8").strip()
-                  for f in sorted(d.iterdir()) if f.is_file()}
-    if hosted(root):
-        try:
-            refs = _svr(root, "list").get("refs") or {}
-            for name, ref in refs.items():
-                if ref.get("dispute_reason"):
-                    result[name] = ref["dispute_reason"]
-        except WbsvrError:
-            pass  # 服务端不可用时退回本地
-    return result
+    if not d.is_dir():
+        return {}
+    return {f.name: f.read_text(encoding="utf-8").strip()
+            for f in sorted(d.iterdir()) if f.is_file()}
 
 
 def close_dispute(root: Path, name: str = "") -> None:
-    """关掉本地争议哨兵：给 name 只关那一份，不给关全部。
-
-    托管模式下服务端争议由 cmdLock（bump 走它）自动清除，或由用户跑
-    `sudo wbsvrd dispute --clear` 手动清除 —— 本函数只管本地文件。
-    """
+    """关掉本地争议哨兵：给 name 只关那一份，不给关全部。"""
     d = wb_dir(root) / "disputes"
     if not d.is_dir():
         return
@@ -688,138 +715,211 @@ def sha256_file(p: Path) -> str | None:
 
 
 # --------------------------------------------------------------------------
-# 托管模式：契约正文与冻结指纹交给 wbsvr 账户保管（设计见 docs/wbsvr.md）
+# 本地契约与任务绑定
 # --------------------------------------------------------------------------
 
-WBSVRD = "/usr/local/libexec/wbsvrd"
-SVC_USER = "wbsvr"
 
-# 托管的状态字段。这里只做**检测**不做取代 —— 理由见 sealed_audit。
-SEALED_KEYS = ("phase", "phases", "role_scopes", "gate_commands", "gate_timeout")
-
-_hosted_cache: bool | None = None
-
-
-class WbsvrError(Exception):
-    """wbsvrd 非零退出。payload 是它 stdout 上的 JSON —— verify 失败时明细在那里。"""
-
-    def __init__(self, msg: str, payload: dict | None = None):
-        super().__init__(msg)
-        self.payload = payload or {}
+def contract_revision(c: dict) -> int:
+    """Return a usable revision for current and legacy local contracts."""
+    revision = c.get("revision")
+    if isinstance(revision, int) and not isinstance(revision, bool) and revision >= 1:
+        return revision
+    version = c.get("version")
+    if isinstance(version, int) and not isinstance(version, bool) and version >= 1:
+        return version
+    return 1
 
 
-def _svr(root: Path | None, *args, stdin: str | None = None, raw: bool = False):
-    """调一次 wbsvrd。项目路径永远是第一个位置参数 —— sudoers 匹配的是拼起来的
-    整条 argv，`wbsvrd -p /x read foo` 匹配不上 `wbsvrd read *`，所以没有任何选项。
+def contract_binding(c: dict) -> dict:
+    """Snapshot the exact local contract revision a task was created against."""
+    version = c.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        version = 1
+    return {
+        "name": c["name"],
+        "version": version,
+        "revision": contract_revision(c),
+        "sha": c.get("sha"),
+    }
+
+
+def contract_ref_name(ref) -> str:
+    if isinstance(ref, str):
+        return ref
+    if isinstance(ref, dict):
+        return str(ref.get("name") or "")
+    return ""
+
+
+def task_contract_names(t: dict) -> list[str]:
+    return [name for name in (contract_ref_name(r) for r in t.get("contracts", [])) if name]
+
+
+def migrate_contract_refs(st: dict) -> None:
+    """Validate legacy refs without guessing the revision they were created against.
+
+    A legacy string contains only a contract name, so resolving it to the current
+    contract would silently claim that an old task was created against today's
+    version. Keep the string visible and require an explicit task reopen to refresh
+    it into a complete snapshot.
     """
-    argv = ["sudo", "-n", "-u", SVC_USER, WBSVRD, str(args[0])]
-    if root is not None:
-        argv.append(str(root.resolve()))
-    argv += [str(a) for a in args[1:]]
-    try:
-        r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise WbsvrError(f"调不动 wbsvrd（{e}）") from e
-    if r.returncode != 0:
-        payload = {}
-        try:
-            payload = json.loads(r.stdout)
-        except (json.JSONDecodeError, TypeError):
-            pass
-        raise WbsvrError(
-            r.stderr.strip() or r.stdout.strip() or f"wbsvrd 退出码 {r.returncode}", payload)
-    if raw:
-        return r.stdout
-    return json.loads(r.stdout or "{}")
-
-
-def hosted(root: Path) -> bool:
-    """本项目是否已启用托管。判定权在服务端 —— 存储在不在只有 wbsvr 知道。
-
-    `.workbench/hosted` 只是「这个项目曾经启用过」的备忘：一旦记下，服务端调不通时
-    **硬失败**而不是退回本地状态。静默降级是最坏的失败模式（同 D13）——「以为托管着
-    其实没托管」比「知道没托管」危险。删掉备忘也没用：存储还在，下一次判定又写回来。
-    """
-    global _hosted_cache
-    if _hosted_cache is not None:
-        return _hosted_cache
-    marker = wb_dir(root) / "hosted"
-    # 没装二进制又没启用过 = 绝大多数项目，这时一次 sudo 都不该花。
-    if not marker.is_file() and not Path(WBSVRD).exists():
-        _hosted_cache = False
-        return False
-    try:
-        _svr(root, "list")
-        _hosted_cache = True
-        if not marker.is_file():
-            marker.write_text(now() + "\n", encoding="utf-8")
-    except WbsvrError as e:
-        if marker.is_file():
-            die(f"托管模式已启用，但 wbsvrd 调不通：{e}\n"
-                "这时候不能退回本地状态 —— 那会让冻结静默失效。先跑 wb.py doctor 修服务。")
-        _hosted_cache = False
-    return _hosted_cache
-
-
-def wc_path(root: Path, name: str) -> Path:
-    return wb_dir(root) / "wc" / name
-
-
-def sealed_audit(root: Path, st: dict) -> list[str]:
-    """把本地 sealed 字段与托管权威副本比一遍，不一致就报出来。
-
-    刻意只做**检测**不做取代：完整迁移要在 `load_state` 里每次向服务端取值，而
-    `role_scopes` 在 PreToolUse 的热路径上（D15 就是为这个存在的），每次工具调用加
-    一次 sudo 往返不可接受。检测的天花板是「篡改不再静默通过，下一次门禁撞出来」，
-    不是「改不了」—— 要真正的改不了，得先给 hook 一份 wbsvr 刷的快照。
-    """
-    try:
-        want = _svr(root, "sealed-get")
-    except WbsvrError as e:
-        return [f"sealed 字段读不到：{e}"]
-    bad = []
-    for k, v in want.items():
-        if k in st and st[k] != v:
-            bad.append(f"{k}：本地 {json.dumps(st[k], ensure_ascii=False)} "
-                       f"≠ 托管 {json.dumps(v, ensure_ascii=False)}")
-    return bad
-
-
-def hosted_drift(root: Path, st: dict) -> list[str]:
-    """托管侧比对。hosted 正文 wbsvrd 自己比；repo 正文它只交出期望 sha 由这边比（D7）。"""
-    try:
-        r = _svr(root, "verify")
-    except WbsvrError as e:
-        if not e.payload:
-            return [f"托管验签调不通：{e}"]
-        r = e.payload
-    bad = list(r.get("bad") or [])
-    for name, want in (r.get("expect") or {}).items():
-        c = find_contract(st, name)
-        if not c or c.get("hosted") or not want:
+    for c in st.get("contracts", []):
+        if not isinstance(c, dict):
             continue
-        cur = sha256_file(root / c["path"])
-        if cur is None:
-            bad.append(f"{name}：文件缺失 {c['path']}")
-        elif cur != want:
-            bad.append(f"{name}：漂移，内容已变更但未 bump（托管期望 {want[:12]}）")
-    # 窗口开着不是漂移，但门禁时必须看得见 —— 否则「改到一半就推进阶段」无人拦。
-    bad += [f"{n}：解冻窗口还开着，改完要 contract bump 重新锁定" for n in (r.get("unlocked") or [])]
-    return bad
+        c["revision"] = contract_revision(c)
+
+    for t in st.get("tasks", []):
+        refs = t.get("contracts", [])
+        if not isinstance(refs, list):
+            refs = [refs]
+        errors = []
+        for ref in refs:
+            if isinstance(ref, str):
+                c = find_contract(st, ref)
+                if c and c.get("sha") and c.get("path"):
+                    errors.append(
+                        f"契约 {ref} 使用旧字符串引用，无法证明任务创建时的版本；"
+                        "请 task reopen 刷新当前快照"
+                    )
+                elif not c:
+                    errors.append(f"契约 {ref} 不存在，无法迁移旧字符串引用")
+                elif not c.get("sha"):
+                    errors.append(f"契约 {ref} 尚未锁定，无法迁移旧字符串引用")
+                else:
+                    errors.append(f"契约 {ref} 没有本地路径，无法迁移旧字符串引用")
+            elif not isinstance(ref, dict):
+                errors.append("契约引用不是字符串或绑定对象")
+        t["contracts"] = refs
+        if errors:
+            t["contract_binding_errors"] = errors
+        else:
+            t.pop("contract_binding_errors", None)
 
 
-def hosted_lock_args(root: Path, c: dict) -> list[str]:
-    """lock 要额外传给 wbsvrd 的参数。
+def contract_binding_check(root: Path, st: dict, ref, include_window: bool = True) -> tuple[bool, str]:
+    """Validate one task binding against the current local contract and file."""
+    if not isinstance(ref, dict):
+        name = contract_ref_name(ref) or "<未知>"
+        return False, f"契约 {name} 引用未完成迁移，不能安全重新绑定；请重建任务"
+    required = ("name", "version", "revision", "sha")
+    if any(key not in ref for key in required):
+        return False, f"契约引用字段不完整：需要 name/version/revision/sha（{ref!r}）"
+    if (not isinstance(ref.get("name"), str) or not ref.get("name") or
+            not isinstance(ref.get("version"), int) or isinstance(ref.get("version"), bool) or
+            ref.get("version") < 1 or not isinstance(ref.get("revision"), int) or
+            isinstance(ref.get("revision"), bool) or ref.get("revision") < 1 or
+            not isinstance(ref.get("sha"), str) or
+            not re.fullmatch(r"[0-9a-fA-F]{64}", ref.get("sha"))):
+        return False, f"契约引用字段类型或值非法：需要有效的 name/version/revision/sha（{ref!r}）"
+    name = ref.get("name")
+    c = find_contract(st, name)
+    if not c:
+        return False, f"契约 {name or '<未知>'} 不存在"
+    if not c.get("path"):
+        return False, f"契约 {name} 没有本地路径，当前版本不支持该契约"
+    if not c.get("sha"):
+        return False, f"契约 {name} 尚未锁定"
+    current = contract_binding(c)
+    for key in required:
+        if ref.get(key) != current.get(key):
+            return False, (f"契约 {name} 绑定已变化：任务绑定 v{ref.get('version')}"
+                           f"/r{ref.get('revision')} 与当前 v{current['version']}"
+                           f"/r{current['revision']} 不一致")
+    if include_window and name in read_unlocks(root):
+        return False, f"契约 {name} 解冻窗口仍开启，必须先 bump 重新锁定"
+    current_sha = sha256_file(root / c["path"])
+    if current_sha is None:
+        return False, f"契约 {name} 文件缺失：{c['path']}"
+    if current_sha != ref["sha"]:
+        return False, f"契约 {name} 文件已漂移，任务绑定 SHA 不再匹配"
+    return True, "一致"
 
-    托管正文的 sha 由服务端自己重算，**不接受外部值** —— 否则 agent 可以谎报指纹。
-    repo 正文服务端读不到（D7 不写不读 agent 侧路径），只能由这边算出来交上去。
+
+def task_contract_errors(root: Path, st: dict, t: dict, include_window: bool = True) -> list[str]:
+    errors = list(t.get("contract_binding_errors") or [])
+    for ref in t.get("contracts", []):
+        ok, detail = contract_binding_check(root, st, ref, include_window=include_window)
+        if not ok:
+            errors.append(detail)
+    return list(dict.fromkeys(errors))
+
+
+def task_binding_for_name(root: Path, st: dict, name: str) -> dict:
+    """解析一次任务契约引用并固定为当前完整快照。"""
+    c = find_contract(st, name)
+    if not c:
+        die(f"契约不存在：{name}")
+    if not c.get("path"):
+        die(f"契约 {name} 没有本地路径，当前版本不支持该契约")
+    if not c.get("sha"):
+        die(f"契约 {name} 尚未首次 lock，任务不能绑定未锁定契约")
+    binding = contract_binding(c)
+    ok, detail = contract_binding_check(root, st, binding)
+    if not ok:
+        die(f"契约 {name} 当前不可绑定：{detail}")
+    return binding
+
+
+def validate_task_contracts(root: Path, st: dict, t: dict, action: str) -> None:
+    errors = task_contract_errors(root, st, t)
+    if errors:
+        die(f"任务 {t['id']} {action} 被拒：" + "; ".join(errors))
+
+
+def task_dependency_errors(st: dict, t: dict) -> list[str]:
+    """返回任务尚未满足的依赖。
+
+    只有 done/skipped 是完成语义。特别不能把「任务存在」或 todo/doing 当成
+    满足，否则下游可以在上游尚未产出时开始甚至完成。
     """
-    if c.get("hosted"):
-        return []
-    sha = sha256_file(root / c["path"])
-    if sha is None:
-        die(f"文件缺失：{c['path']}")
-    return [sha]
+    errors = []
+    for dep_id in t.get("deps", []):
+        dep = find_task(st, dep_id)
+        if not dep:
+            errors.append(f"依赖任务 {dep_id} 不存在")
+        elif dep.get("status") not in ("done", "skipped"):
+            errors.append(f"依赖任务 {dep_id} 当前为 {dep.get('status')}，只有 done/skipped 满足")
+    return errors
+
+
+def task_check_errors(root: Path, st: dict, t: dict) -> list[str]:
+    """统一的任务开工/收工校验，不改变状态。"""
+    errors = []
+    if t.get("status") in ("blocked", "stale"):
+        errors.append(f"任务当前为 {t['status']}，不能继续")
+    errors.extend(task_dependency_errors(st, t))
+    errors.extend(task_contract_errors(root, st, t))
+    return list(dict.fromkeys(errors))
+
+
+def refresh_task_contracts(root: Path, st: dict, t: dict) -> list[str]:
+    """显式 reopen 时把任务绑定刷新为当前已锁定快照。"""
+    refs = t.get("contracts", [])
+    if not isinstance(refs, list):
+        return [f"任务 {t['id']} 的契约引用不是列表，不能恢复"]
+    refreshed = []
+    errors = []
+    for ref in refs:
+        name = contract_ref_name(ref)
+        if not name:
+            errors.append(f"任务 {t['id']} 有空契约引用")
+            continue
+        c = find_contract(st, name)
+        if not c or not c.get("path") or not c.get("sha"):
+            errors.append(f"契约 {name} 不存在、没有路径或尚未锁定")
+            continue
+        binding = contract_binding(c)
+        ok, detail = contract_binding_check(root, st, binding)
+        if not ok:
+            errors.append(detail)
+        else:
+            refreshed.append(binding)
+    if not errors:
+        t["contracts"] = refreshed
+        # 旧版字符串引用只允许通过显式 reopen 刷新；成功后清掉迁移时留下的
+        # 不可安全重绑定错误，否则任务即使已经拿到完整快照也会永久失败。
+        t.pop("contract_binding_errors", None)
+    return list(dict.fromkeys(errors))
 
 
 def dotted_set(obj: dict, key: str, value) -> None:
@@ -846,18 +946,23 @@ def artifact_path(root: Path, phase: str, fname: str) -> Path:
 
 
 def contract_drift(root: Path, st: dict) -> list[str]:
-    """返回发生漂移或缺失的契约描述。"""
+    """返回发生漂移、缺失或仍在修改窗口中的本地契约。"""
     bad = []
-    if hosted(root):
-        # 托管时指纹的权威副本在服务端，本地 c["sha"] 只是镜像，比它等于自己跟自己比。
-        return hosted_drift(root, st)
-    for c in st["contracts"]:
-        p = root / c["path"]
-        cur = sha256_file(p)
-        if cur is None:
-            bad.append(f"{c['name']}：文件缺失 {c['path']}")
-        elif c.get("sha") and cur != c["sha"]:
-            bad.append(f"{c['name']}：漂移，内容已变更但未 bump（当前 v{c.get('version', 1)}）")
+    opened = read_unlocks(root)
+    for c in st.get("contracts", []):
+        path = c.get("path")
+        if not path:
+            bad.append(f"{c.get('name', '<未知>')}：契约缺少本地路径")
+            continue
+        # 未锁定的契约尚未建立基线，允许在首次 lock 前编辑；锁定后才检查哈希。
+        if c.get("sha"):
+            cur = sha256_file(root / path)
+            if cur is None:
+                bad.append(f"{c['name']}：文件缺失 {path}")
+            elif cur != c["sha"]:
+                bad.append(f"{c['name']}：漂移，内容已变更但未 bump（当前 v{c.get('version', 1)}）")
+        if c.get("name") in opened:
+            bad.append(f"{c['name']}：解冻窗口开启，修改尚未 bump")
     return bad
 
 
@@ -975,10 +1080,6 @@ def gate_check(root: Path, st: dict, phase: str) -> list[tuple[bool, str, str]]:
         out.append((ok, f"产物 {phase}/{fname}", "已产出" if ok else "缺失或为空"))
     for spec in rules.get("checks", []):
         out.append(run_check(root, st, phase, spec))
-    if hosted(root):
-        bad = sealed_audit(root, st)
-        out.append((not bad, "托管字段一致",
-                    "; ".join(bad) if bad else "本地镜像与托管权威副本一致"))
     return out
 
 
@@ -996,7 +1097,7 @@ def print_gate(phase: str, results: list[tuple[bool, str, str]]) -> bool:
 # --------------------------------------------------------------------------
 
 def ready_tasks(st: dict, phase: str | None = None, role: str | None = None) -> list[dict]:
-    done = {t["id"] for t in st["tasks"] if t["status"] == "done"}
+    done = {t["id"].upper() for t in st["tasks"] if t.get("status") in ("done", "skipped")}
     out = []
     for t in st["tasks"]:
         if t["status"] != "todo":
@@ -1119,13 +1220,6 @@ def cmd_status(args) -> None:
     # 根路径必须显示：工作区里可以有多个仓库各带一份 .workbench/，
     # 只看项目名分不清当前操作的是哪一份。
     print(f"项目：{st['project']}　根：{root}")
-    if hosted(root):
-        bad = sealed_audit(root, st)
-        print("托管：已启用　契约正文与冻结指纹由 wbsvr 账户保管"
-              + ("" if not bad else "　⚠ 托管字段不一致：" + "; ".join(bad)))
-    elif Path(WBSVRD).exists():
-        # 前提不成立时要常驻显示原因，否则「以为托管着其实没托管」
-        print("托管：未启用（wbsvrd 已安装，本项目还没 init）—— 缺哪一条看 wb.py doctor")
     cur = st["phase"]
     line = []
     for p in st["phases"]:
@@ -1194,7 +1288,7 @@ def freeze_phase_artifacts(root: Path, st: dict, phase: str) -> list[str]:
             continue
         st["contracts"].append({
             "name": name, "path": rel, "owner": owner, "consumers": list(consumers),
-            "kind": "artifact", "version": 1,
+            "kind": "artifact", "version": 1, "revision": 1,
             "sha": sha256_file(p), "locked_at": now(), "created": now(),
         })
         log(st, "contract_lock", name=name, version=1, kind="artifact")
@@ -1208,11 +1302,6 @@ def cmd_phase(args) -> None:
         print(load_state(root)["phase"])
         return
     if args.action == "set":
-        if hosted(root):
-            die("托管模式下 phase set 不可用 —— 任意跳阶段会把中间门禁整个跳过。\n"
-                "正常推进用 phase advance；确需回退由用户跑："
-                f"sudo -u {SVC_USER} {WBSVRD} sealed-set {shlex.quote(str(root))} "
-                "phase '\"<阶段名>\"'")
         st = load_state(root, lock=True)
         if args.name not in st["phases"]:
             die(f"未知阶段 {args.name}，可选：{', '.join(st['phases'])}")
@@ -1250,10 +1339,6 @@ def cmd_phase(args) -> None:
         save_state(root, st)
         print("已是最后阶段，全链路完成。")
         return
-    # 服务端先落，本地后落。反过来的话服务端拒了（并发下别人已经推过）本地已经变了，
-    # 两份阶段从此不一致，而门禁读的是本地那份 —— 阶段判定就失效了。
-    if hosted(root):
-        _svr(root, "phase-advance", cur, st["phases"][idx + 1])
     st["phase"] = st["phases"][idx + 1]
     log(st, "phase_advance", **{"from": cur, "to": st["phase"], "forced": bool(args.force and not passed)})
     save_state(root, st)
@@ -1308,31 +1393,57 @@ def merge_artifacts(root: Path, t: dict) -> int:
 
 
 def _propagate_stale(st: dict, blocked_id: str) -> None:
-    """blocked_id 被标为 blocked/stale 时，沿 deps 反向图把下游 done 标 stale。
+    """沿依赖反向图传播 stale，直到完整传递闭包。
 
-    只影响 done 任务 —— todo/doing/blocked 状态的由各自的依赖检查覆盖。
-    stale 任务不递归传播（第二层下游已经在 tasks_done 里被拦住）。
+    blocked/stale/doing/todo 的依赖都必须阻断下游。skipped 是明确的完成语义，不能
+    因为无关的上游 block 被改写，否则后续无法区分「跳过」和「需要重跑」。已经是
+    blocked 的节点仍继续向其下游传播，避免 A -> B -> C 中 B 恰好先被 block 时漏掉 C。
     """
-    dependents = [t for t in st["tasks"] if blocked_id.upper() in
-                  [d.upper() for d in t.get("deps", [])]]
-    for t in dependents:
-        if t["status"] == "done":
-            t["status"] = "stale"
-            t["updated"] = now()
+    queue = [blocked_id.upper()]
+    seen = set()
+    while queue:
+        upstream = queue.pop(0)
+        if upstream in seen:
+            continue
+        seen.add(upstream)
+        for t in st["tasks"]:
+            deps = [str(d).upper() for d in t.get("deps", [])]
+            if upstream not in deps:
+                continue
+            if t.get("status") not in ("blocked", "skipped", "stale"):
+                t["status"] = "stale"
+                t["updated"] = now()
+            queue.append(str(t["id"]).upper())
 
 
-def _restore_stale(st: dict, restored_id: str) -> None:
-    """restored_id 从 blocked 恢复为 todo 时，把因它变 stale 的下游恢复为 todo。
+def _restore_stale(root: Path, st: dict, restored_id: str) -> None:
+    """按依赖和当前契约快照恢复 stale 的传递闭包。
 
-    只恢复直接下游。stale 任务的再下游已经也是 stale（由 block 时传播），
-    恢复为 todo 让门禁重新检查。
+    一个节点只有在所有依赖均为 done/skipped 且自己的契约快照已刷新并一致时才
+    能恢复。某个分支仍 blocked/stale 时，其他分支可以恢复，但该节点和它的下游
+    必须继续 stale，直到所有依赖都恢复。
     """
-    dependents = [t for t in st["tasks"] if restored_id.upper() in
-                  [d.upper() for d in t.get("deps", [])]]
-    for t in dependents:
-        if t["status"] == "stale":
+    queue = [restored_id.upper()]
+    seen = set()
+    while queue:
+        upstream = queue.pop(0)
+        if upstream in seen:
+            continue
+        seen.add(upstream)
+        for t in st["tasks"]:
+            if upstream not in [str(d).upper() for d in t.get("deps", [])]:
+                continue
+            if t.get("status") != "stale":
+                continue
+            if task_dependency_errors(st, t):
+                continue
+            if refresh_task_contracts(root, st, t):
+                # 不能让一个未更新的契约快照恢复任务；后续 bump/reopen 再次触发时
+                # 仍有机会恢复。
+                continue
             t["status"] = "todo"
             t["updated"] = now()
+            queue.append(str(t["id"]).upper())
 
 
 def cmd_task(args) -> None:
@@ -1351,10 +1462,12 @@ def cmd_task(args) -> None:
         for d in deps:
             if not find_task(st, d):
                 die(f"依赖的任务 {d} 不存在")
+        contract_names = [c.strip() for c in (args.contracts or "").split(",") if c.strip()]
+        contract_refs = [task_binding_for_name(root, st, name) for name in contract_names]
         t = {
             "id": tid, "title": args.title, "role": args.role, "phase": phase,
             "status": "todo", "deps": deps,
-            "contracts": [c.strip() for c in (args.contracts or "").split(",") if c.strip()],
+            "contracts": contract_refs,
             "artifacts": [], "notes": "", "created": now(), "updated": now(),
         }
         st["tasks"].append(t)
@@ -1376,36 +1489,62 @@ def cmd_task(args) -> None:
     if not t:
         die(f"任务不存在：{getattr(args, 'id', '')}")
 
+    if args.action == "check":
+        errors = task_check_errors(root, st, t)
+        if errors:
+            for error in errors:
+                print(f"[FAIL] {error}")
+            die(f"任务 {t['id']} check 未通过：" + "; ".join(errors))
+        print(f"[PASS] 任务 {t['id']} 的依赖、契约快照和正文一致")
+        return
+
     if args.action == "start":
-        undone = [d for d in t["deps"] if (find_task(st, d) or {}).get("status") != "done"]
-        if undone and not args.force:
-            die(f"依赖未完成：{', '.join(undone)}（--force 忽略）")
+        if t.get("status") != "todo":
+            die(f"任务 {t['id']} 当前为 {t.get('status')}，只能从 todo（reopen 后）开始")
+        errors = task_check_errors(root, st, t)
+        if errors:
+            die(f"任务 {t['id']} start 被拒：" + "; ".join(errors))
         t["status"] = "doing"
         t["started"] = now()
         if args.role_lock:
             (wb_dir(root) / "role").write_text(t["role"], encoding="utf-8")
     elif args.action == "done":
+        if t.get("status") != "doing":
+            die(f"任务 {t['id']} 当前为 {t.get('status')}，只能完成 doing 任务")
+        errors = task_check_errors(root, st, t)
+        if errors:
+            die(f"任务 {t['id']} done 被拒：" + "; ".join(errors))
         t["status"] = "done"
         if args.note:
             t["notes"] = args.note
+        _restore_stale(root, st, t["id"])
         merged = merge_artifacts(root, t)
         if merged:
             print(f"归并 {merged} 个改动到 {t['id']}.artifacts")
     elif args.action == "block":
+        if t.get("status") in ("done", "skipped"):
+            die(f"任务 {t['id']} 当前为 {t.get('status')}，不能标记 blocked")
         t["status"] = "blocked"
         t["notes"] = args.reason or t["notes"]
-        # 沿依赖反向图把下游 done 任务标 stale
         _propagate_stale(st, t["id"])
     elif args.action == "reopen":
+        if t.get("status") not in ("blocked", "stale"):
+            die(f"任务 {t['id']} 当前为 {t.get('status')}，只能 reopen blocked/stale 任务")
+        dependency_errors = task_dependency_errors(st, t)
+        if dependency_errors:
+            die(f"任务 {t['id']} 恢复被拒：" + "; ".join(dependency_errors))
+        refresh_errors = refresh_task_contracts(root, st, t)
+        if refresh_errors:
+            die(f"任务 {t['id']} 恢复被拒：" + "; ".join(refresh_errors))
         t["status"] = "todo"
         t["notes"] = args.note or t["notes"]
-        # 上游解除了，恢复因它变 stale 的下游
-        _restore_stale(st, t["id"])
+        _restore_stale(root, st, t["id"])
     elif args.action == "skip":
         if not args.reason:
             die("skip 必须带 --reason")
         t["status"] = "skipped"
         t["notes"] = args.reason
+        _restore_stale(root, st, t["id"])
     t["updated"] = now()
     log(st, f"task_{args.action}", id=t["id"], role=t["role"])
     save_state(root, st)
@@ -1436,7 +1575,8 @@ def cmd_next(args) -> None:
         print(json.dumps({"tasks": batch}, ensure_ascii=False, indent=2))
         return
     for t in batch:
-        cs = f"  契约:{','.join(t['contracts'])}" if t.get("contracts") else ""
+        names = [contract_ref_name(ref) for ref in t.get("contracts", [])]
+        cs = f"  契约:{','.join(name for name in names if name)}" if names else ""
         print(f"{t['id']}\t{t['role']}\t{t['title']}{cs}")
 
 
@@ -1445,36 +1585,7 @@ def cmd_contract(args) -> None:
     # 只在会写状态的分支上锁。impact 在锁里跑 `git grep` 子进程，大仓库要几秒 ——
     # 而 wb-contract 要求改契约前先跑 impact，此时结束的 subagent 的 SubagentStop
     # 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。
-    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump", "commit"))
-
-    if args.action == "add" and args.hosted:
-        if not hosted(root):
-            die("本项目未启用托管，--hosted 的正文无处安放。先跑 wb.py doctor 看缺哪一条前提。")
-        name = args.name or ""
-        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name):
-            die("托管契约必须给 --name，且只能用字母、数字、`.`、`_`、`-`，首字符是字母或数字")
-        if find_contract(st, name):
-            die(f"契约 {name} 已存在，改动请走 contract checkout / commit / bump")
-        wc = wc_path(root, name)
-        if not wc.is_file():
-            wc.parent.mkdir(parents=True, exist_ok=True)
-            die(f"先把契约正文写到工作副本再登记：{wc.relative_to(root)}")
-        r = _svr(root, "commit", name, stdin=wc.read_text(encoding="utf-8"))
-        c = {
-            "name": name, "path": "", "hosted": True, "owner": args.owner or "architect",
-            "consumers": [x.strip() for x in (args.consumers or "").split(",") if x.strip()],
-            "version": r["version"], "sha": r["sha"], "locked_at": None, "created": now(),
-        }
-        st["contracts"].append(c)
-        log(st, "contract_add", name=name, path="(hosted)", owner=c["owner"])
-        save_state(root, st)
-        wc.unlink()
-        print(f"已登记托管契约 {name} v{c['version']}  owner={c['owner']}  "
-              f"consumers={','.join(c['consumers']) or '-'}")
-        print(f"正文在托管存储里，agent 侧没有路径。要看：contract read --name {name}；"
-              f"要改：contract checkout --name {name}")
-        print("确认定稿后执行：contract lock " + name)
-        return
+    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump"))
 
     if args.action == "add":
         p = Path(args.path)
@@ -1491,12 +1602,17 @@ def cmd_contract(args) -> None:
             die(f"契约名只能用字母、数字、`.`、`_`、`-`，且首字符是字母或数字：{name}")
         if find_contract(st, name):
             die(f"契约 {name} 已存在，改动请用 contract bump")
+        duplicate = next((c for c in st.get("contracts", [])
+                          if c.get("path") == rel), None)
+        if duplicate:
+            die(f"契约路径 {rel} 已由 {duplicate['name']} 登记，不能重复登记；"
+                "同一正文只能有一个冻结契约")
         if not (root / rel).is_file():
             die(f"契约文件不存在：{rel}（先写好接口定义再登记）")
         c = {
             "name": name, "path": rel, "owner": args.owner or "architect",
             "consumers": [x.strip() for x in (args.consumers or "").split(",") if x.strip()],
-            "version": 1, "sha": None, "locked_at": None, "created": now(),
+            "version": 1, "revision": 1, "sha": None, "locked_at": None, "created": now(),
         }
         st["contracts"].append(c)
         log(st, "contract_add", name=name, path=rel, owner=c["owner"])
@@ -1511,89 +1627,49 @@ def cmd_contract(args) -> None:
             return
         opened = set(read_unlocks(root))
         disputed = set(read_disputes(root))
-        refs = {}
-        if hosted(root):
-            try:
-                refs = _svr(root, "list").get("refs") or {}
-            except WbsvrError as e:
-                print(f"（托管状态读不到，下面是本地镜像：{e}）")
-            # 托管下窗口由服务端记时，agent 侧那个目录已经不是权威
-            opened |= {k for k, v in refs.items() if v.get("unlock_until")}
         for c in st["contracts"]:
-            r = refs.get(c["name"]) or {}
-            want = r.get("sha") if r else c.get("sha")
-            locked = r.get("locked") if r else bool(c.get("sha"))
-            if not locked:
+            path = c.get("path")
+            if not c.get("sha"):
                 state = "未锁定"
-            elif c.get("hosted"):
-                # 托管正文 agent 读不到，漂移只有 wbsvrd 能判 —— 入口是 contract verify
-                state = "已锁定"
+            elif not path:
+                state = "文件缺失"
             else:
-                cur = sha256_file(root / c["path"])
-                state = "文件缺失" if cur is None else ("一致" if cur == want else "漂移!")
+                cur = sha256_file(root / path)
+                state = "文件缺失" if cur is None else ("一致" if cur == c["sha"] else "漂移!")
             if c["name"] in opened:
                 state += "/解冻中"
             if c["name"] in disputed:
                 state += "/争议中"
-            print(f"{c['name']:<20} v{r.get('version') or c['version']:<3} {state:<12} "
+            print(f"{c['name']:<20} v{c['version']:<3} {state:<12} "
                   f"{c['owner']:<19} -> {','.join(c['consumers']) or '-'}  "
-                  f"{c['path'] or '(托管存储)'}")
-        return
-
-    if args.action in ("read", "checkout", "commit"):
-        c = find_contract(st, args.name)
-        if not c:
-            die(f"契约不存在：{args.name}")
-        if not c.get("hosted"):
-            die(f"{c['name']} 的正文在仓库里（{c['path']}），直接读写那个文件就行 —— "
-                "read / checkout / commit 只对托管契约有意义")
-        if not hosted(root):
-            die("托管契约的正文只有 wbsvrd 能交出来，而托管现在不可用。先跑 wb.py doctor")
-        if args.action == "read":
-            sys.stdout.write(_svr(root, "read", c["name"], raw=True))
-            return
-        wc = wc_path(root, c["name"])
-        if args.action == "checkout":
-            wc.parent.mkdir(parents=True, exist_ok=True)
-            wc.write_text(_svr(root, "read", c["name"], raw=True), encoding="utf-8")
-            print(f"工作副本：{wc.relative_to(root)}")
-            print("照常用 Read / Edit / Write 改它 —— 只是权威副本在别处。改完执行："
-                  f"wb.py contract commit --name {c['name']}")
-            return
-        if not wc.is_file():
-            die(f"没有工作副本可提交：{wc.relative_to(root)}"
-                f"（先 contract checkout --name {c['name']}）")
-        r = _svr(root, "commit", c["name"], stdin=wc.read_text(encoding="utf-8"))
-        wc.unlink()
-        log(st, "contract_commit", name=c["name"], sha=r["sha"][:12], bytes=r["bytes"])
-        save_state(root, st)
-        print(f"已提交 {c['name']}  {r['sha'][:12]}  {r['bytes']} 字节，工作副本已删除")
-        if r.get("locked"):
-            print("解冻窗口仍开着。定稿后执行："
-                  f"wb.py contract bump --name {c['name']} --reason '<改了什么>'")
-        else:
-            print(f"尚未锁定。定稿后执行：wb.py contract lock --name {c['name']}")
+                  f"{path or '(缺少本地路径)'}")
         return
 
     if args.action == "lock":
         targets = st["contracts"] if args.all else [find_contract(st, args.name or "")]
         if not args.all and not targets[0]:
             die(f"契约不存在：{args.name}")
-        use_svr = hosted(root)
         for c in targets:
-            if use_svr:
-                # 托管下指纹与锁定位都由服务端持有：state.json 里那份只是镜像，
-                # 改它没用（服务端不看），所以「重新上锁」这条绕过路径也一起没了。
-                r = _svr(root, "lock", c["name"], *hosted_lock_args(root, c))
-                c["sha"], c["version"] = r["sha"], r["version"]
+            path = c.get("path")
+            if not path:
+                die(f"契约 {c['name']} 缺少本地路径")
+            sha = sha256_file(root / path)
+            if sha is None:
+                die(f"文件缺失：{path}")
+            if c.get("sha"):
+                if sha != c["sha"]:
+                    die(f"契约 {c['name']} 已锁定但正文发生漂移，contract lock 不能覆盖旧 SHA；"
+                        "请先 unlock --reason，修改后执行 contract bump")
+                c["revision"] = contract_revision(c)
             else:
-                sha = sha256_file(root / c["path"])
-                if sha is None:
-                    die(f"文件缺失：{c['path']}")
+                # 首次 lock 才建立不可变基线；登记阶段允许 architect 继续编辑正文。
+                c["version"] = c.get("version") if isinstance(c.get("version"), int) else 1
+                c["revision"] = 1
                 c["sha"] = sha
-            c["locked_at"] = now()
-            log(st, "contract_lock", name=c["name"], version=c["version"], sha=c["sha"][:12])
-            print(f"已锁定 {c['name']} v{c['version']}  {c['sha'][:12]}")
+                c["locked_at"] = now()
+            log(st, "contract_lock", name=c["name"], version=c["version"],
+                revision=c["revision"], sha=sha[:12])
+            print(f"已锁定 {c['name']} v{c['version']}  r{c['revision']}  {sha[:12]}")
             # 只关自己那一份窗口。`lock --all` 逐个关等于全关，但 `lock --name X`
             # 不能顺手收掉兄弟 agent 正在用的窗口。
             close_unlock(root, c["name"])
@@ -1606,34 +1682,39 @@ def cmd_contract(args) -> None:
             die(f"契约不存在：{args.name}")
         if not args.reason:
             die("unlock 必须给 --reason —— 冻结文档的改动理由要在改之前留痕，不是改完补")
-        if hosted(root):
-            # 刻意不转发：unlock 不在 agent 的 sudoers 里。agent 能自己开窗口的话，
-            # 冻结就只是个建议 —— 用户的 sudo 密码才是凭证（D3）。
-            print(f"托管契约 {c['name']} 的解冻要用户凭证，我这边开不了窗口。")
-            print("把这条命令交给用户跑（会问密码）：")
-            print(f"  sudo -u {SVC_USER} {WBSVRD} unlock {shlex.quote(str(root))} "
-                  f"{c['name']} {shlex.quote(args.reason)}")
-            print(f"跑完之后：contract checkout --name {c['name']} 改，"
-                  f"contract commit --name {c['name']} 提交，"
-                  f"contract bump --name {c['name']} 定稿。")
-            print("窗口由服务端记时，默认 30 分钟自动重锁 —— 不依赖任何 agent 侧钩子。")
-            log(st, "contract_unlock_requested", name=c["name"], reason=args.reason)
-            save_state(root, st)
-            sys.exit(2)
+        if not c.get("sha"):
+            die(f"契约 {c['name']} 尚未首次 lock，无需 unlock；先完成首次 lock")
+        path = c.get("path")
+        if not path:
+            die(f"契约 {c['name']} 缺少本地路径")
+        current_sha = sha256_file(root / path)
+        if current_sha is None:
+            die(f"文件缺失：{path}")
+        if current_sha != c["sha"]:
+            die(f"契约 {c['name']} 正文已经漂移，不能事后 unlock；先恢复旧正文或由 architect 处理")
+        records = read_unlock_records(root)
+        if c["name"] in records:
+            die(f"契约 {c['name']} 已有解冻窗口，必须先完成 bump 或关闭该窗口")
         d = wb_dir(root) / "unlock"
-        # 升级前的项目这里是单个文件。不删掉，mkdir 会抛 FileExistsError，
-        # 老项目第一次 unlock 就是一条栈追踪。旧文件里只有一份悬挂窗口，丢掉是对的。
+        # 老版本可能留下单一 unlock 文件。它没有契约名和旧 SHA，不能安全迁移为可消费
+        # 的窗口，宁可明确阻断，也不把未知基线伪装成正式变更。
         if d.is_file():
-            d.unlink()
+            die("发现旧版单文件解冻窗口，无法安全迁移；请先由主线程清理该窗口")
         d.mkdir(parents=True, exist_ok=True)
-        (d / c["name"]).write_text(args.reason, encoding="utf-8")
-        log(st, "contract_unlock", name=c["name"], version=c["version"], reason=args.reason)
+        record = {
+            "reason": args.reason, "sha": c["sha"], "version": c.get("version", 1),
+            "revision": contract_revision(c), "opened_at": now(),
+        }
+        (d / c["name"]).write_text(json.dumps(record, ensure_ascii=False) + "\n",
+                                     encoding="utf-8")
+        log(st, "contract_unlock", name=c["name"], version=c["version"],
+            revision=contract_revision(c), sha=c["sha"][:12], reason=args.reason)
         save_state(root, st)
         print(f"已开启解冻窗口：{c['name']} v{c['version']}  {c['path']}")
         print(f"理由：{args.reason}")
         print("现在可以改这一个文件。改完必须执行："
               f"wb.py contract bump --name {c['name']}")
-        print("窗口在 bump / lock / 子 agent 结束时自动关闭。")
+        print("窗口在 bump / 子 agent 结束时自动关闭；不能用命令行理由替代窗口。")
         return
 
     if args.action == "verify":
@@ -1648,28 +1729,61 @@ def cmd_contract(args) -> None:
         c = find_contract(st, args.name)
         if not c:
             die(f"契约不存在：{args.name}")
-        reason = args.reason or read_unlocks(root).get(c["name"], "")
+        record = read_unlock_records(root).get(c["name"])
+        if not record:
+            die("bump 必须消费预先存在的 contract unlock 窗口；不能用命令行理由替代")
+        old_sha = c.get("sha")
+        if not old_sha:
+            die(f"契约 {c['name']} 尚未首次 lock，不能 bump")
+        if record.get("sha") != old_sha:
+            die(f"契约 {c['name']} 的 unlock 基于旧 SHA {record.get('sha')!r}，"
+                f"当前锁定基线为 {old_sha!r}，窗口已失效")
+        if record.get("version") is not None and record.get("version") != c.get("version"):
+            die(f"契约 {c['name']} 的 unlock 版本已过期")
+        if record.get("revision") is not None and record.get("revision") != contract_revision(c):
+            die(f"契约 {c['name']} 的 unlock 修订号已过期")
+        reason = record.get("reason", "")
         if not reason:
-            die("bump 必须给 --reason（或先 contract unlock 时申报）—— "
-                "变更理由要进审计日志与交付报告")
-        old = c["version"]
-        if hosted(root):
-            r = _svr(root, "lock", c["name"], *hosted_lock_args(root, c))
-            if r["version"] == old and r["sha"] == c.get("sha"):
-                die(f"{c['name']} 内容未变（哈希相同），无需 bump。"
-                    f"若只是想关闭解冻窗口，用 contract lock --name {c['name']}")
-            c["sha"], c["version"], c["locked_at"] = r["sha"], r["version"], now()
-        else:
-            sha = sha256_file(root / c["path"])
-            if sha is None:
-                die(f"文件缺失：{c['path']}")
-            if c.get("sha") == sha:
-                die(f"{c['name']} 内容未变（哈希相同），无需 bump。"
-                    f"若只是想关闭解冻窗口，用 contract lock --name {c['name']}")
-            c["version"] += 1
-            c["sha"], c["locked_at"] = sha, now()
-        sha = c["sha"]
-        log(st, "contract_bump", name=c["name"], **{"from": old, "to": c["version"], "reason": reason})
+            die(f"契约 {c['name']} 的 unlock 缺少 reason，不能 bump")
+        path = c.get("path")
+        if not path:
+            die(f"契约 {c['name']} 缺少本地路径")
+        sha = sha256_file(root / path)
+        if sha is None:
+            die(f"文件缺失：{path}")
+        if sha == old_sha:
+            die(f"{c['name']} 内容未变（哈希相同），不能只刷版本号；请先修改正文")
+
+        old_binding = contract_binding(c)
+        old_version, old_revision = old_binding["version"], old_binding["revision"]
+        c["version"] = old_version + 1
+        c["revision"] = old_revision + 1
+        c["sha"], c["locked_at"] = sha, now()
+        new_binding = contract_binding(c)
+
+        invalidated = []
+        for t in st["tasks"]:
+            refs = t.get("contracts", [])
+            if not isinstance(refs, list):
+                continue
+            matched = any(
+                contract_ref_name(ref) == c["name"] and
+                (not isinstance(ref, dict) or all(ref.get(k) == old_binding[k]
+                                                 for k in old_binding))
+                for ref in refs
+            )
+            if matched and t.get("status") != "skipped":
+                t["status"] = "stale"
+                t["updated"] = now()
+                invalidated.append(t["id"])
+        for tid in invalidated:
+            _propagate_stale(st, tid)
+
+        log(st, "contract_bump", name=c["name"], **{
+            "from": old_version, "to": c["version"],
+            "from_revision": old_revision, "to_revision": c["revision"],
+            "from_sha": old_sha[:12], "to_sha": sha[:12], "reason": reason,
+        })
         created = []
         for role in c["consumers"]:
             if role not in ROLES:
@@ -1678,18 +1792,17 @@ def cmd_contract(args) -> None:
             tid = f"T{st['seq']}"
             st["tasks"].append({
                 "id": tid, "title": f"同步契约 {c['name']} v{c['version']} 变更：{reason}",
-                # 阶段取当前阶段，不能硬编码 develop：在 verify 阶段 bump 出来的
-                # 返工任务若落到 develop，verify 门禁的 tasks_done:verify 看不见它，
-                # 带着未完成的返工就放过去了 —— 正是契约传播机制要防的事。
                 "role": role, "phase": st["phase"], "status": "todo", "deps": [],
-                "contracts": [c["name"]], "artifacts": [], "notes": "由 contract bump 自动创建",
-                "created": now(), "updated": now(),
+                "contracts": [new_binding.copy()], "artifacts": [],
+                "notes": "由 contract bump 自动创建", "created": now(), "updated": now(),
             })
             created.append(f"{tid}({role})")
+        # 只消费并关闭本契约的窗口；兄弟契约窗口必须继续存在。
         close_unlock(root, c["name"])
         close_dispute(root, c["name"])
         save_state(root, st)
-        print(f"{c['name']} v{old} -> v{c['version']}  {sha[:12]}  理由：{reason}")
+        print(f"{c['name']} v{old_version}/r{old_revision} -> "
+              f"v{c['version']}/r{c['revision']}  {sha[:12]}  理由：{reason}")
         print("已为消费方创建返工任务：" + (", ".join(created) or "无消费方"))
         return
 
@@ -1699,7 +1812,7 @@ def cmd_contract(args) -> None:
             die(f"契约不存在：{args.name}")
         print(f"契约 {c['name']} v{c['version']}  owner={c['owner']}")
         print("消费方角色：" + (", ".join(c["consumers"]) or "无"))
-        rel = [t for t in st["tasks"] if c["name"] in t.get("contracts", [])]
+        rel = [t for t in st["tasks"] if c["name"] in task_contract_names(t)]
         print("关联任务：" + (", ".join(f"{t['id']}[{t['status']}]" for t in rel) or "无"))
         hits = grep_repo(root, c["name"])
         print("代码引用：" + (f"{len(hits)} 处" if hits else "无"))
@@ -1709,20 +1822,6 @@ def cmd_contract(args) -> None:
 
     if args.action == "dispute":
         if args.clear:
-            if hosted(root):
-                # 托管模式下解除争议需要用户凭证 —— 与 unlock 同理：
-                # agent 能自己清掉争议的话，争议就只是个建议。
-                if not args.name:
-                    die("托管模式下解除争议必须指定 --name（全部解除太容易误操作）")
-                print(f"托管契约 {args.name} 的争议解除需要用户凭证，我这边开不了窗口。")
-                print("把这条命令交给用户跑（会问密码）：")
-                print(f"  sudo -u {SVC_USER} {WBSVRD} dispute-clear {shlex.quote(str(root))} "
-                      f"--name {shlex.quote(args.name)}")
-                print("跑完之后开发自动恢复。也可以走正式路径：修订契约后 "
-                      f"`wb.py contract bump --name {args.name}` 自动解除。")
-                log(st, "dispute_clear_requested", name=args.name)
-                save_state(root, st)
-                sys.exit(2)
             if not args.name:
                 close_dispute(root)
                 log(st, "dispute_clear_all")
@@ -1739,15 +1838,9 @@ def cmd_contract(args) -> None:
             die(f"契约不存在：{args.name}")
         if not args.reason:
             die("dispute 必须给 --reason —— 冲突在哪要说清楚，否则架构师无法判断")
-        if hosted(root):
-            try:
-                _svr(root, "dispute", "--name", c["name"], "--reason", args.reason)
-            except WbsvrError as e:
-                die(f"托管争议设置失败：{e}")
-        else:
-            d = wb_dir(root) / "disputes"
-            d.mkdir(parents=True, exist_ok=True)
-            (d / c["name"]).write_text(args.reason, encoding="utf-8")
+        d = wb_dir(root) / "disputes"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / c["name"]).write_text(args.reason, encoding="utf-8")
         log(st, "dispute", name=c["name"], reason=args.reason)
         save_state(root, st)
         print(f"已落争议哨兵：{c['name']}")
@@ -2016,7 +2109,12 @@ def frozen_hits(root: Path, cmd: str) -> list[str]:
 
 
 def unlocked_paths(root: Path) -> set[str]:
-    """当前全部解冻窗口对应的契约路径。窗口按契约分开，状态文件永不可解冻。"""
+    """当前全部解冻窗口对应的契约路径。窗口按契约分开，状态文件永不可解冻。
+
+    正常状态下一个正文路径只会对应一份契约（contract add 会拒绝重复路径）。
+    旧状态若存在重复登记，必须让同一路径的所有契约都解冻后才放行，不能让
+    解冻其中一个名字顺带解除另一个名字的冻结。
+    """
     names = read_unlocks(root)
     if not names or not state_path(root).is_file():
         return set()
@@ -2024,7 +2122,14 @@ def unlocked_paths(root: Path) -> set[str]:
         st = json.loads(state_path(root).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return set()
-    return {c["path"] for c in st.get("contracts", []) if c["name"] in names}
+    by_path = {}
+    for c in st.get("contracts", []):
+        path = c.get("path")
+        name = c.get("name")
+        if path and name:
+            by_path.setdefault(path, []).append(name)
+    return {path for path, contract_names in by_path.items()
+            if all(name in names for name in contract_names)}
 
 
 def contracts_for(root: Path, rels: list[str]) -> list[dict]:
@@ -2099,8 +2204,32 @@ def current_role(root: Path, data: dict) -> str:
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
 
+def active_task_contract_errors(root: Path, rel: str) -> list[str]:
+    """返回活动 developer 任务的契约失效，供产品代码写入 hook 使用。
+
+    执行记录是停工协议的一部分，必须能记录阻塞原因，因此对该目录不触发这条
+    检查。其余仓库内产品文件只要有一个 doing developer 任务绑定旧快照，就先
+    停止写入，避免继续产生无法完成的实现。
+    """
+    if rel.startswith(".workbench/artifacts/develop/"):
+        return []
+    try:
+        st = load_state(root)
+    except SystemExit:
+        return []
+    errors = []
+    for t in st.get("tasks", []):
+        if t.get("status") not in ("doing", "stale", "blocked") or \
+                t.get("role") not in DEVELOPER_ROLES:
+            continue
+        bad = task_contract_errors(root, st, t)
+        if bad:
+            errors.append(f"{t.get('id', '<未知>')}: {'; '.join(bad)}")
+    return errors
+
+
 def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
-    """检查单个写入目标：越根 → 争议熔断 → 冻结 → 角色范围。供 Write/Edit/apply_patch 复用。"""
+    """检查单个写入目标：越根 → 活动契约 → 争议 → 冻结 → 角色范围。"""
     target = resolve_target(cwd, raw_path)
     rootr = root.resolve()
 
@@ -2110,7 +2239,16 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
 
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
 
-    # 1.5. 争议熔断：developer 角色全线停工（执行记录除外）
+    # 1.5. 活动任务的旧契约先阻止产品代码继续写入；执行记录仍可写。
+    active_errors = active_task_contract_errors(rootr, rel)
+    if active_errors:
+        hook_deny(
+            f"活动开发任务绑定的契约快照已失效，拒绝写入 {rel}："
+            + " | ".join(active_errors)
+            + "。立即停止实现，先 task check，再 reopen 并重新绑定当前快照。"
+        )
+
+    # 1.6. 争议熔断：developer 角色全线停工（执行记录除外）
     disputes = read_disputes(rootr)
     if disputes:
         role = current_role(rootr, data)
@@ -2322,6 +2460,10 @@ def hook_post_tool(data: dict) -> None:
             append_entry(rel)
         return
 
+    # Read 只是读取，不应伪造一条产物改动记录。
+    if READ_TOOL.search(tool):
+        return
+
     # apply_patch：从标记里提取所有文件路径
     if tool == "apply_patch":
         cmd_text = ti.get("command", "") or ti.get("content", "") or ""
@@ -2459,317 +2601,6 @@ def cmd_hook(args) -> None:
 
 
 # --------------------------------------------------------------------------
-# doctor：托管模式的前提逐条查
-# --------------------------------------------------------------------------
-
-def sealed_payload(st: dict) -> dict:
-    """喂给 `wbsvrd init` 的 sealed.json。只带结构字段，进度字段留在 agent 侧（D9）。"""
-    d = {k: st[k] for k in SEALED_KEYS if k in st}
-    d["tasks_graph"] = [
-        {k: t[k] for k in ("id", "title", "role", "phase", "deps") if k in t}
-        for t in st.get("tasks", [])
-    ]
-    return d
-
-
-def cmd_doctor(args) -> None:
-    import grp
-    import pwd
-
-    root = find_root()
-    if args.sealed:
-        # 管道喂给 wbsvrd init。单独一条子命令是因为 init 要用户凭证，agent 跑不了。
-        print(json.dumps(sealed_payload(load_state(root)), ensure_ascii=False, indent=2))
-        return
-
-    checks: list[tuple[bool, str, str]] = []
-
-    def add(ok, label, detail):
-        checks.append((bool(ok), label, detail))
-
-    def sudo_ok(*argv) -> tuple[bool, str]:
-        try:
-            r = subprocess.run(["sudo", "-n", *argv], capture_output=True, text=True, timeout=30)
-        except (OSError, subprocess.TimeoutExpired) as e:
-            return False, str(e)
-        return r.returncode == 0, (r.stderr.strip() or r.stdout.strip())[-200:]
-
-    # 1. 账户
-    try:
-        pw = pwd.getpwnam(SVC_USER)
-        add(True, f"{SVC_USER} 账户存在", f"uid={pw.pw_uid} shell={pw.pw_shell}")
-    except KeyError:
-        pw = None
-        add(False, f"{SVC_USER} 账户存在", "没有这个账户。跑 wbsvr/install.sh 建（要 sudo 密码）")
-
-    # 2. 二进制 + ping
-    exe = Path(WBSVRD)
-    if not exe.exists():
-        add(False, "wbsvrd 已安装", f"{WBSVRD} 不存在。跑 wbsvr/install.sh")
-    else:
-        add(True, "wbsvrd 已安装", f"{WBSVRD}  sha256={sha256_file(exe)[:16]}")
-    ok, detail = sudo_ok("-u", SVC_USER, WBSVRD, "ping")
-    add(ok, f"sudo -n -u {SVC_USER} wbsvrd ping", detail or "通")
-
-    # 3. 核心检查：拿不到 shell。这一条不过，上面全部作废。
-    shell_ok, _ = sudo_ok("-u", SVC_USER, "/bin/sh", "-c", "true")
-    if shell_ok:
-        detail = "**能拿到 shell —— 整套隔离归零**，检查 sudoers 里有没有多余的规则"
-    elif pw is None:
-        # 账户还不存在时这一条必然「通过」，但那不是保护，只是还没到能测的时候
-        detail = f"账户还不存在，这一条尚未真正测到 —— 建完 {SVC_USER} 再跑一次"
-    else:
-        detail = f"sudo -n -u {SVC_USER} /bin/sh 被拒，符合预期"
-    add(not shell_ok, f"agent 拿不到 {SVC_USER} 的 shell", detail)
-
-    # 4. 存储权限。0700 意味着 agent 连 stat 都不行，只能问服务端自己报。
-    store_ok, detail = sudo_ok("-u", SVC_USER, WBSVRD, "selfcheck", str(root.resolve()))
-    add(store_ok, "存储目录权限与 refs 完整性",
-        detail or "0700 + 属主正确 + 每份托管正文都在")
-
-    # 5. 最容易被忽略的一条。见 docs/wbsvr.md「已知边界」。
-    me = pwd.getpwuid(os.getuid()).pw_name
-    mine = {g.gr_name for g in grp.getgrall() if me in g.gr_mem}
-    risky = sorted(mine & {"admin", "wheel", "sudo"})
-    add(not risky, f"agent 账户（{me}）不在 admin / wheel 组",
-        f"在 {', '.join(risky)} 里 —— 用户刚输过密码的 15 分钟内 agent 可以直接 "
-        f"`sudo -u {SVC_USER} /bin/sh`，整套隔离归零。移出去，或接受这个洞并知道它在。"
-        if risky else "不在特权组里")
-
-    # 6. bootstrap 例外：工作台本体就在这个仓库里，.claude/ 必须 agent 可写
-    boot = subprocess.run(
-        ["git", "-C", str(root), "ls-files", "--error-unmatch", ".claude/hooks/wb.py"],
-        capture_output=True).returncode == 0
-    claude = root / ".claude"
-    agent_owns = claude.is_dir() and claude.stat().st_uid == os.getuid()
-    if boot:
-        add(True, ".claude/ 归属", "bootstrap 模式：工作台本体就是这个仓库的源码，"
-                                  ".claude/ 保持 agent 可写 —— 否则改不动 wb.py。本项目不启用托管。")
-    else:
-        add(not agent_owns, ".claude/ 不归 agent 所有",
-            "agent 能改 wb.py 本身，那它就能改掉所有判定 —— 这个洞的正解是保护 wb.py，"
-            "不是把判定挪进服务端（见 D8 后半）" if agent_owns else "属主不是 agent")
-
-    print("托管前提检查")
-    for ok, label, detail in checks:
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label} — {detail}")
-    fails = [l for ok, l, _ in checks if not ok]
-
-    if boot:
-        print("\n结论：bootstrap 模式，不启用托管。退回 hook + 哈希那一档保护。")
-        print("要在别的仓库启用：把 .claude/ 与 wbsvr/ 拷过去，在那边跑 wbsvr/install.sh。")
-        sys.exit(0)
-    if fails:
-        print(f"\n结论：{len(fails)} 条前提不成立，不启用托管，退回 hook + 哈希。")
-        print("修完再跑一次 wb.py doctor。")
-        sys.exit(1)
-    if hosted(root):
-        print("\n结论：全部通过，托管已启用。")
-    else:
-        print("\n结论：前提全部成立，但本项目还没建存储。init 要用户凭证（agent 跑不了）：")
-        print(f"  python3 .claude/hooks/wb.py doctor --sealed | "
-              f"sudo -u {SVC_USER} {WBSVRD} init {shlex.quote(str(root.resolve()))}")
-    sys.exit(0)
-
-
-def selfcheck_hosted() -> str:
-    """托管模式的端到端自检：真的把 wbsvrd 编出来跑一遍完整生命周期。
-
-    只把 `_svr` 里那一层 sudo 摘掉 —— 建 `wbsvr` 账户要用户密码，CI 里测不了；
-    协议、路径校验、锁定判定、版本号、窗口归属全是真的。刻意**不**在 wb.py 里留
-    「换掉 wbsvrd 路径」的环境变量开关：那种开关自己就是绕过整套机制的路（指向一个
-    永远回「没锁」的假二进制），所以替换只发生在进程内、只发生在这个函数里。
-    """
-    import io
-    from contextlib import redirect_stdout, redirect_stderr
-
-    src = Path(__file__).resolve().parent.parent.parent / "wbsvr"
-    if not (src / "main.go").is_file():
-        return "跳过（找不到 wbsvr/ 源码）"
-    if not shutil.which("go"):
-        return "跳过（没有 go 工具链）"
-
-    tmp = Path(tempfile.mkdtemp(prefix="wb-hosted-"))
-    old_cwd = Path.cwd()
-    saved = {k: globals()[k] for k in ("WBSVRD", "_svr", "_hosted_cache")}
-    try:
-        store = tmp / "store"
-        store.mkdir()
-        exe = tmp / "wbsvrd"
-        # storeBase 是包级变量，没有 flag 也没有环境变量（生产上刻意如此），
-        # 测试用 -X 在链接期换掉它。
-        b = subprocess.run(
-            ["go", "build", "-ldflags", f"-X main.storeBase={store}", "-o", str(exe), "."],
-            cwd=src, capture_output=True, text=True)
-        assert b.returncode == 0, "wbsvrd 编不出来：" + b.stderr[-500:]
-
-        def direct(root, *args, stdin=None, raw=False):
-            argv = [str(exe), str(args[0])]
-            if root is not None:
-                argv.append(str(Path(root).resolve()))
-            argv += [str(a) for a in args[1:]]
-            r = subprocess.run(argv, input=stdin, capture_output=True, text=True, timeout=60)
-            if r.returncode != 0:
-                payload = {}
-                try:
-                    payload = json.loads(r.stdout)
-                except (json.JSONDecodeError, TypeError):
-                    pass
-                raise WbsvrError(r.stderr.strip() or r.stdout.strip() or "非零退出", payload)
-            return r.stdout if raw else json.loads(r.stdout or "{}")
-
-        globals()["WBSVRD"] = str(exe)
-        globals()["_svr"] = direct
-        globals()["_hosted_cache"] = None
-
-        proj = tmp / "proj"
-        proj.mkdir()
-        os.chdir(proj)
-
-        def quiet(*a):
-            buf = io.StringIO()
-            code = 0
-            try:
-                with redirect_stdout(buf), redirect_stderr(buf):
-                    main(list(a))
-            except SystemExit as e:
-                code = e.code or 0
-            return code, buf.getvalue()
-
-        def svr(*a, **kw):
-            return direct(proj, *a, **kw)
-
-        quiet("init", "--name", "hosted-demo")
-        globals()["_hosted_cache"] = None
-        assert not hosted(proj), "存储还没建就认为托管已启用"
-
-        # 建存储：走用户凭证那条路，agent 侧只出 sealed 载荷
-        code, sealed = quiet("doctor", "--sealed")
-        svr("init", stdin=sealed)
-        globals()["_hosted_cache"] = None
-        assert hosted(proj), "存储建好了却没识别成托管"
-        assert (proj / ".workbench" / "hosted").is_file(), "托管备忘没落盘"
-
-        # 登记托管契约：正文先落工作副本，再由 wb.py 交给服务端
-        code, out = quiet("contract", "add", "--hosted", "--name", "user-api")
-        assert code != 0 and "工作副本" in out, out
-        wc = proj / ".workbench" / "wc" / "user-api"
-        wc.write_text("openapi: 3.0.0\n", encoding="utf-8")
-        code, out = quiet("contract", "add", "--hosted", "--name", "user-api",
-                          "--consumers", "frontend-developer")
-        assert code == 0, out
-        assert not wc.exists(), "登记后工作副本应删除 —— 留着就有两份会分叉的副本"
-        st = load_state(proj)
-        c = find_contract(st, "user-api")
-        assert c["hosted"] and c["path"] == "", c
-
-        # 正文不在 agent 地址空间里：冻结清单不该出现空路径
-        assert "" not in frozen_paths(st), "空路径进了冻结清单，会把整个项目根当成冻结文件"
-        assert not (proj / ".workbench" / "contracts" / "user-api.json").exists()
-
-        # read / checkout 拿得到正文
-        code, out = quiet("contract", "read", "--name", "user-api")
-        assert out == "openapi: 3.0.0\n", repr(out)
-        quiet("contract", "checkout", "--name", "user-api")
-        assert wc.read_text(encoding="utf-8") == "openapi: 3.0.0\n"
-
-        # 未锁定时可以自由改
-        wc.write_text("openapi: 3.0.1\n", encoding="utf-8")
-        code, out = quiet("contract", "commit", "--name", "user-api")
-        assert code == 0 and not wc.exists(), out
-
-        code, out = quiet("contract", "lock", "--name", "user-api")
-        assert code == 0 and "已锁定" in out, out
-
-        # 锁定后 commit 必须被拒 —— 这是整套机制的主判定点
-        quiet("contract", "checkout", "--name", "user-api")
-        wc.write_text("openapi: 9.9.9\n", encoding="utf-8")
-        code, out = quiet("contract", "commit", "--name", "user-api")
-        assert code != 0 and "unlock" in out, out
-        assert svr("read", "user-api", raw=True) == "openapi: 3.0.1\n", "被拒的提交改到了正文"
-
-        # unlock 不转发：agent 自己开得了窗口，冻结就只是个建议
-        code, out = quiet("contract", "unlock", "--name", "user-api", "--reason", "补分页")
-        assert code == 2 and "sudo -u wbsvr" in out, out
-        refs = svr("list")["refs"]
-        assert refs["user-api"]["locked"] and not refs["user-api"].get("unlock_until"), \
-            "wb.py 不该能开出解冻窗口"
-
-        # 用户凭证开窗口之后，改 + bump 走通，版本号跟着涨
-        svr("unlock", "user-api", "补分页字段")
-        code, out = quiet("contract", "commit", "--name", "user-api")
-        assert code == 0, out
-        code, out = quiet("contract", "bump", "--name", "user-api", "--reason", "补分页字段")
-        assert code == 0 and "v1 -> v2" in out, out
-        st = load_state(proj)
-        assert find_contract(st, "user-api")["version"] == 2
-        # bump 给消费方建了返工任务
-        assert any("user-api" in t.get("contracts", []) for t in st["tasks"]), "没建返工任务"
-        code, out = quiet("contract", "verify")
-        assert code == 0, out
-
-        # repo 内契约：正文在 git 里，指纹在服务端。改了文件就该报漂移
-        (proj / "openapi.yaml").write_text("v: 1\n", encoding="utf-8")
-        code, out = quiet("contract", "add", "openapi.yaml", "--name", "repo-api")
-        assert code == 0, out
-        quiet("contract", "lock", "--name", "repo-api")
-        code, out = quiet("contract", "verify")
-        assert code == 0, out
-        (proj / "openapi.yaml").write_text("v: 2\n", encoding="utf-8")
-        code, out = quiet("contract", "verify")
-        assert code != 0 and "repo-api" in out, out
-        # 未申报就重新上锁换指纹 —— 那是 repo 契约唯一那档保护的绕过路，必须拒
-        code, out = quiet("contract", "lock", "--name", "repo-api")
-        assert code != 0 and "unlock" in out, out
-
-        # 改本地镜像骗不了门禁：权威副本在服务端
-        (proj / "openapi.yaml").write_text("v: 1\n", encoding="utf-8")
-        st = load_state(proj, lock=True)
-        find_contract(st, "repo-api")["sha"] = "0" * 64
-        save_state(proj, st)
-        code, out = quiet("contract", "verify")
-        assert code == 0, "改本地镜像后 verify 应仍按服务端期望值判定：" + out
-
-        # sealed 字段被本地改动要被检测到
-        st = load_state(proj, lock=True)
-        st["role_scopes"]["pm"] = ["**"]
-        save_state(proj, st)
-        bad = sealed_audit(proj, st)
-        assert any("role_scopes" in b for b in bad), bad
-        code, out = quiet("status")
-        assert "托管字段不一致" in out, out
-        st = load_state(proj, lock=True)
-        st["role_scopes"] = json.loads(json.dumps(svr("sealed-get", "role_scopes")["role_scopes"]))
-        save_state(proj, st)
-        assert not sealed_audit(proj, load_state(proj)), "复原后仍报不一致"
-
-        # 阶段推进两侧同步；phase set 在托管下关掉
-        code, out = quiet("phase", "set", "design")
-        assert code != 0 and "phase advance" in out, out
-        assert svr("sealed-get", "phase")["phase"] == "clarify"
-        code, out = quiet("phase", "advance", "--force")
-        assert code == 0 and "clarify -> analyze" in out, out
-        assert svr("sealed-get", "phase")["phase"] == "analyze", "服务端阶段没跟着推进"
-        assert load_state(proj)["phase"] == "analyze"
-        # 本地阶段被直接改花时：服务端按自己的当前值拒掉这次推进（并发下同理），
-        # 且门禁把两侧不一致点名出来 —— 否则改本地就等于跳过中间阶段的全部门禁。
-        st = load_state(proj, lock=True)
-        st["phase"] = "develop"
-        save_state(proj, st)
-        assert any("phase" in b for b in sealed_audit(proj, st)), "改本地 phase 没被审计出来"
-        code, out = quiet("phase", "advance", "--force")
-        assert code != 0 and "作废" in out, out
-        assert svr("sealed-get", "phase")["phase"] == "analyze", "服务端阶段被跳跃推进了"
-
-        return "通过"
-    finally:
-        os.chdir(old_cwd)
-        for k, v in saved.items():
-            globals()[k] = v
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-# --------------------------------------------------------------------------
 # 自检
 # --------------------------------------------------------------------------
 
@@ -2792,6 +2623,47 @@ def cmd_selfcheck(args) -> None:
             except SystemExit as e:
                 code = e.code or 0
             return code, buf.getvalue()
+
+        def recover_stale_tasks(label: str) -> None:
+            """恢复夹具中的 stale 任务，按依赖满足顺序推进到完成。"""
+            current = load_state(tmp)
+            pending = {t["id"] for t in current["tasks"]
+                       if t.get("status") == "stale"}
+            while pending:
+                progressed = False
+                for task_id in list(pending):
+                    current = load_state(tmp)
+                    task = find_task(current, task_id)
+                    if not task:
+                        raise AssertionError(f"{label} 任务消失：{task_id}")
+                    status = task.get("status")
+                    if status in ("done", "skipped"):
+                        pending.remove(task_id)
+                        progressed = True
+                        continue
+                    if status not in ("stale", "todo"):
+                        continue
+                    dependency_errors = task_dependency_errors(current, task)
+                    if dependency_errors:
+                        continue
+                    if status == "stale":
+                        code, out = quiet("task", "reopen", task_id)
+                        assert code == 0, f"{label} {task_id} reopen 失败：{out}"
+                    code, out = quiet("task", "start", task_id)
+                    assert code == 0, f"{label} {task_id} start 失败：{out}"
+                    code, out = quiet("task", "done", task_id)
+                    assert code == 0, f"{label} {task_id} done 失败：{out}"
+                    pending.remove(task_id)
+                    progressed = True
+                if not progressed:
+                    current = load_state(tmp)
+                    remaining = [find_task(current, task_id) for task_id in sorted(pending)]
+                    details = "; ".join(
+                        f"{task_id}: 状态={task.get('status') if task else 'missing'}，"
+                        f"{', '.join(task_dependency_errors(current, task)) if task else '任务不存在'}"
+                        for task_id, task in zip(sorted(pending), remaining))
+                    raise AssertionError(
+                        f"{label} 一轮无进展，剩余任务 ID：{sorted(pending)}；{details}")
 
         quiet("init", "--name", "demo")
         st = load_state(tmp)
@@ -2827,8 +2699,16 @@ def cmd_selfcheck(args) -> None:
         assert [t["id"] for t in rt] == ["T1"], "T2 依赖 T1，不该就绪"
         code, _ = quiet("task", "start", "T2")
         assert code == 1, "依赖未完成时 start 应失败"
+        quiet("task", "block", "T2", "--reason", "等待建表")
+        code, out = quiet("task", "reopen", "T2")
+        assert code == 1 and "依赖任务 T1" in out, \
+            "依赖未恢复时 reopen 应拒绝"
+        assert find_task(load_state(tmp), "T2")["status"] == "blocked", \
+            "reopen 被依赖拒绝后不能偷偷改成 todo"
         quiet("task", "start", "T1")
         quiet("task", "done", "T1")
+        code, out = quiet("task", "reopen", "T2")
+        assert code == 0, out
         assert [t["id"] for t in ready_tasks(load_state(tmp), phase="develop")] == ["T2"]
 
         # 契约：登记 -> 锁定 -> 漂移检出 -> bump 生成返工任务
@@ -2836,28 +2716,99 @@ def cmd_selfcheck(args) -> None:
         cpath.write_text('{"GET /users": {"200": ["id", "name"]}}\n', encoding="utf-8")
         quiet("contract", "add", ".workbench/contracts/user-api.json",
               "--owner", "backend-developer", "--consumers", "frontend-developer")
+        code, out = quiet("contract", "add", ".workbench/contracts/user-api.json",
+                          "--name", "duplicate-api", "--owner", "architect")
+        assert code == 1 and "不能重复登记" in out, \
+            "同一路径契约重复登记应被拒绝"
         code, _ = quiet("gate", "check", "--phase", "design")
         assert code == 1, "契约未锁定时 design 门禁应失败"
         quiet("contract", "lock", "--name", "user-api")
         code, _ = quiet("contract", "verify")
         assert code == 0, "刚锁定应无漂移"
+        baseline_text = cpath.read_text(encoding="utf-8")
+        cpath.write_text(baseline_text + "\n", encoding="utf-8")
+        code, out = quiet("contract", "lock", "--name", "user-api")
+        assert code == 1 and "不能覆盖旧 SHA" in out, \
+            "已锁定契约正文漂移时 lock 不得覆盖旧 SHA"
+        cpath.write_text(baseline_text, encoding="utf-8")
+        code, out = quiet("task", "add", "--title", "不存在契约任务", "--role",
+                          "backend-developer", "--contracts", "missing-api")
+        assert code == 1 and "不存在" in out, "task add 必须拒绝不存在契约"
+        quiet("task", "add", "--title", "绑定 API 的实现", "--role",
+              "backend-developer", "--phase", "develop", "--contracts", "user-api")
+        api_task = find_task(load_state(tmp), "绑定 API 的实现")
+        assert isinstance(api_task["contracts"][0], dict), "task add 必须保存对象快照"
+        assert set(api_task["contracts"][0]) == {"name", "version", "revision", "sha"}
+        code, _ = quiet("task", "check", api_task["id"])
+        assert code == 0, "一致的对象快照应通过 task check"
+        code, out = quiet("next", "--all", "--any-phase")
+        assert code == 0 and "契约:user-api" in out, \
+            "next 应通过 contract_ref_name 显示对象快照契约名"
+        code, out = quiet("contract", "impact", "--name", "user-api")
+        assert code == 0 and api_task["id"] in out, \
+            "impact 应通过 task_contract_names 找到对象快照任务"
+        quiet("task", "start", api_task["id"])
+        before = len(load_state(tmp)["tasks"])
+        code, out = quiet("contract", "bump", "--name", "user-api")
+        assert code == 1 and "unlock" in out, "bump 无预先窗口必须拒绝"
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "加 email 字段")
+        unlock_record = read_unlock_records(tmp)["user-api"]
+        assert unlock_record["sha"] == find_contract(load_state(tmp), "user-api")["sha"], \
+            "unlock 必须记录修改前旧 SHA"
         cpath.write_text('{"GET /users": {"200": ["id", "name", "email"]}}\n', encoding="utf-8")
         code, out = quiet("contract", "verify")
         assert code == 1 and "漂移" in out, "改文件后必须检出漂移"
-        before = len(load_state(tmp)["tasks"])
-        code, out = quiet("contract", "bump", "--name", "user-api")
-        assert code == 1 and "reason" in out, "bump 无理由必须拒绝"
-        quiet("contract", "bump", "--name", "user-api", "--reason", "加 email 字段")
+        quiet("contract", "bump", "--name", "user-api")
         st = load_state(tmp)
         assert find_contract(st, "user-api")["version"] == 2
+        assert find_contract(st, "user-api")["revision"] == 2
         assert len(st["tasks"]) == before + 1, "bump 应为消费方创建返工任务"
-        assert st["tasks"][-1]["role"] == "frontend-developer"
-        assert st["tasks"][-1]["phase"] == st["phase"], \
+        sync_task = st["tasks"][-1]
+        assert sync_task["role"] == "frontend-developer"
+        assert isinstance(sync_task["contracts"][0], dict), "返工任务必须绑定对象快照"
+        assert sync_task["contracts"][0]["sha"] == find_contract(st, "user-api")["sha"]
+        assert find_task(st, api_task["id"])["status"] == "stale", \
+            "bump 应将旧契约绑定任务标记 stale"
+        # 旧版任务只有契约名，load_state 不能把它猜成当前 v2；必须显式 reopen
+        # 才能获得完整快照，否则读取动作本身就会悄悄改写任务基线。
+        st["seq"] += 1
+        legacy_id = f"T{st['seq']}"
+        st["tasks"].append({
+            "id": legacy_id, "title": "旧字符串契约任务", "role": "backend-developer",
+            "phase": "develop", "status": "blocked", "deps": [],
+            "contracts": ["user-api"], "artifacts": [], "notes": "旧版状态",
+            "created": now(), "updated": now(),
+        })
+        save_state(tmp, st)
+        loaded = load_state(tmp)
+        legacy = find_task(loaded, legacy_id)
+        assert legacy["contracts"] == ["user-api"], \
+            "load_state 不应把旧字符串引用动态绑定到当前契约"
+        assert task_contract_errors(tmp, loaded, legacy), \
+            "旧字符串引用必须保持不可安全迁移错误"
+        code, out = quiet("task", "reopen", legacy_id)
+        assert code == 0, out
+        legacy = find_task(load_state(tmp), legacy_id)
+        assert isinstance(legacy["contracts"][0], dict), \
+            "只有显式 reopen 才能刷新旧字符串为完整快照"
+        assert set(legacy["contracts"][0]) == {"name", "version", "revision", "sha"}
+        quiet("task", "start", legacy_id)
+        quiet("task", "done", legacy_id)
+        code, _ = quiet("task", "check", api_task["id"])
+        assert code == 1, "stale 任务不能通过 task check"
+        code, _ = quiet("task", "done", api_task["id"])
+        assert code == 1, "stale 任务不能完成"
+        quiet("task", "reopen", api_task["id"])
+        quiet("task", "start", api_task["id"])
+        quiet("task", "done", api_task["id"])
+        assert sync_task["phase"] == st["phase"], \
             "返工任务要落在当前阶段，硬编码 develop 会让本阶段门禁看不见它"
         code, _ = quiet("contract", "verify")
         assert code == 0, "bump 后应重新一致"
-        code, out = quiet("contract", "bump", "--name", "user-api", "--reason", "空改动")
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "空改动")
+        code, out = quiet("contract", "bump", "--name", "user-api")
         assert code == 1 and "未变" in out, "内容未变时 bump 应拒绝，避免刷版本号"
+        quiet("contract", "lock", "--name", "user-api")
         code, out = quiet("contract", "add", "../outside.json")
         assert code == 1 and "项目根" in out, \
             "越根契约必须拒绝：登记后 Bash 提它就被拦、Write 又先撞越根检查，契约无法维护"
@@ -2879,10 +2830,14 @@ def cmd_selfcheck(args) -> None:
         assert "争议中" in out, f"status 应显示争议：{out}"
 
         # bump 应自动解除争议
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "修订字段解除争议")
         cpath.write_text('{"GET /users": {"200": ["id", "name", "email", "avatar"]}}\n',
                          encoding="utf-8")
-        quiet("contract", "bump", "--name", "user-api", "--reason", "修订字段解除争议")
+        quiet("contract", "bump", "--name", "user-api")
         assert not read_disputes(tmp), "bump 应自动解除争议"
+        # 这次 bump 同样会使已有 user-api 任务 stale；通过公开的 reopen/start/done
+        # 流程清空返工，不能把 stale 从门禁断言里排除。
+        recover_stale_tasks("契约 bump 后")
 
         # --clear 手动解除
         code, out = quiet("contract", "dispute", "--name", "user-api", "--reason", "再次冲突")
@@ -2947,6 +2902,36 @@ def cmd_selfcheck(args) -> None:
             return 0
 
         cw = str(tmp)
+        # 活动任务一旦看到开放契约窗口，产品代码写入必须停下；执行记录仍可落盘。
+        quiet("task", "add", "--title", "活动契约实现", "--role", "backend-developer",
+              "--phase", "develop", "--contracts", "user-api")
+        active_task = find_task(load_state(tmp), "活动契约实现")
+        quiet("task", "start", active_task["id"])
+        quiet("contract", "unlock", "--name", "user-api", "--reason", "活动任务发现契约问题")
+        cpath.write_text(
+            '{"GET /users": {"200": ["id", "name", "email", "avatar", "active"]}}\n',
+            encoding="utf-8")
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "server/active.py"}}) == 2, \
+            "活动任务契约窗口开启时产品代码写入未被拦"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": ".workbench/artifacts/develop/tasks/active.md"}}) == 0, \
+            "活动任务阻塞时执行记录不应被拦"
+        code, out = quiet("contract", "bump", "--name", "user-api")
+        assert code == 0, "活动任务 bump 失败：" + out
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "server/after-bump.py"}}) == 2, \
+            "bump 后 stale 任务在 reopen 前仍应阻止产品代码写入"
+        recovered_id = active_task["id"]
+        code, out = quiet("task", "reopen", recovered_id)
+        assert code == 0, out
+        code, out = quiet("task", "start", recovered_id)
+        assert code == 0, out
+        code, out = quiet("task", "done", recovered_id)
+        assert code == 0, out
+        recover_stale_tasks("活动任务 bump 后")
+
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "/etc/passwd"}}) == 2, "越出项目根未被拦"
         assert guard({"tool_name": "Write", "cwd": cw,
@@ -2991,6 +2976,11 @@ def cmd_selfcheck(args) -> None:
             encoding="utf-8").strip().splitlines()[-1])
         assert last["role"] == "backend-developer", last
         assert last["agent_type"] == "backend-developer", last
+        before_read_log = (tmp / ".workbench" / ARTIFACT_LOG).read_text(encoding="utf-8")
+        hook_post_tool({"tool_name": "Read", "cwd": cw,
+                        "tool_input": {"file_path": "README.md"}})
+        assert (tmp / ".workbench" / ARTIFACT_LOG).read_text(encoding="utf-8") == before_read_log, \
+            "post-tool Read 不应记录 artifacts"
 
         quiet("role", "clear")
         assert guard({"tool_name": "Write", "cwd": cw,
@@ -3185,6 +3175,9 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Edit", "cwd": cw,
                       "tool_input": {"file_path": ".workbench/contracts/user-api.json"}}) == 2, \
             "bump 后应重新冻结"
+        # 第二次 bump 会让旧 API 实现和上一条同步任务都 stale；先显式恢复并完成，
+        # 这样后面的 design 门禁只验证 design 变更，而不是遗留旧 API 返工。
+        recover_stale_tasks("契约 bump 后")
 
         # 方案文档登记为契约后即获得同等保护
         dpath = artifact_path(tmp, "design", "design.md")
@@ -3194,12 +3187,13 @@ def cmd_selfcheck(args) -> None:
         quiet("contract", "lock", "--name", "design-doc")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": DESIGN}}) == 2, "已冻结方案文档未被保护"
+        quiet("contract", "unlock", "--name", "design-doc", "--reason", "补回滚方案")
         dpath.write_text(dpath.read_text(encoding="utf-8") + "\n## 回滚\n- 略\n", encoding="utf-8")
         code, out = quiet("contract", "verify")
         assert code == 1 and "design-doc" in out, "方案文档漂移未被检出"
-        quiet("contract", "bump", "--name", "design-doc", "--reason", "补回滚方案")
+        quiet("contract", "bump", "--name", "design-doc")
         st = load_state(tmp)
-        rework = [t for t in st["tasks"] if "design-doc" in t.get("contracts", [])]
+        rework = [t for t in st["tasks"] if "design-doc" in task_contract_names(t)]
         assert {t["role"] for t in rework} == {"backend-developer", "qa"}, \
             "方案文档变更应通知全部消费方"
         code, _ = quiet("contract", "verify")
@@ -3228,6 +3222,7 @@ def cmd_selfcheck(args) -> None:
         code, out = quiet("contract", "bump", "--name", "user-api")
         assert code == 0 and "并行 A" in out, out
         assert read_unlocks(tmp) == {"design-doc": "并行 B"}, read_unlocks(tmp)
+        recover_stale_tasks("并行窗口 user-api bump 后")
         assert guard({"tool_name": "Edit", "cwd": cw,
                       "tool_input": {"file_path": DESIGN}}) == 0, "bump 收掉了兄弟 agent 的窗口"
         quiet("contract", "lock", "--name", "design-doc")
@@ -3242,8 +3237,8 @@ def cmd_selfcheck(args) -> None:
         assert code == 1 and "契约名" in out, out
 
         # no_blocked:* 要看全部任务，不只当前阶段 —— 只看 design 阶段近乎恒真
-        code, _ = quiet("gate", "check", "--phase", "design")
-        assert code == 0, "design 门禁此时应通过"
+        code, out = quiet("gate", "check", "--phase", "design")
+        assert code == 0, "design 门禁此时应通过：" + out
         quiet("task", "block", "T2", "--reason", "等接口")
         code, out = quiet("gate", "check", "--phase", "design")
         assert code == 1 and "阻塞" in out, out
@@ -3327,9 +3322,10 @@ def cmd_selfcheck(args) -> None:
         quiet("task", "done", "T2")
         t2 = find_task(load_state(tmp), "T2")
         assert "web/list.tsx" in t2["artifacts"], t2["artifacts"]
-        quiet("task", "done", "T2")
+        code, out = quiet("task", "done", "T2")
+        assert code == 1 and "只能完成 doing" in out, out
         assert find_task(load_state(tmp), "T2")["artifacts"].count("web/list.tsx") == 1, \
-            "流水账只追加不重写，归并必须幂等"
+            "流水账只追加不重写，重复完成被拒后不能产生重复归并"
         hook_subagent_stop({"cwd": cw})
         assert not (tmp / ".workbench" / "role").is_file(), "无 doing 任务时应解除角色锁"
 
@@ -3358,7 +3354,10 @@ def cmd_selfcheck(args) -> None:
         # 且 save_state 顺手重写的冻结清单会一起退回旧版，刚锁的契约两条防线同时失效。
         code, out = quiet("task", "add", "--title", "并发写", "--phase", "develop",
                           "--role", "backend-developer")
+        assert code == 0, out
         tid = out.split()[0]
+        code, out = quiet("task", "start", tid)
+        assert code == 0, out
         if fcntl is not None:
             acquire_state_lock(tmp)
             child = subprocess.Popen(
@@ -3398,41 +3397,82 @@ def cmd_selfcheck(args) -> None:
                           "tool_input": {"command": bad_cmd}}) == 2, \
                 f"resolve() 漏报：{bad_cmd}"
 
-        # --- stale / skipped 状态 ---
+        # --- stale / skipped 状态：传递闭包、多依赖与逐层恢复 ---
         quiet("task", "add", "--title", "上游A", "--phase", "develop",
               "--role", "backend-developer")
         stid_a = find_task(load_state(tmp), "上游A")["id"]
-        quiet("task", "add", "--title", "下游B", "--phase", "develop",
-              "--role", "frontend-developer", "--deps", stid_a)
-        stid_b = find_task(load_state(tmp), "下游B")["id"]
-        quiet("task", "start", stid_a)
-        quiet("task", "done", stid_a)
-        quiet("task", "start", stid_b)
-        quiet("task", "done", stid_b)
-        # 上游 block 应传播 stale 到下游
-        quiet("task", "block", stid_a, "--reason", "需求变了")
+        quiet("task", "add", "--title", "上游D", "--phase", "develop",
+              "--role", "backend-developer")
+        stid_d = find_task(load_state(tmp), "上游D")["id"]
+        quiet("task", "add", "--title", "中游B", "--phase", "develop",
+              "--role", "frontend-developer", "--deps", f"{stid_a},{stid_d}")
+        stid_b = find_task(load_state(tmp), "中游B")["id"]
+        quiet("task", "add", "--title", "下游C", "--phase", "develop",
+              "--role", "frontend-developer", "--deps", stid_b)
+        stid_c = find_task(load_state(tmp), "下游C")["id"]
+        quiet("task", "add", "--title", "末端E", "--phase", "develop",
+              "--role", "qa", "--deps", stid_c)
+        stid_e = find_task(load_state(tmp), "末端E")["id"]
+
+        code, out = quiet("task", "block", stid_a, "--reason", "需求变了")
+        assert code == 0, out
+        code, out = quiet("task", "block", stid_d, "--reason", "另一依赖也待确认")
+        assert code == 0, out
         st = load_state(tmp)
         assert find_task(st, stid_a)["status"] == "blocked"
-        assert find_task(st, stid_b)["status"] == "stale", \
-            "上游 block 未传播 stale 到下游 done 任务"
-        # stale 任务应阻塞门禁
+        assert find_task(st, stid_d)["status"] == "blocked"
+        assert all(find_task(st, tid)["status"] == "stale"
+                   for tid in (stid_b, stid_c, stid_e)), \
+            "上游 block 未沿 A -> B -> C -> E 传播完整 stale 闭包"
         pool = [t for t in st["tasks"] if t["phase"] == "develop"]
         left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
-        assert stid_b in left, "stale 任务应被视为未完成"
-        # reopen 上游应恢复下游
-        quiet("task", "reopen", stid_a)
+        assert stid_e in left, "传递 stale 任务应被视为未完成"
+
+        code, out = quiet("task", "reopen", stid_a)
+        assert code == 0, out
+        assert find_task(load_state(tmp), stid_b)["status"] == "stale", \
+            "上游仅 reopen 为 todo 时不应提前恢复下游"
+        code, out = quiet("task", "start", stid_a)
+        assert code == 0, out
+        code, out = quiet("task", "done", stid_a)
+        assert code == 0, out
+        assert find_task(load_state(tmp), stid_b)["status"] == "stale", \
+            "另一依赖仍 blocked 时多依赖任务不应恢复"
+
+        code, out = quiet("task", "reopen", stid_d)
+        assert code == 0, out
+        assert find_task(load_state(tmp), stid_b)["status"] == "stale", \
+            "另一依赖仅 reopen 为 todo 时多依赖任务不应恢复"
+        code, out = quiet("task", "start", stid_d)
+        assert code == 0, out
+        code, out = quiet("task", "done", stid_d)
+        assert code == 0, out
         st = load_state(tmp)
         assert find_task(st, stid_b)["status"] == "todo", \
-            "reopen 上游未恢复下游 stale 为 todo"
-        # skip 必须带理由
-        code, _ = quiet("task", "skip", stid_b)
-        assert code == 1, "skip 不带理由应拒绝"
-        quiet("task", "skip", stid_b, "--reason", "功能取消")
-        assert find_task(load_state(tmp), stid_b)["status"] == "skipped"
-        # skipped 在门禁里等同于 done
+            "全部依赖 done 后应只恢复直接下游"
+        assert find_task(st, stid_c)["status"] == "stale", \
+            "中游尚未完成时不能提前恢复更深下游"
+
+        code, out = quiet("task", "start", stid_b)
+        assert code == 0, out
+        code, out = quiet("task", "done", stid_b)
+        assert code == 0, out
+        assert find_task(load_state(tmp), stid_c)["status"] == "todo", \
+            "中游完成后应恢复下一层 stale"
+        code, out = quiet("task", "skip", stid_c)
+        assert code == 1 and "reason" in out, "skip 不带理由应拒绝"
+        code, out = quiet("task", "skip", stid_c, "--reason", "功能取消")
+        assert code == 0, out
+        st = load_state(tmp)
+        assert find_task(st, stid_c)["status"] == "skipped"
+        assert find_task(st, stid_e)["status"] == "todo", \
+            "skipped 依赖应视为完成并恢复下游"
+        code, out = quiet("task", "skip", stid_e, "--reason", "随上游取消")
+        assert code == 0, out
         pool = [t for t in load_state(tmp)["tasks"] if t["phase"] == "develop"]
         left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
-        assert stid_b not in left, "skipped 任务不应阻塞门禁"
+        assert stid_c not in left and stid_e not in left, \
+            "skipped 任务不应阻塞门禁"
 
         # --- unverified 检测 ---
         quiet("config", "set", "gate_commands.test", "echo '0 tests passed'; exit 0")
@@ -3501,9 +3541,8 @@ def cmd_selfcheck(args) -> None:
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
-    hs = selfcheck_hosted()
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
-          f"并发写状态 / 产物挂载 / 报告　托管模式：{hs}")
+          "并发写状态 / 产物挂载 / 报告")
 
 
 # --------------------------------------------------------------------------
@@ -3539,7 +3578,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_gate)
 
     p = sub.add_parser("task", help="任务与进度")
-    p.add_argument("action", choices=["add", "list", "start", "done", "block", "reopen", "skip"])
+    p.add_argument("action", choices=["add", "list", "check", "start", "done", "block", "reopen", "skip"])
     p.add_argument("id", nargs="?")
     p.add_argument("--title")
     p.add_argument("--role", choices=ROLES)
@@ -3564,23 +3603,16 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("contract", help="契约登记 / 锁定 / 漂移校验 / 申报变更 / 争议熔断")
     p.add_argument("action",
                    choices=["add", "list", "lock", "unlock", "verify", "bump", "impact",
-                            "read", "checkout", "commit", "dispute"])
+                            "dispute"])
     p.add_argument("path", nargs="?")
     p.add_argument("--name")
     p.add_argument("--owner", choices=ROLES)
     p.add_argument("--consumers", help="逗号分隔的角色名")
     p.add_argument("--reason", help="unlock / bump / dispute 必填：为什么要改这份冻结文档 / 冲突在哪")
     p.add_argument("--all", action="store_true")
-    p.add_argument("--hosted", action="store_true",
-                   help="add：正文交托管存储保管，不进任何仓库（需要先启用托管）")
     p.add_argument("--clear", action="store_true",
                    help="dispute：解除争议哨兵（不给 --name 则全部解除）")
     p.set_defaults(func=cmd_contract)
-
-    p = sub.add_parser("doctor", help="逐条查托管模式的前提；不过就不启用，退回 hook + 哈希")
-    p.add_argument("--sealed", action="store_true",
-                   help="打印喂给 `wbsvrd init` 的 sealed.json 到 stdout")
-    p.set_defaults(func=cmd_doctor)
 
     p = sub.add_parser("artifact", help="产物目录")
     p.add_argument("action", choices=["path", "list"])
@@ -3631,20 +3663,14 @@ def main(argv: list[str] | None = None) -> None:
         die("phase set 需要阶段名")
     if args.cmd == "config" and args.action == "set" and (not args.key or args.value is None):
         die("config set 需要 <key> <value>")
-    if args.cmd == "contract" and args.action == "add" and not args.path and not args.hosted:
-        die("contract add 需要契约文件路径（或用 --hosted --name <名> 登记托管契约）")
-    if args.cmd == "contract" and args.action in ("read", "checkout", "commit") and not args.name:
-        die(f"contract {args.action} 需要 --name")
+    if args.cmd == "contract" and args.action == "add" and not args.path:
+        die("contract add 需要契约文件路径")
     if args.cmd == "contract" and args.action in ("bump", "impact", "unlock") and not args.name:
         die(f"contract {args.action} 需要 --name")
     if args.cmd == "contract" and args.action == "dispute" and not args.clear and not args.name:
         die("contract dispute 需要 --name（或 --clear 解除）")
     try:
         args.func(args)
-    except WbsvrError as e:
-        # 托管服务的拒绝理由本身就是给 agent 看的（里面有该跑的申报命令），
-        # 抛栈追踪等于把它埋掉。
-        die(f"wbsvrd 拒绝了这次操作：\n{e}")
     finally:
         release_state_lock()
 
