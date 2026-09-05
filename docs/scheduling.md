@@ -114,7 +114,7 @@ wb.py task reopen T2 --note "契约已 bump 到 v2"
 
 归属不看「当前任务」那种单文件 —— 并行下它的内容永远是最后启动的那个任务，据它归属会把两个 subagent 的改动全挂到一个任务上。
 
-**剩余边界：同一角色的两个任务并行时分不开**，它们的改动会互相认领。不是上游限制 —— hook 载荷里有 `agent_id`，`PostToolUse` 能拿到。真正的障碍在另一头：`task start` 是 subagent 自己在 shell 里跑的 CLI，那个进程拿不到自己的 `agent_id`（它只出现在 hook 的 stdin 载荷里），所以任务与 agent 对不上号。要修得让编排者代跑 `task start`，那会把「subagent 自己开工」这条简单约定换成一轮额外往返。当前的取法在「一个角色同时只跑一个任务」下是准的，那也是 `max_parallel` 默认值下的常态。
+同一角色的两个任务并行时，`task start` 的 `PreToolUse` hook 会把任务 ID 与该 subagent 的 `agent_id` 追加到 `.workbench/task-agents.jsonl`；`task done` 优先按这个绑定归并产物。旧工作台没有绑定记录时，才回退到「角色 + `started` 时间」认领。
 
 `--role-lock` 是给编排者用的便捷开关（`start` 的同时 `role set`）。subagent 自己开工时通常先 `role set` 再 `task start`，两种路径等价。
 

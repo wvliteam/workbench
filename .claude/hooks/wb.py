@@ -1457,17 +1457,28 @@ def cmd_gate(args) -> None:
 def merge_artifacts(root: Path, t: dict) -> int:
     """把产物流水账里属于这个任务的改动并进 t["artifacts"]，返回新增条数。
 
-    按「角色 + 任务开始时间」认领。不要改回「读一个 current_task 文件」——
-    单文件在并行下内容永远是最后启动的那个任务，据它归属会把两个 subagent 的改动
-    全挂到一个任务上。流水账只追加、从不重写：重写又是一次读改写竞态，去重让重复归并幂等。
+    优先按 `task start` 的 PreToolUse hook 写入的 agent_id 认领；没有绑定记录时
+    退回「角色 + 任务开始时间」。不要改回「读一个 current_task 文件」—— 单文件
+    在并行下内容永远是最后启动的那个任务，据它归属会把两个 subagent 的改动
+    全挂到一个任务上。绑定与产物流水账都只追加、从不重写：重写又是一次读改写竞态，
+    去重让重复归并幂等。
 
-    ponytail: 按角色认领，两个同角色任务并行时分不开；要更准就得等上游暴露
-    subagent 身份，或改成按写入路径反查角色范围。
+    老 state 继续走时间窗；只有显式带 agent_id 的绑定才启用精确归属。
     """
     logf = wb_dir(root) / ARTIFACT_LOG
     if not logf.is_file():
         return 0
+    bindingf = wb_dir(root) / "task-agents.jsonl"
+    agent_ids: set[str] = set()
     since = t.get("started") or t.get("created") or ""
+    if bindingf.is_file():
+        for raw in bindingf.read_text(encoding="utf-8").splitlines():
+            try:
+                binding = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if binding.get("id") == t["id"] and binding.get("agent_id"):
+                agent_ids.add(binding["agent_id"])
     n = 0
     for raw in logf.read_text(encoding="utf-8").splitlines():
         if not raw.strip():
@@ -1476,7 +1487,10 @@ def merge_artifacts(root: Path, t: dict) -> int:
             e = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if e.get("role") != t["role"] or (e.get("at") or "") < since:
+        if agent_ids:
+            if e.get("agent_id") not in agent_ids:
+                continue
+        elif e.get("role") != t["role"] or (e.get("at") or "") < since:
             continue
         rel = e.get("path") or ""
         if rel and rel not in t["artifacts"]:
@@ -2529,14 +2543,55 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
     return out
 
 
+def _patch_targets(cmd: str) -> list[str]:
+    """Extract every target named by an apply_patch command."""
+    targets = []
+    for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
+        for line in cmd.splitlines():
+            line = line.strip()
+            if line.startswith(marker):
+                raw = line[len(marker):].strip()
+                if raw:
+                    targets.append(raw)
+    return targets
+
+
+def _is_apply_patch(cmd: str) -> bool:
+    """Return whether a shell command invokes apply_patch."""
+    try:
+        tokens = shlex.split(strip_heredocs(cmd))
+    except ValueError:
+        return False
+    return bool(tokens) and Path(tokens[0]).name == "apply_patch"
+
+
+def _is_task_start(cmd: str, task_id: str) -> bool:
+    """Return whether a shell command invokes wb.py task start <ID>."""
+    for seg in _split_pipeline(strip_heredocs(cmd)):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        tokens = _strip_wrappers(tokens)
+        try:
+            wb_index = next(i for i, tok in enumerate(tokens)
+                            if Path(tok).name in ("wb.py", "wb"))
+            args = tokens[wb_index + 1:]
+        except StopIteration:
+            continue
+        if args[:3] == ["task", "start", task_id]:
+            return True
+    return False
+
+
 def hook_pre_tool(data: dict) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input") or {}
     cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
 
+    cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
-        cmd = ti.get("command", "") or ""
         rootr = root.resolve()
         sensitive = sensitive_shell_reads(cwd, rootr, cmd)
         if sensitive:
@@ -2559,6 +2614,20 @@ def hook_pre_tool(data: dict) -> None:
             role = current_role(rootr, data)
             if role in DEVELOPER_ROLES and not _is_dispute_exempt_bash(cmd, rootr):
                 _dispute_deny(disputes)
+
+        if _is_apply_patch(cmd):
+            for raw in _patch_targets(cmd):
+                _check_write_target(cwd, root, raw, data)
+        if data.get("agent_id"):
+            for t in load_state(root).get("tasks", []):
+                if t.get("status") == "todo" and _is_task_start(cmd, t["id"]):
+                    with (wb_dir(root) / "task-agents.jsonl").open("a", encoding="utf-8") as fh:
+                        entry = {"at": now(), "id": t["id"], "role": t["role"]}
+                        for key in ("agent_id", "agent_type", "session_id", "turn_id"):
+                            if data.get(key):
+                                entry[key] = data[key]
+                        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    break
 
         # 解析写入目标：能精确判就精确判，解析不了退回粗检查。
         all_targets, outside_targets, uncertain = resolve(cmd, root)
@@ -2647,13 +2716,8 @@ def hook_pre_tool(data: dict) -> None:
     # apply_patch：Codex 的写入工具，目标藏在 *** Add/Update/Delete File: 标记里
     if tool == "apply_patch":
         cmd_text = ti.get("command", "") or ti.get("content", "") or ""
-        for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
-            for line in cmd_text.splitlines():
-                line = line.strip()
-                if line.startswith(marker):
-                    raw = line[len(marker):].strip()
-                    if raw:
-                        _check_write_target(cwd, root, raw, data)
+        for raw in _patch_targets(cmd_text):
+            _check_write_target(cwd, root, raw, data)
         return
 
     if not WRITE_TOOL.search(tool):
@@ -2701,6 +2765,14 @@ def hook_post_tool(data: dict) -> None:
     if SHELL_TOOL.search(tool):
         cmd = ti.get("command", "") or ""
         targets, _, _ = resolve(cmd, root)
+        if _is_apply_patch(cmd):
+            for raw in _patch_targets(cmd):
+                try:
+                    rel = os.path.relpath(
+                        resolve_target(cwd, raw), rootr).replace(os.sep, "/")
+                    targets.add(rel)
+                except ValueError:
+                    pass
         for rel in sorted(targets):
             append_entry(rel)
         return
@@ -2712,18 +2784,13 @@ def hook_post_tool(data: dict) -> None:
     # apply_patch：从标记里提取所有文件路径
     if tool == "apply_patch":
         cmd_text = ti.get("command", "") or ti.get("content", "") or ""
-        for marker in ("*** Add File:", "*** Update File:", "*** Delete File:", "*** Move to:"):
-            for line in cmd_text.splitlines():
-                line = line.strip()
-                if line.startswith(marker):
-                    raw = line[len(marker):].strip()
-                    if raw:
-                        try:
-                            rel = os.path.relpath(
-                                resolve_target(cwd, raw), rootr).replace(os.sep, "/")
-                            append_entry(rel)
-                        except ValueError:
-                            pass
+        for raw in _patch_targets(cmd_text):
+            try:
+                rel = os.path.relpath(
+                    resolve_target(cwd, raw), rootr).replace(os.sep, "/")
+                append_entry(rel)
+            except ValueError:
+                pass
         return
 
     raw = ti.get("file_path") or ti.get("notebook_path")
@@ -3561,6 +3628,37 @@ def cmd_selfcheck(args) -> None:
         t2 = find_task(load_state(tmp), "T2")
         assert t2["artifacts"] == [], "post-tool 不该写 state.json（并发下会丢任务状态）"
         assert (tmp / ".workbench" / ARTIFACT_LOG).is_file(), "改动应落进产物流水账"
+        # 同角色并行：agent_id 绑定让两个任务的产物不再互相认领
+        task_agents = tmp / ".workbench" / "task-agents.jsonl"
+        if task_agents.is_file():
+            task_agents.unlink()
+        code, out = quiet("task", "add", "--title", "前端旧任务", "--phase", "develop",
+                          "--role", "frontend-developer")
+        assert code == 0, out
+        old_id = out.split()[0]
+        code, out = quiet("task", "add", "--title", "前端新任务", "--phase", "develop",
+                          "--role", "frontend-developer")
+        assert code == 0, out
+        new_id = out.split()[0]
+        wb_path = str(Path(__file__).resolve())
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw, "agent_type": "frontend-developer",
+                       "agent_id": "fe-old",
+                       "tool_input": {"command": f"python3 {wb_path} task start {old_id}"}})
+        assert (tmp / ".workbench" / "task-agents.jsonl").is_file(), old_id
+        quiet("task", "start", old_id)
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw, "agent_type": "frontend-developer",
+                       "agent_id": "fe-new",
+                       "tool_input": {"command": f"python3 {wb_path} task start {new_id}"}})
+        quiet("task", "start", new_id)
+        hook_post_tool({"tool_name": "Write", "cwd": cw, "agent_type": "frontend-developer",
+                        "agent_id": "fe-old", "tool_input": {"file_path": "web/old.tsx"}})
+        hook_post_tool({"tool_name": "Write", "cwd": cw, "agent_type": "frontend-developer",
+                        "agent_id": "fe-new", "tool_input": {"file_path": "web/new.tsx"}})
+        quiet("task", "done", old_id)
+        quiet("task", "done", new_id)
+        tasks = {t["id"]: t for t in load_state(tmp)["tasks"]}
+        assert tasks[old_id]["artifacts"] == ["web/old.tsx"], tasks[old_id]
+        assert tasks[new_id]["artifacts"] == ["web/new.tsx"], tasks[new_id]
         # 兄弟 subagent 还在跑时，先结束的那个不能清掉角色锁 —— 后者会进入无限制状态
         hook_subagent_stop({"cwd": cw})
         assert (tmp / ".workbench" / "role").is_file(), "有 doing 任务时不该解除角色锁"
@@ -3757,6 +3855,14 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "apply_patch", "cwd": cw,
                       "tool_input": {"command": "*** Add File: web/new.tsx\n---\nconsole.log(1)\n"}}) == 0, \
             "apply_patch 正常写入被误拦"
+        shell_patch = "apply_patch <<'PATCH'\n*** Add File: web/new.tsx\n+1\n*** End Patch: 0 lines had values out of range\nPATCH"
+        assert guard({"tool_name": "exec_command", "cwd": cw,
+                      "tool_input": {"command": shell_patch}}) == 0, \
+            "shell apply_patch 正常写入被误拦"
+        frozen_shell_patch = "apply_patch <<'PATCH'\n*** Delete File: .workbench/state.json\n*** End Patch: 0 lines had values out of range\nPATCH"
+        assert guard({"tool_name": "exec_command", "cwd": cw,
+                      "tool_input": {"command": frozen_shell_patch}}) == 2, \
+            "shell apply_patch 删除冻结文件未被拦"
 
         # --- SHELL_TOOL 覆盖 Codex shell 工具 ---
         assert guard({"tool_name": "shell", "cwd": cw,

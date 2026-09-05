@@ -95,7 +95,7 @@ extends = ":workspace"
 
 实测确认 `agent_id` 存在；[`hook_post_tool()`](../.claude/hooks/wb.py#L2303) 现在会在 `artifacts.jsonl` 中保留 `agent_id`、`agent_type`、`session_id`、`turn_id`、`tool_use_id` 等可用字段（[`wb.py:2307-2314`](../.claude/hooks/wb.py#L2307)）。
 
-剩余边界：任务归并仍按角色与任务开始时间，同一角色多个并行任务不能仅凭 hook 记录自动绑定到唯一任务；但审计流水账已经可按 agent 身份追溯。
+同一角色多个并行任务的产物归属已由 `task start` 时的 `agent_id` 绑定解决；旧工作台没有绑定记录时仍回退到「角色 + 任务开始时间」。
 
 ### 3. Medium（已修复）：Codex hook 的根路径查找与文档一致
 
