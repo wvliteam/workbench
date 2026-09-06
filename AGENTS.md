@@ -13,7 +13,7 @@
 
 ## 入口
 
-- 主编排：`/wb-flow`，自动排空：`/wb-loop`，契约操作：`/wb-contract`
+- 主编排：`/wb-flow`，自动排空：`/wb-loop`，契约操作：`/wb-contract`，多仓库初始化：`/wb-init`
 - Codex skills：`.agents/skills/`
 - 状态内核：`.claude/hooks/wb.py`
 

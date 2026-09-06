@@ -27,12 +27,14 @@ python3 .claude/hooks/wb.py status
 
 | 阶段 | 角色 | 产物 |
 | --- | --- | --- |
-| clarify 需求澄清 | `pm` | `artifacts/clarify/requirements.md` |
-| analyze 现状分析 | `analyst` | `artifacts/analyze/current-state.md` |
-| design 方案设计 | `architect` | `artifacts/design/design.md` + 登记并锁定 `design-doc` + 接口契约 + 任务图 |
+| clarify 需求澄清 | `pm` | `artifacts/<flow>/clarify/requirements.md` |
+| analyze 现状分析 | `analyst` | `artifacts/<flow>/analyze/current-state.md` |
+| design 方案设计 | `architect` | `artifacts/<flow>/design/design.md` + 登记并锁定 `design-doc` + 接口契约 + 任务图 |
 | develop 开发实现 | `frontend-developer` / `backend-developer` | 代码 + 自带校验 |
-| verify 测试验证 | `qa` | `artifacts/verify/test-report.md` |
-| retro 总结复盘 | `reviewer` | `artifacts/retro/retro.md` + 交付报告 |
+| verify 测试验证 | `qa` | `artifacts/<flow>/verify/test-report.md` |
+| retro 总结复盘 | `reviewer` | `artifacts/<flow>/retro/retro.md` + 交付报告 |
+
+`<flow>` 是当前需求线（`status` 根行显示），并行多需求线见 CLAUDE.md「多条需求并行：flow」。
 
 ## 每轮循环
 
@@ -66,7 +68,7 @@ python3 .claude/hooks/wb.py next --all --json
 
 ### develop 的落盘校验记录
 
-每批回来后，把 subagent 报的校验命令**自己跑一遍**，把命令与输出记进 `.workbench/artifacts/develop/verification.md`。用 `Write`：先读出文件现有内容，再连着新的一段一起写回 —— 两个开发角色共用这一份，且这份记录属于编排者；让 subagent 各自写会互相覆盖，shell 追加（`>> .workbench/...`）也被守卫拦。
+每批回来后，把 subagent 报的校验命令**自己跑一遍**，把命令与输出记进 `.workbench/artifacts/<flow>/develop/verification.md`（当前 flow）。用 `Write`：先读出文件现有内容，再连着新的一段一起写回 —— 两个开发角色共用这一份，且这份记录属于编排者；让 subagent 各自写会互相覆盖，shell 追加（`>> .workbench/...`）也被守卫拦。
 
 develop 门禁要求这个文件非空。它是硬规则「subagent 说做完了不等于做完了」的落盘依据 —— 记的是**编排者复核过**的结果，不是 subagent 的自我报告。
 

@@ -19,6 +19,7 @@
 └── skills/
     ├── wb-flow/                主编排：全链路推进
     ├── wb-loop/                自动排空循环
+    ├── wb-init/                多仓库初始化：按清单 clone + workspace 文件
     └── wb-contract/            契约生命周期
 
 .workbench/                 全部状态，纯 JSON，可 git diff
@@ -57,6 +58,8 @@ echo '.workbench/' >> .git/info/exclude    # 不改仓库自己的 .gitignore
 # B. 一个需求跨多个仓库 —— 只在外层 init，各仓库都不 init
 python3 .claude/hooks/wb.py init --name <需求名>
 ```
+
+上面的 clone、布局 A 两步与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 .claude/skills/wb-init/scripts/init_repos.py --root . --init`（布局 B 不带 `--init`）—— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
 
 布局 A 之后在 `repos/foo` 里正常用全部命令 —— `wb.py` 向上查找最近的 `.workbench/`，hook 用绝对路径注册，都不受 cwd 影响。角色范围里的 `server/**`、`web/**` 相对各仓库根，不用改。
 

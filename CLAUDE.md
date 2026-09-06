@@ -43,6 +43,8 @@ python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py" init --name foo
 echo '.workbench/' >> .git/info/exclude    # 别改仓库自己的 .gitignore
 ```
 
+这些步骤可以按清单自动化：工作区根放一份 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 .claude/skills/wb-init/scripts/init_repos.py --root . --init` —— 按 清单 clone/软链到 `repos/`、补每仓库两步（已有 `.workbench/` 的跳过）、生成 `.workbench/<工作区名>.code-workspace` 多根工作区与 `.vscode/settings.json` 的 git 发现配置。布局 B 用不带 `--init` 的同一条命令 clone，再按下面调两处。清单格式与幂等边界见 `.claude/skills/wb-init/SKILL.md`。
+
 之后在 `repos/foo` 里正常用所有命令。`wb.py` 向上查找最近的 `.workbench/`,状态自动归属当前仓库;hook 用 `$CLAUDE_PROJECT_DIR` 绝对路径注册,子目录里照样触发。角色范围里的 `server/**`、`web/**` 相对各仓库根,不用改;`gate_commands` 的 cwd 就是仓库根,`npm test` 直接对。
 
 仓库之间天然隔离 —— 这既是好处也是它不能跨仓库的原因。
