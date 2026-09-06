@@ -22,14 +22,17 @@
     └── wb-contract/            契约生命周期
 
 .workbench/                 全部状态，纯 JSON，可 git diff
-├── state.json                  阶段 / 任务 / 门禁记录 / 契约 / 审计日志
-├── state.lock                  写状态的排他锁（`flock`，并行 subagent 的 task done 不互相覆盖）
+├── state.json                  旧布局的 state（新布局在 flows/<flow>/state.json）
+├── current-flow                当前需求线指针（CLI 按它定位）
+├── flows/<flow>/               每条需求线一份：state、锁、门禁日志、解冻窗口
+│   ├── state.json              阶段 / 任务 / 门禁记录 / 契约 / 审计日志
+│   ├── state.lock              写状态的排他锁（`flock`，并行 subagent 的 task done 不互相覆盖）
+│   └── unlock/                 解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由）
 ├── contracts/                  接口定义文件
-├── artifacts/<阶段>/           各阶段产物（按阶段隔离写入权限）
+├── artifacts/<flow>/<阶段>/    各阶段产物（按阶段隔离写入权限）
 ├── artifacts.jsonl             改动流水账（PostToolUse 追加，task done 归并）
 ├── role                        当前角色锁（守卫兜底用，subagent 优先按 hook 载荷判定）
-├── frozen                      冻结路径清单（守卫读它拒绝直接写）
-└── unlock/                     解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由）
+└── frozen                      冻结路径清单（守卫读它拒绝直接写，聚合全部 flow）
 ```
 
 ## 上手
@@ -61,7 +64,7 @@ python3 .claude/hooks/wb.py init --name <需求名>
 
 `status` 与会话开头都会打一行根路径。**忘了 `cd` 进仓库就跑命令会操作到外层工作台自己的状态，且不报错** —— 看那一行。
 
-同一仓库的下一个需求：`report --write` 归档后 `init --force` 重开。要并行两个需求，`git worktree add ../foo-b` 再在新工作树里 `init`。
+同一仓库的下一个需求：`report --write` 归档后 `init --force` 重开。要并行多个需求，`flow new <名>` 开新需求线（一条命令，状态与产物按 flow 隔离；详见 [CLAUDE.md](CLAUDE.md#多条需求并行flow)）。代码也要物理隔离时才用 `git worktree add`，工作树建在本工作区内。
 
 ## 六个能力
 
@@ -138,7 +141,7 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 ```bash
 python3 .claude/hooks/wb.py role scopes         # 范围 + 冻结清单 + 解冻窗口
 python3 .claude/hooks/wb.py role scopes --reset # 老项目刷成当前默认值（跨仓库布局按仓库前缀重算）
-python3 .claude/hooks/wb.py config set role_scopes.qa '["tests/**","e2e/**",".workbench/artifacts/verify/**"]'
+python3 .claude/hooks/wb.py config set role_scopes.qa '["tests/**","e2e/**",".workbench/artifacts/*/verify/**"]'
 ```
 
 ### Loop 执行
@@ -150,7 +153,7 @@ python3 .claude/hooks/wb.py config set role_scopes.qa '["tests/**","e2e/**",".wo
 ## 复盘
 
 ```bash
-python3 .claude/hooks/wb.py report --write   # -> artifacts/retro/delivery-report.md
+python3 .claude/hooks/wb.py report --write   # -> artifacts/<flow>/retro/delivery-report.md
 python3 .claude/hooks/wb.py log --tail 200
 ```
 

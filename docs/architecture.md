@@ -41,17 +41,18 @@
 
 | 位置 | 内容 | 生命周期 |
 | --- | --- | --- |
-| `.workbench/state.json` | 阶段、任务、门禁记录、契约、配置、审计日志 | 与项目同寿，进 git |
+| `.workbench/flows/<flow>/state.json` | 该需求线的阶段、任务、门禁记录、契约、配置、审计日志（旧布局在 `.workbench/state.json`，按 main 兼容读） | 与项目同寿，进 git |
+| `.workbench/current-flow` | 当前需求线指针，CLI 按它定位单条 flow（`load_state` 以 `st["_flow"]` 定点写回目标，切指针不影响进行中的命令） | 长期，`flow switch` 改写 |
 | `.workbench/role` | 角色锁兜底（单行文本）—— subagent 优先按载荷 `agent_type` 判定，这份给主线程与非角色 agent | 单个 subagent 执行期间，`SubagentStop` 在无 doing 任务时清除 |
 | `.workbench/artifacts.jsonl` | 改动流水账（一行一条 JSON：路径 + 角色 + 时间，含可用 agent 身份字段） | 只追加，`task done` 归并进任务的 `artifacts` |
-| `.workbench/frozen` | 冻结路径清单（一行一条） | 由 `save_state()` 每次重写，是 `state.json` 的派生缓存 |
-| `.workbench/unlock/` | 解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由） | `contract unlock` 到 `bump`/`lock`（或无 doing 任务时的 `SubagentStop`）之间 |
+| `.workbench/flows/<flow>/frozen` | 该 flow 的冻结路径清单（一行一条），守卫读全部 flow 的并集 | 由 `save_state()` 每次重写，是 state 的派生缓存 |
+| `.workbench/flows/<flow>/unlock/` | 解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由），守卫读全部 flow 的并集 | `contract unlock` 到 `bump`/`lock`（或无 doing 任务时的 `SubagentStop`）之间 |
 
 后四个独立成文件而不是塞进 `state.json`，原因分两半。`role` / `frozen` / `unlock` 是因为 `PreToolUse` hook 在**每一次** Write/Edit/Bash 上都要读它们 —— 读几行文本比解析整个 JSON 便宜一个量级，而 hook 的延迟直接叠加到每次工具调用上。`artifacts.jsonl` 是反过来：`PostToolUse` 只往它尾部追加一行，纯 append 没有竞态，而在 hook 里读改写 `state.json` 会在并行下静默吞掉期间落盘的 `task done`。
 
-`frozen` 是**纯派生数据**，唯一权威在 `state.json` 的 `contracts`。所以它缺失或为空时 `read_frozen()` 从 state 现算，而不是退化成默认值 —— 派生缓存缺失必须能重建，否则升级路径上会出现静默的能力丢失（老项目没有这个文件，契约的 Bash 防线整条消失且不报错）。「为空」一并当作不可信：`FROZEN_ALWAYS` 那五条恒在，合法的清单不可能为空。
+`frozen` 是**纯派生数据**，唯一权威在 state 的 `contracts`。所以它缺失或为空时 `read_frozen()` 从 state 现算（聚合全部 flow），而不是退化成默认值 —— 派生缓存缺失必须能重建，否则升级路径上会出现静默的能力丢失（老项目没有这个文件，契约的 Bash 防线整条消失且不报错）。「为空」一并当作不可信：`FROZEN_ALWAYS` 恒在，合法的清单不可能为空。
 
-这四个文件自己也在冻结清单里（`FROZEN_ALWAYS`），任何工具调用都写不了它们，每一条对应一层机制的地基（见 [permissions.md](permissions.md#第二层冻结清单)）。`wb.py` 自己写它们不受影响：守卫只拦工具调用。
+这些文件自己也在冻结清单里（`FROZEN_ALWAYS` 与 `.workbench/flows/`），任何工具调用都写不了它们，每一条对应一层机制的地基（见 [permissions.md](permissions.md#第二层冻结清单)）。`wb.py` 自己写它们不受影响：守卫只拦工具调用。
 
 ### state.json 结构
 
@@ -75,13 +76,13 @@
 
 两层：
 
-1. **原子替换。** `save_state` 先写 `state.json.<pid>.tmp` 再 `replace()`，同目录 rename 在 POSIX 上是原子的 —— 读的人永远看到完整的一份。临时名带 pid 是必需的：共用一个名字时两个进程会把彼此的字节交织进同一个临时文件再各自 replace，实测 45 个并发进程能写出语法上就无效的 `state.json`，那时连 `status` 都跑不起来。派生缓存 `.workbench/frozen` 同样这么写，理由见下。
-2. **排他锁。** 会改状态的命令用 `load_state(root, lock=True)`，在读之前对 `.workbench/state.lock` 上 `flock(LOCK_EX)`，由 `save_state`（或 `main` 收尾、`die`）解锁。只读路径（`status` / `next` / `gate` / `report` / `session-start` hook）不上锁。同一个命令的只读子动作也不上锁：`contract impact` 在锁里跑 `git grep`，大仓库要几秒，而 `wb-contract` 要求改契约前先跑它 —— 那几秒里结束的 subagent 的 `SubagentStop` 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。所以 `contract` 只在 `add`/`lock`/`unlock`/`bump` 上锁，`log` 只在写日志时上锁。
+1. **原子替换。** `save_state` 先写 `state.json.<pid>.tmp` 再 `replace()`，同目录 rename 在 POSIX 上是原子的 —— 读的人永远看到完整的一份。临时名带 pid 是必需的：共用一个名字时两个进程会把彼此的字节交织进同一个临时文件再各自 replace，实测 45 个并发进程能写出语法上就无效的 `state.json`，那时连 `status` 都跑不起来。派生缓存冻结清单同样这么写，理由见下。
+2. **排他锁。** 会改状态的命令用 `load_state(root, lock=True)`，在读之前对 `.workbench/flows/<flow>/state.lock` 上 `flock(LOCK_EX)`（锁跟随 state 位置，旧布局在 `.workbench/state.lock`），由 `save_state`（或 `main` 收尾、`die`）解锁。只读路径（`status` / `next` / `gate` / `report` / `session-start` hook）不上锁。同一个命令的只读子动作也不上锁：`contract impact` 在锁里跑 `git grep`，大仓库要几秒，而 `wb-contract` 要求改契约前先跑它 —— 那几秒里结束的 subagent 的 `SubagentStop` 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。所以 `contract` 只在 `add`/`lock`/`unlock`/`bump` 上锁，`log` 只在写日志时上锁。
 
 **原子性不等于隔离性。** rename 只保证「不会读到半截」，不保证「不会拿旧快照覆盖」。无锁时的实测：45 个并发 `task done` 丢 20–23 个。丢掉的每一条都有连带损失 ——
 
 - `tasks_done:<阶段>` 门禁永远 FAIL，而任务确实做完了，报出来的却是「未完成：T3, T6, …」；
-- `save_state` 顺手重写的 `.workbench/frozen` 一起退回旧版，刚 `lock` 的契约在 Write/Edit 与 Bash 两条防线上同时失去保护，直到下一次 `save_state`；
+- `save_state` 顺手重写的 flow 冻结缓存一起退回旧版，刚 `lock` 的契约在 Write/Edit 与 Bash 两条防线上同时失去保护，直到下一次 `save_state`；
 - 丢掉一次 `contract bump` 时文件在 v2、状态在 v1，`contract verify` 报漂移并把原因指向「有人绕过守卫改了契约」—— 归因指向了错的方向。
 
 这三条都是「门禁与进度不可绕过」在并发下失效，且不需要谁去绕。所以锁不是复杂度换性能，是这条硬规则在并行 develop 下成立的前提。
@@ -96,12 +97,12 @@
 
 ### 派生缓存的并发
 
-`.workbench/frozen` 是守卫的热路径输入，`save_state` 每次重写它。旧版就地重写（`write_text` = truncate 再 write），于是那一瞬文件存在但内容不全，而**守卫只判路径在不在清单里** —— 清单空了就等于全部放行。实测 4 写 6 读并行，12000 次读里 5588 次读到空清单；用真实 hook 载荷跑子进程验证那一刻的行为：Write 契约、Write `state.json`、Bash 改契约、Bash 写 `state.json`、Bash `echo architect > .workbench/role` 五条全部 `exit=0`，含提权方向。触发不需要谁去绕，一次 `task done` 与一次工具调用重叠就够。
+冻结清单缓存（`flows/<flow>/frozen`）是守卫的热路径输入，`save_state` 每次重写它。旧版就地重写（`write_text` = truncate 再 write），于是那一瞬文件存在但内容不全，而**守卫只判路径在不在清单里** —— 清单空了就等于全部放行。实测 4 写 6 读并行，12000 次读里 5588 次读到空清单；用真实 hook 载荷跑子进程验证那一刻的行为：Write 契约、Write `state.json`、Bash 改契约、Bash 写 `state.json`、Bash `echo architect > .workbench/role` 五条全部 `exit=0`，含提权方向。触发不需要谁去绕，一次 `task done` 与一次工具调用重叠就够。
 
 所以两侧都改：
 
 - **`write_frozen` 原子替换**（带 pid 的临时文件 + rename）。这是唯一同时覆盖「空」与「写了一半」的修复 —— 半截清单要跨多页才出现，实测 45 行 0 次、405 行 54 次、4005 行 82 次，小项目碰不到但大项目会。
-- **`read_frozen` 把空清单视同缺失**，从 `state.json` 现算。`FROZEN_ALWAYS` 那五条恒在，合法的清单不可能为空，所以这个判据不会误判。它不认成因，任何原因写出的空文件都接得住，失效方向是误拒而非放行。
+- **`read_frozen` 把空清单视同缺失**，从 state 现算（聚合全部 flow）。`FROZEN_ALWAYS` 恒在，合法的清单不可能为空，所以这个判据不会误判。它不认成因，任何原因写出的空文件都接得住，失效方向是误拒而非放行。
 
 `save_state` 的写序也因此固定：**先落 `frozen`，再 `replace()` 换 `state.json`。** 反过来的话中途崩溃会留下「state 新、frozen 旧」—— 刚 `lock` 的契约不在清单里，守卫放行。现在这个顺序崩在中间是 frozen 比 state 新，多冻一份契约的误拒，下一次 `save_state` 自然纠正。
 
@@ -113,7 +114,7 @@
 
 ```bash
 wb.py role scopes            # 先看当前值，定制过的存一份
-wb.py role scopes --reset    # 刷成当前默认值，顺带重写 .workbench/frozen 缓存
+wb.py role scopes --reset    # 刷成当前默认值，顺带重写冻结清单缓存
                              # 跨仓库布局下按仓库前缀重算，与 init 同一条路径
 ```
 
@@ -143,7 +144,7 @@ workbench/
 
 **代价：忘了 `cd` 进仓库就跑命令会操作到外层状态，且不报错**（外层已初始化，`load_state` 不会 die）。缓解是 `status` 与 `SessionStart` 都打一行根路径。没做成硬约束，因为「哪一份才是你要的」只有用户知道。
 
-同一仓库的第二个需求：`report --write` 归档后 `init --force` 重开（串行），或 `git worktree add` 出一份新工作树再 `init`（并行，代码与状态一起隔离）。一份 `state.json` 就是一条流水线，没做多流程实例 —— 那需要在每个命令上加 `--flow` 选择器，而 worktree 已经免费解决了这件事。
+同一仓库的第二个需求：`report --write` 归档后 `init --force` 重开（串行），`flow new` 开一条新需求线（并行，状态、锁、门禁记录、产物按 flow 隔离在 `flows/<flow>/` 与 `artifacts/<flow>/`），代码也要物理隔离时叠加 `git worktree`。早期版本一份 `state.json` 只能一条流水线，当时认为多流程实例要在每个命令上加 `--flow` 选择器、worktree 已经免费解决；现在实现的是指针方案：CLI 按 `.workbench/current-flow` 指针定位单条 flow，守卫读全部 flow 的并集（A flow 锁的契约在 B flow 视角照样冻结），`load_state` 时以 `st["_flow"]` 定点写回目标，命令中途切指针不会把 A flow 的状态写进 B flow 的文件。选择器方案被否掉的原因不变：每命令一个 flag 是全量接口翻新，而指针只动两处（读与写），角色范围用 `artifacts/*/<phase>/**` 通配就跨 flow 复用。
 
 ### 跨仓库：同一个语义的反面
 
@@ -204,7 +205,7 @@ role set → task start → 读契约 → 写代码 → 自检 → task check �
         ↓
 PostToolUse hook 把改动追加到 artifacts.jsonl（角色取自载荷 agent_type，不看单文件）
         ↓ 编排者复核后
-主线程把 subagent 报的校验命令自己跑一遍 → 写 artifacts/develop/verification.md → task done
+主线程把 subagent 报的校验命令自己跑一遍 → 写 artifacts/<flow>/develop/verification.md → task done
         ↓
 wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd:lint/build）
 ```
@@ -243,7 +244,7 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 
 ### 解冻窗口按契约分片（曾是单文件，记录一次纠错）
 
-`.workbench/unlock/` 是目录，一份契约一个文件。早期版本这里是单个文件，两个 subagent 同时 `contract unlock` 后者覆盖前者，当时判断「失效方向是误拒而非漏放，可以接受」。
+`.workbench/flows/<flow>/unlock/` 是目录，一份契约一个文件（守卫读全部 flow 并集）。早期版本这里是 `.workbench/` 下的单个文件，两个 subagent 同时 `contract unlock` 后者覆盖前者，当时判断「失效方向是误拒而非漏放，可以接受」。
 
 **阶段产物冻结之后这个判断不再成立**：`bump` 一份产物契约会给每个消费方各建一条同步任务（`artifact-requirements` 的消费方是 `analyst` 与 `architect`），CLAUDE.md 硬规则 5 要求并行派发，两者各要解冻自己那份冻结产物。于是「同时申报」从边界情况变成 `bump` 之后的必然路径 —— 前一个 agent 刚申报完就被拒，而拒绝理由还是「先申报」，它没有任何出路。**可接受的误拒和会卡死流程的误拒不是同一件事。**
 
@@ -269,6 +270,10 @@ Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv
 
 **`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源和目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
 
+**嵌套工作台（布局 A）的冻结按写入目标反查根（2026-09-06 已落地）。** 会话 cwd 在工作区外层时 `find_root()` 命中外层，而目标可能落在某个自带 `.workbench/` 的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行（Bash 精确通道下 `real_hits` 过滤后 `hits=[]`，正是这个形态）。`_check_write_target` 因此从写入目标向上收集会话根之内的全部嵌套根，逐根按该根的相对路径查冻结与解冻窗口；拒绝话术带内层工作台标识与实名契约名。**顺带修掉一个存量洞**：清单里的目录条目带尾斜杠（`.workbench/flows/`），检查处 `f + "/"` 拼出双斜杠永远不中，flow 布局下 `flows/<flow>/state.json` 整类漏拦 —— selfcheck 此前只测 legacy 路径（`rel in frozen` 直接命中），没测到 startswith 分支。归一化成无尾斜杠再比，嵌套断言块先把它暴露了出来。
+
+**`cd repos/foo && sed -i ... .workbench/contracts/x.json` 仍是漏的。** `resolve()` 不追踪 `cd`，目标按会话根解析成错误路径后被 must_exist 滤掉。这不在嵌套反查的修复范围内 —— 单根下 `cd .workbench/ && ...` 同型写法也是既有边界，兜底正则只认切入 `.workbench` 的 cd。守卫文档早已教「写已冻结路径用相对会话根的完整路径，别 cd」，这条边界维持不变。角色范围层也维持会话根单根：外层会话写内层仓库的产品代码由外层角色的范围判定，跨线问题不存在。
+
 **用户手改不在覆盖范围内**，那是有意为之 —— 用户是这套机制的所有者，不是被约束的对象。
 
 **兜底不是升级路径，是设计的另一半**：`contract verify` 的哈希校验不管改动从哪来，develop 与 verify 两个阶段的门禁都跑它。守卫在改之前拦（能给出可操作的拒绝理由），校验在门禁时抓（能兜住守卫覆盖不到的一切）。两者都留着，不是重复。
@@ -281,7 +286,7 @@ Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv
 
 **这是有意的宽松**：守卫的目标是挡住「pm 改代码」「前端改迁移」这类角色越界，不是做精确的路径 ACL。误杀比漏杀更影响可用性 —— 它会让 agent 开始想办法绕过守卫。跨仓库布局下这个宽松会变成实际问题，见上文。
 
-**一处例外：`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。** 跨 `/` 在仓库里是宽松，跨进状态目录就是漏洞 —— `*.md` 会匹配 `artifacts/clarify/requirements.md`，`*.json` 会匹配 `contracts/events.json`，于是「产物按阶段隔离」与「契约只有 architect 能写」两条被裸扩展名整个绕开。这不能靠冻结那层兜：它只认已锁定的契约，强推过的阶段产物不冻结、未 `lock` 的契约不在清单里。所以这一层自己收窄（[permissions.md](permissions.md#第四层角色写入范围)）。
+**一处例外：`.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式。** 跨 `/` 在仓库里是宽松，跨进状态目录就是漏洞 —— `*.md` 会匹配 `artifacts/main/clarify/requirements.md`，`*.json` 会匹配 `contracts/events.json`，于是「产物按阶段隔离」与「契约只有 architect 能写」两条被裸扩展名整个绕开。这不能靠冻结那层兜：它只认已锁定的契约，强推过的阶段产物不冻结、未 `lock` 的契约不在清单里。所以这一层自己收窄（[permissions.md](permissions.md#第四层角色写入范围)）。
 
 **要严格匹配**：换成 `pathlib.PurePath.full_match()`（Python 3.13+）或引入 `wcmatch.globmatch`。改动在 `hook_pre_tool` 一处。
 

@@ -40,7 +40,7 @@ if rel in frozen or any(rel.startswith(f + "/") for f in frozen):   # unlock/ �
         hook_deny(...)
 ```
 
-冻结清单 = 五个状态文件（`FROZEN_ALWAYS`）+ **所有已锁定的契约**。状态文件不可写是整套机制的地基：
+冻结清单 = 状态文件（`FROZEN_ALWAYS`，含 `.workbench/flows/` 整棵）+ **所有已锁定的契约（全部 flow）**。状态文件不可写是整套机制的地基：
 
 - 能写 `state.json` → 能把 `gates` 全标成 `passed: true`，或改契约的 `sha` → 门禁与契约冻结一起作废。
 - 能写 `role` → 能给自己换个权限大的角色 → 角色隔离作废。
@@ -48,15 +48,17 @@ if rel in frozen or any(rel.startswith(f + "/") for f in frozen):   # unlock/ �
 - 能追加 `artifacts.jsonl` → 能把别人的改动记到自己名下 → 产物归属作废。
 - 能写 `unlock/<契约名>` → 能给自己签发申报 → 申报制度作废。所以守卫连冻结路径的**子路径**一起拦。
 
+**多仓库布局 A 下这一层按写入目标反查根（2026-09-06）。** 会话 cwd 在工作区外层时 `find_root()` 命中外层，而目标可能落在 `repos/<仓库>/.workbench/` 自带一份的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行，而失效方向是放行、主线程又没有角色检查兜底。所以 `_check_write_target` 从写入目标向上收集会话根之内的全部嵌套根（`nested_roots()`，不走到文件系统根 —— 否则会把用户 home 下不相干的工作区捡进来），逐根按**该根的相对路径**查冻结与解冻窗口；Bash 精确通道经 `all_targets` 循环自动走同一套。拒绝话术带内层工作台标识与实名契约名，否则撞上的人不知道该查哪份状态。角色范围层仍按会话根单根 —— 跨线不存在（外层会话写内层仓库的产品代码由外层角色范围判定）。
+
 `wb.py` 自己写它们不受影响，守卫只拦工具调用。
 
 契约不可写是「技术方案与接口定义不能被随意修改」的实现方式，**对 owner 和主线程同样生效**，唯一写入路径是先申报解冻（[contracts.md](contracts.md#锁定即只读)）。清单里除了接口契约与 `design.md`，还有各阶段过门禁后自动登记的产物，所以「回头改上游需求」也是一次要写理由的申报。
 
-`save_state()` 每次把清单落成 `.workbench/frozen`（纯文本一行一条），让 hook 不必解析整个 `state.json`。这个文件只是缓存，缺失**或为空**时 `read_frozen()` 从 `state.json` 现算。缺失那一半是升级路径：升级前建的项目没有 `frozen`，退化成「只保护状态文件」后契约的整条防线消失，且不报错。为空那一半是并发路径 —— 旧版就地重写这个文件，`truncate` 与 `write` 之间那一瞬清单是空的，而守卫只判路径在不在清单里，那一刻五条防线同时放行（含改 `role` 提权）。两半都有断言（删掉缓存后契约仍受保护；清空缓存后 Write 与 Bash 两条路仍拒绝）。清单本身现在原子替换，为空这条是纵深防御，见 [architecture.md](architecture.md#写入原子性与并发)。
+`save_state()` 每次把清单落成 `.workbench/flows/<flow>/frozen`（纯文本一行一条），让 hook 不必解析整个 state JSON。这个文件只是缓存，缺失**或为空**时 `read_frozen()` 从 state 现算（聚合全部 flow）。缺失那一半是升级路径：升级前建的项目没有这个文件，退化成「只保护状态文件」后契约的整条防线消失，且不报错。为空那一半是并发路径 —— 旧版就地重写这个文件，`truncate` 与 `write` 之间那一瞬清单是空的，而守卫只判路径在不在清单里，那一刻五条防线同时放行（含改 `role` 提权）。两半都有断言（删掉缓存后契约仍受保护；清空缓存后 Write 与 Bash 两条路仍拒绝）。清单本身现在原子替换，为空这条是纵深防御，见 [architecture.md](architecture.md#写入原子性与并发)。
 
 ### 第三层：解冻窗口
 
-`.workbench/unlock/` 是目录，一份契约一个文件：文件名是契约名，内容是申报理由。第二层命中后放行的唯一条件：
+`.workbench/flows/<flow>/unlock/` 是目录，一份契约一个文件：文件名是契约名，内容是申报理由。守卫读**全部 flow 的并集**（A flow 开的窗口只对 A flow 的契约生效，B flow 锁的契约不会因为 A flow 有同名窗口被放开）。第二层命中后放行的唯一条件：
 
 ```python
 def unlocked_paths(root):
@@ -94,9 +96,9 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 **`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/`）。范围里没有以该前缀打头的模式，就是谁都不能写。
 
-没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
+没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/main/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
-第二层补不上这个缺口：它只认**已锁定**的契约，而强推过的阶段产物不冻结（那个阶段并没真做完）、还没 `lock` 的契约也不在清单里。所以「开发角色的写入范围不含 `.workbench/contracts/`」这条断言在收窄之前对 `*.json` 并不成立 —— 收窄不只是为新加的 `*.md` 铺路，它同时补掉了 `*.json` 一直存在的同类缺口。收窄只影响裸扩展名，各角色显式写出的 `.workbench/artifacts/<阶段>/**` 照常放行，两个方向都有断言。
+第二层补不上这个缺口：它只认**已锁定**的契约，而强推过的阶段产物不冻结（那个阶段并没真做完）、还没 `lock` 的契约也不在清单里。所以「开发角色的写入范围不含 `.workbench/contracts/`」这条断言在收窄之前对 `*.json` 并不成立 —— 收窄不只是为新加的 `*.md` 铺路，它同时补掉了 `*.json` 一直存在的同类缺口。收窄只影响裸扩展名，各角色显式写出的 `.workbench/artifacts/*/<阶段>/**` 照常放行，两个方向都有断言。
 
 **另外三个前缀装的是守卫自己**：`.claude/hooks/wb.py` 是权限引擎，`.claude/settings.json` 是 hook 注册表，`.claude/agents/*.md` 是角色定义，`.codex/` `.agents/` 是 Codex 端的同一套。同样因为 `*` 跨 `/`，收窄之前 `*.py` 放行任意目录下的 `.py`、`*.json` 放行 `settings.json`、`*.md` 放行 agent 定义 —— 实测 `backend-developer` 能写 `.claude/hooks/wb.py`、`frontend-developer` 能写 `.claude/settings.json`。这些文件都不在任何哈希基线里，`contract verify` 也发现不了：**防线保护 state，却不保护防线自己。** 拒绝信息在这三个前缀上多打一句「要改它交回主线程，别给角色开范围」。主线程不受影响 —— 角色取不到时本层整段跳过，改工作台本体仍走主线程。
 
@@ -111,7 +113,7 @@ wb.py role scopes            # 看当前配置 + 冻结清单 + 解冻窗口
 wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES（会覆盖定制过的范围，先存一份）
                              # 跨仓库布局下改按仓库前缀算 —— 只写裸默认值会把隔离改坏
 wb.py config set role_scopes.backend-developer \
-    '["server/**","migrations/**","internal/**",".workbench/artifacts/develop/**"]'
+    '["server/**","migrations/**","internal/**",".workbench/artifacts/*/develop/**"]'
 ```
 
 **跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
@@ -120,13 +122,13 @@ wb.py config set role_scopes.backend-developer \
 
 ```
 [工作台权限守卫] 拒绝：角色 qa 无权写 src/app.ts。
-允许范围：.workbench/artifacts/verify/**, tests/**, test/**, e2e/**, spec/**, *.config.ts, *.config.js, *.config.mjs, pytest.ini, tox.ini。
+允许范围：.workbench/artifacts/*/verify/**, tests/**, test/**, e2e/**, spec/**, *.config.ts, *.config.js, *.config.mjs, pytest.ini, tox.ini。
 确需跨界请交给对应角色，或 wb.py config set role_scopes.qa '<JSON 数组>'
 ```
 
 三段：拒绝了什么、允许什么、怎么正确地做。只说「拒绝」会让 subagent 反复试同一件事。
 
-「允许什么」那段打的是**对这个路径实际生效的**模式集合，所以撞上 `.workbench/` 收窄时它只列 `.workbench/artifacts/develop/**` 一条，而不是把二十个模式全倒出来让读的人自己排除。
+「允许什么」那段打的是**对这个路径实际生效的**模式集合，所以撞上 `.workbench/` 收窄时它只列 `.workbench/artifacts/*/develop/**` 一条，而不是把二十个模式全倒出来让读的人自己排除。
 
 **冻结文件的第三段按 owner 分岔。** 契约名从 `state.json` 反查填实，不给 `<契约名>` 占位符 —— 只有 `pm` 的定义里硬编码了 `artifact-requirements`，其余角色撞上自己那份阶段产物时只能猜，而「不许换等价写法绕」这条要求拒绝信息把该跑的命令给全。分岔的三种：
 
@@ -284,7 +286,7 @@ hook 自身出 bug 时，未初始化目录放行；已初始化工作台**拒�
 
 `PostToolUse` **绝不能读改写 `state.json`**。并行 develop 下每个 subagent 的每次文件写入都触发它，旧快照回写会静默吞掉期间落盘的 `task done`，连带把 `save_state` 顺手重写的冻结清单退回旧版 —— 于是「门禁与进度不可绕过」在并发下失效，不需要谁去绕。状态锁把这条路封在了 CLI 那一侧，但对 hook 不是出路：`load_state(lock=True)` 会把每次工具调用都串行化到状态锁上，延迟直接叠加到并行写入的每一笔。纯 append 无竞态，也把全量 JSON 读写从每次工具调用的热路径上挪走了。每行的角色取自本次调用的载荷；归属按「角色 + 任务 `started` 时间」在归并时认领，重复归并幂等。
 
-`SubagentStop` 清 `role` 是必需的：不清的话，`pm` 跑完后主线程的写入会继续受 `pm` 的范围限制（只能写 `artifacts/clarify/`），整个会话瘫掉。清 `unlock` 同样必需，理由相反 —— 不清的话窗口一直敞着，下一个 subagent 白捡一个可写的契约。清窗口时打一行提示（哪份契约的窗口被关了），让忘了 bump 的情况可见。
+`SubagentStop` 清 `role` 是必需的：不清的话，`pm` 跑完后主线程的写入会继续受 `pm` 的范围限制（只能写 `artifacts/*/clarify/`），整个会话瘫掉。清 `unlock` 同样必需，理由相反 —— 不清的话窗口一直敞着，下一个 subagent 白捡一个可写的契约。清窗口时关全部 flow 的同名窗口（此刻不知道 subagent 在哪条 flow 干活），打一行提示（哪份契约的窗口被关了），让忘了 bump 的情况可见。
 
 但它只在无 doing 任务时清，主要为的是解冻窗口 —— 并行下先结束的那个会把兄弟正在用的窗口一起收掉。角色这一半的风险随 `current_role()` 降了一级：角色 subagent 按自己的 `agent_type` 判定，兄弟的 `role` 文件被清也不会让它变成无限制；仍受影响的是主线程与非角色 agent。代价不变：串行下忘了 `task done`，角色锁会留到下一次 `role set`。
 

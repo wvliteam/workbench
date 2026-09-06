@@ -13,9 +13,11 @@
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、wb.py 特权子命令层、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
 | [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
+| [parallel-implementation.md](parallel-implementation.md) | 并行开发改造记录（2026-09-06）：环境变量钉根 / flow 维度 / 嵌套根反查三步实现，顺带修掉的存量洞、判错复盘、遗留边界 |
+| [cross-flow-review.md](cross-flow-review.md) | 跨 flow 并发评审（2026-09-06）：四处缺口（关窗死锁 / 归属串扰 / 指针竞态 / 配置丢失）的实证、修复方案、判错复盘与修复后的边界 |
 | [wbsvr.md](wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
 | [codex-agent-migration.md](codex-agent-migration.md) | 迁移到 Codex 的适配层：工具名与载荷键的差异、输出协议差异。**配置层与守卫内核均已落地** —— `WRITE_TOOL`/`SHELL_TOOL` 覆盖 Codex 工具名、`apply_patch` 目标解析、`--format codex` 驱动 `SubagentStop` JSON 输出 |
-| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：九条可借鉴项、明确不抄的、落地顺序。**第 1 节与跨端抽象已落地，第七节结论是不做，其余仍是提案** |
+| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序。**第 1、2、3、5、6、10 节已落地，第 4、8、9 节仍是提案，第七节结论是不做** |
 
 `review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
 

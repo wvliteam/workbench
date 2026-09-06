@@ -15,7 +15,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/develop/**`。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` / `*.json` 只对仓库内的文件生效，`.workbench/` 下的产物与契约、以及 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）都碰不到。
+写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/*/develop/**`（当前需求线的 develop 目录）。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` / `*.json` 只对仓库内的文件生效，`.workbench/` 下的产物与契约、以及 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）都碰不到。
 
 `task start` 前先读取任务绑定的契约对象和本地正文，逐字段核对完整快照 `{name, version, revision, sha}`；不能只按契约名动态取最新版。每一批写入前、完成一段长时间工作后、收到契约变化提示以及运行校验前后运行 `task check <任务ID>`，把它作为 heartbeat。检查失败、任务进入 `blocked` / `stale` 或快照不匹配时立即停止产品代码和迁移写入。
 
@@ -67,6 +67,6 @@ python3 .claude/hooks/wb.py task check <任务ID>
 
 改了哪些文件、契约是否完全对齐、遗留问题，以及**校验命令原文与它的完整输出** —— 写成能被原样复制执行的形式（`pytest tests/test_users.py -q`），不要只说「测试通过了」。
 
-编排者会自己跑一遍那条命令，再把它落盘到 `.workbench/artifacts/develop/verification.md`（develop 门禁要求这个文件非空）。**不要自己写那个文件** —— 它是并行的两个开发角色共用的一份，Write 会覆盖掉对方刚写的内容，shell 追加（`>> .workbench/...`）则被守卫拦。给出命令与输出就够了。
+编排者会自己跑一遍那条命令，再把它落盘到 `.workbench/artifacts/<flow>/develop/verification.md`（当前需求线，develop 门禁要求这个文件非空）。**不要自己写那个文件** —— 它是并行的两个开发角色共用的一份，Write 会覆盖掉对方刚写的内容，shell 追加（`>> .workbench/...`）则被守卫拦。给出命令与输出就够了。
 
 **不要自行运行 `task done`。** `task done` 只能由编排者在确认文件、迁移和测试真实存在，重新运行验证命令并检查当前契约快照后执行。自报完成不等于任务完成。

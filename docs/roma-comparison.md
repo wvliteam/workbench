@@ -1,8 +1,8 @@
 # 与 ROMA 的对比：可借鉴项
 
-**第 1 节（shell 写入真解析）与「跨端与自更新」节的跨端抽象已确认要落地（2026-09-03，方案见对应小节的「落地」段），其余各节仍是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。第 1 节和跨端节的「落地」指当前本地 `wb.py` 与 hook；已移除的 `wbsvr` 只作为历史设计背景，不是运行中的控制面。任何一处落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
+**第 1、2、3、5、6、10 节已落地（见各节「落地」段与文末「落地顺序」），第 4、8、9 节仍是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。已落地各节的「落地」指当前本地 `wb.py` 与 hook；已移除的 `wbsvr` 只作为历史设计背景，不是运行中的控制面。任何一处落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
 
-**2026-09-03 复核。** 九节断言逐条对过代码，八节仍成立，第 1 节的论据被自己的仓库推翻了一半：`BASH_WRITE` 已补 `cp` / `mv` / `install`（`wb.py:187`，这项能力当前由本地 hook 实现；它曾在已移除的 `wbsvr` 历史设计阶段 0 中被讨论），漏报那一半关掉了。但补上它同时**开了一类新误报**，所以第 1 节没有降级 —— 它从「可选优化」变成了这批改动的必要配套，论据已按新事实重写。同期修正：`wb.py` 行数 2257 → 2851（旧记录中的 hosted 服务设计部分不代表当前能力，与本文九节无关）；第 3 节「先采样载荷」的前提已经有答案（见该节代价段）；跨端节引用的 `codex-agent-migration.md` 已自我更正。
+**2026-09-03 复核，2026-09-06 更新落地状态。** 九节断言逐条对过代码，八节仍成立，第 1 节的论据被自己的仓库推翻了一半：`BASH_WRITE` 已补 `cp` / `mv` / `install`（`wb.py:187`，这项能力当前由本地 hook 实现；它曾在已移除的 `wbsvr` 历史设计阶段 0 中被讨论），漏报那一半关掉了。但补上它同时**开了一类新误报**，所以第 1 节没有降级 —— 它从「可选优化」变成了这批改动的必要配套，论据已按新事实重写。同期修正：`wb.py` 行数 2257 → 2851（旧记录中的 hosted 服务设计部分不代表当前能力，与本文九节无关）；第 3 节「先采样载荷」的前提已经有答案（见该节代价段）；跨端节引用的 `codex-agent-migration.md` 已自我更正。2026-09-06：落地顺序节核对后重写 —— 第 3–7 条（stale、unverified、verification.md 分离、UNKNOWN、熔断）都已进代码，之前仍列在「先做」是记录滞后。
 
 对比材料是 ROMA v0.3.6 的一份源码快照（百度 `roma-team`，`.claude/` + `.codex/` 双端插件树，约 180 个文件）。快照打包在 `output/agents.tgz`，`output/` 在 `.gitignore` 里 —— **不进本仓库**，但要复核 ROMA 侧的引述可以解包。对比日期 2026-09-03。
 
@@ -87,7 +87,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 这条对我们同样适用 —— 我们现有的拒绝信息按 owner 分岔给了该跑的命令，方向对，但那是「怎么继续」的指引；熔断场景要的是「停下来别继续」，两种语气不能混。
 
-**落地。** `wb.py contract dispute --name <契约> --reason '<冲突在哪>'` 落哨兵到 `.workbench/disputes/<契约名>`；`hook_pre_tool` 在角色属于两个 developer 时命中即拒（放行 `.workbench/artifacts/develop/**` 下自己的记录与 `/tmp`）；`contract bump` 或用户显式 `dispute --clear` 时解除。
+**落地（已实现，含 flow 维度）。** `wb.py contract dispute --name <契约> --reason '<冲突在哪>'` 落哨兵到 `.workbench/flows/<flow>/disputes/<契约名>`（守卫读全部 flow 并集）；`hook_pre_tool` 在角色属于两个 developer 时命中即拒（放行 `.workbench/artifacts/*/develop/` 下自己的执行记录与 `/tmp`）；`contract bump` 或用户显式 `dispute --clear` 时解除。
 
 **代价。** 多一个状态维度，`status` 要显示。误触发的成本高（全线停工），所以哨兵只能由 developer 主动落，不能靠推断。
 
@@ -158,7 +158,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 六、执行与判定的角色分离，落到权限层
 
-**我们的问题。** 硬规则第 4 条「子 agent 说做完了不等于做完了」只是**给编排者的文字约定**。`GATES["develop"]` 的注释也写明 `verification.md` 由编排者写、没有角色 owner —— 但 `DEFAULT_ROLE_SCOPES` 里两个 developer 都有 `.workbench/artifacts/develop/**`（`wb.py:149`、`wb.py:156`）。**开发 agent 能自己写那份复核记录。** 意图和机制在这里对不上。
+**我们的问题（写本文时的状态，现已修复）。** 硬规则第 4 条「子 agent 说做完了不等于做完了」只是**给编排者的文字约定**。`GATES["develop"]` 的注释写明 `verification.md` 由编排者写、没有角色 owner —— 但当时 `DEFAULT_ROLE_SCOPES` 里两个 developer 都有 `.workbench/artifacts/develop/**`。**开发 agent 能自己写那份复核记录。** 意图和机制在这里对不上 —— 修复见本节「落地」。
 
 **ROMA 的做法。** 进度文件对主 Agent 独占，拒绝话术直接讲原理：
 
@@ -166,9 +166,9 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 配套的是「执行记录按调用者自己的名字命名」：文件名必须是 `<NN>-<自己的 agent 名>.md`，并行撞车时加实例后缀。这样每个 subagent 有专属写入位，不需要靠时间戳猜归属。
 
-**落地。** 两处改动：
+**落地（已实现）。** 两处改动：
 
-1. `verification.md` 从两个 developer 的范围里摘出去 —— 给 develop 产物目录做文件级例外，或把 developer 的产物范围收成 `.workbench/artifacts/develop/tasks/**`，`verification.md` 留在上一层只给主线程。
+1. `verification.md` 从两个 developer 的范围里摘出去 —— developer 的产物范围收成 `.workbench/artifacts/*/develop/tasks/**`，`verification.md` 留在上一层只给主线程。
 2. subagent 的执行记录按 `<任务号>-<角色名>.md` 命名并只允许写自己那份。这顺带解掉 [scheduling.md](scheduling.md) 里那条已知边界 —— 「产物归属按角色 + 任务 `started` 时间认领，同一角色两个任务并行时分不开」，按文件名归属就不用猜。
 
 第 2 步是这两节里唯一真正解决并行归属的改动，第七节那套账本只是它的重量级版本。
@@ -251,6 +251,20 @@ SHELL_TOOL = re.compile(r"shell|bash|exec|run_command|process", re.I)
 
 它解决的是「工作台本体升级，下游改过的文件怎么办」。我们现在是代码库 clone 进工作区共享一份 `.claude/`，还没这问题；真要把工作台分发给别人用时，这套三方比对是现成答案，比「覆盖」和「不覆盖」都强。
 
+## 十、环境变量钉根与 work-item 维度（已落地，2026-09-06）
+
+**我们的问题。** hook 载荷的 cwd 是会话级的：subagent 在 `repos/foo` 里干活时，`find_root(cwd)` 从子仓库向上找不到外层 `.workbench/`，根随 cwd 漂移，外层工作区的契约与状态保护双双落空。另一面，一份 `state.json` 只装一条流水线，同工作区并行第二个需求只能靠 `git worktree` 把代码也复制一份。
+
+**ROMA 的做法。** `hookio.py` 的 `_resolve_root()` 把环境变量放在向上查找之前：注入的根环境变量有值且目录真实存在就用它，不存在才退回 cwd 向上找。产物路径带 work-item 维度（`artifacts/<work-item>/`），守卫规则用 `[^/]+` 通配这一层，一份守卫配置服务所有需求线。
+
+**落地（指针方案，不是选择器方案）。** 三处：
+
+1. `find_root()` 环境变量优先（`WB_ROOT` / `CLAUDE_PROJECT_DIR`，要求目录里确实有 `.workbench/`，环境变量指错时不静默接管）。Claude Code 给 hook 进程自动注入 `CLAUDE_PROJECT_DIR`，settings.json 用 `$CLAUDE_PROJECT_DIR` 绝对路径注册 hook，所以这层在子仓库 cwd 下天然生效。
+2. flow 维度：state、锁、门禁日志、解冻窗口、争议哨兵、产物全部按 `.workbench/flows/<flow>/` 与 `artifacts/<flow>/` 隔离。CLI 按 `.workbench/current-flow` 指针定位单条 flow（`load_state` 以 `st["_flow"]` 定点，命令中途切指针不会把 A flow 状态写进 B flow 文件）；**守卫读全部 flow 的并集** —— A flow 锁的契约在 B flow 视角照样冻结。角色范围产物模式写成 `artifacts/*/<phase>/**`，跨 flow 复用。`flow new/switch/remove` 进特权子命令表，角色 subagent 跑不了。
+3. 嵌套根反查（2026-09-06 补）：布局 A 下会话 cwd 在外层根时，写入目标可能落在某个自带 `.workbench/` 的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行。`_check_write_target` 现在从写入目标向上收集会话根之内的全部嵌套根（`nested_roots()`），逐根按该根的相对路径查冻结与解冻窗口，Bash 精确通道经 `all_targets` 循环走同一套。实施时顺带修掉一个存量双斜杠失配：清单目录条目 `.workbench/flows/` 与检查处 `f + "/"` 拼出 `flows//`，flow 布局下 `flows/<flow>/state.json` 整类漏拦。遗留边界：`cd repos/foo && sed -i … .workbench/…` 这类切目录写法 resolve() 不追踪 cd，仍靠「用完整路径别 cd」的既有约定。
+
+ROMA 每命令显式传 work-item 选择器、我们用指针，差别在 hook 场景指针是唯一可行的：subagent 跑 shell 时不会记得带 flag，而守卫必须不依赖它。指针的漂移风险（命令中途切指针）用 `st["_flow"]` 定点消掉。
+
 ## 明确不抄的
 
 | 它有的 | 为什么不抄 |
@@ -266,23 +280,18 @@ SHELL_TOOL = re.compile(r"shell|bash|exec|run_command|process", re.I)
 
 按性价比，不按上文顺序。
 
-**已确认落地（同一轮，都进 `wb.py`）**
+**已落地（都进 `wb.py`，逐批确认）**
 
-1. **跨端适配（已落地）** —— `--format codex`、`apply_patch`、身份字段和 JSON 输出协议均由共享 hook 处理。
-2. **shell 写入目标解析（已落地）** —— `resolve()` 覆盖重定向、`cp` / `mv` / `install` 等静态目标，并写入审计流水账。
-
-**先做（各自独立，互不依赖）**
-
-3. **`stale` 状态 + 下游失效**（约 10 行）—— 补的是现在会静默放过的真漏洞，改动最小。
-4. **`run_check` 加 skip 标志与零用例检测**（约 20 行）—— 日志已落盘，扫描免费；修的是 `gate_commands` 的实际盲区。
-5. **`verification.md` 移出 developer 范围**（一行 scope）—— 让机制和 `GATES` 注释里已经写明的意图一致。第 2 步的执行记录改名跟着一起做，顺带解掉 `scheduling.md` 的并行归属边界。
-6. **retro 沉淀出口**（一条断言 + 一段提示词）—— 用「换台机器下个月还成立吗」当判据。
-
-**可做（理由已备齐，等排期）**
-
-7. **`UNKNOWN` 调用者告警** —— 原先列为观望，2026-09-03 复核后升级：采样已经做过（结论在 `current_role()` 的 docstring 里），噪音担忧也被高估。与跨端节第 3 条是同一处改动。
-8. **契约争议熔断** —— 多一个状态维度，`status` 要显示，拒绝话术要重写。
+1. **跨端适配** —— `--format codex`、`apply_patch`、身份字段和 JSON 输出协议均由共享 hook 处理。
+2. **shell 写入目标解析** —— `resolve()` 覆盖重定向、`cp` / `mv` / `install` 等静态目标，并写入审计流水账。
+3. **`stale` 状态 + 下游失效** —— `blocked` / `stale` 沿依赖图传播，`tasks_done` 把 stale 算未完成；`skipped` 必须带 `--reason`。
+4. **`run_check` 加 skip 标志与零用例检测** —— `unverified` 独立档，等同 FAIL 挡 `phase advance`。
+5. **`verification.md` 移出 developer 范围** —— developer 产物范围收成 `artifacts/*/develop/tasks/**`，执行记录按调用者自己命名，`verification.md` 只给编排者。
+6. **`UNKNOWN` 调用者告警** —— 载荷有 subagent 迹象但无 `agent_type` 时按告警处理，不再静默当主线程。
+7. **契约争议熔断** —— 哨兵 + 终止令话术 + `status` 显示，`bump` / `dispute --clear` 解除。
+8. **环境变量钉根 + flow 维度 + 嵌套根反查（2026-09-06）** —— 见第十节。`find_root()` 环境变量优先堵 cwd 漂移；flow 把状态、锁、门禁记录、产物按需求线隔离，守卫读全部 flow 并集；`nested_roots()` 让外层会话写内层仓库冻结对象时反查目标所在的根。
+9. **retro 沉淀出口（部分）** —— `retro.md` 模板有「沉淀」节、报告要求沉淀项清单；门禁断言与角色提示词的完整配套尚未加。
 
 **不做**
 
-9. 证据账本 —— 见第七节与「明确不抄的」。等归属之外的问题真的出现再回来看。
+10. 证据账本 —— 见第七节与「明确不抄的」。等归属之外的问题真的出现再回来看。

@@ -18,13 +18,13 @@
 
 | 角色 | 阶段 | 产出 | 可写 | 模型 |
 | --- | --- | --- | --- | --- |
-| `pm` | clarify | `artifacts/clarify/requirements.md` | `artifacts/clarify/**` | sonnet |
-| `analyst` | analyze | `artifacts/analyze/current-state.md` | `artifacts/analyze/**` | sonnet |
-| `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/design/**` / `contracts/**` / `docs/**` | opus |
-| `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者） | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/develop/**` | sonnet |
-| `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者） | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/develop/**` | sonnet |
-| `qa` | verify | `artifacts/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/verify/**` | sonnet |
-| `reviewer` | retro + 临时评审 | `artifacts/retro/retro.md` + 交付报告 | `artifacts/retro/**` / `docs/**` / `*.md` | opus |
+| `pm` | clarify | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
+| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` | `artifacts/*/analyze/**` | sonnet |
+| `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` / `docs/**` | opus |
+| `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者） | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/**` | sonnet |
+| `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者） | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/**` | sonnet |
+| `qa` | verify | `artifacts/<flow>/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
+| `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` / `docs/**` / `*.md` | opus |
 
 **模型分配**：`architect` 与 `reviewer` 用 opus —— 方案取舍与复盘归因是判断密度最高的两件事，做错的成本由后面所有阶段承担。其余用 sonnet。
 
@@ -36,7 +36,7 @@
 | `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini` | `qa` | 测试框架配置按约定放仓库根，而 qa 原本只有四个测试**目录** —— 配 e2e 第一步就走不通。两族要一起给，否则 qa 配得了 vitest 配不了 pytest。`pyproject.toml` / `setup.cfg` 故意不给：那两个同时装着依赖与打包配置，不是测试专属文件 |
 | `components/ pages/ lib/ styles/` 与 `.js` `.jsx` `.vue` `.html` `.scss` | `frontend-developer` | 原列表默认了「源码在 `src/` 或 `web/` 下且用 TypeScript」，Next.js / Nuxt / Vite 的标准布局全在范围外 |
 
-放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。
+放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。
 
 **产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这挡的是下游角色去改上游产物 —— `qa` 发现需求写得不清楚，顺手把 `requirements.md` 改成自己理解的样子，之后就没人知道原始需求是什么了。改上游产物要走上游角色，或者报回主线程。
 
@@ -96,7 +96,7 @@ pm ──requirements.md──> analyst ──current-state.md──> architect
 
 每个下游 agent 的定义里明确写了要读哪些上游产物的**具体路径**。`analyst` 的定义甚至规定：
 
-> 先读 `.workbench/artifacts/clarify/requirements.md`。没有它就停下来告知主线程 —— 无需求的分析是浪费。
+> 先读 `.workbench/artifacts/<flow>/clarify/requirements.md`（当前 flow，指针见 `status` 根行）。没有它就停下来告知主线程 —— 无需求的分析是浪费。
 
 ### 阻塞回传
 
@@ -147,12 +147,12 @@ wb.py role scopes            # 看当前配置 + 冻结清单 + 解冻窗口
 wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES（会覆盖定制，先存一份）
                              # 跨仓库布局下按仓库前缀重算，不是裸默认值
 wb.py config set role_scopes.backend-developer \
-    '["server/**","internal/**","migrations/**",".workbench/artifacts/develop/**"]'
+    '["server/**","internal/**","migrations/**",".workbench/artifacts/*/develop/**"]'
 ```
 
 单体项目里 `frontend-developer` 与 `backend-developer` 的默认范围都含 `src/**`，实际上不隔离。按真实目录改掉。跨仓库工作区的默认范围会歪成按语言隔离，必须改成按仓库前缀 —— 原因见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
 
-改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/develop/**"`, `".workbench/artifacts/verify/**"`）。
+改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/*/develop/**"`, `".workbench/artifacts/*/verify/**"`）。
 
 ### 加一个角色
 

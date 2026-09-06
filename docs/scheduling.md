@@ -116,6 +116,8 @@ wb.py task reopen T2 --note "契约已 bump 到 v2"
 
 同一角色的两个任务并行时，`task start` 的 `PreToolUse` hook 会把任务 ID 与该 subagent 的 `agent_id` 追加到 `.workbench/task-agents.jsonl`；`task done` 优先按这个绑定归并产物。旧工作台没有绑定记录时，才回退到「角色 + `started` 时间」认领。
 
+绑定与流水账的每一行都带 `flow` 字段，归并按任务所在 flow 过滤 —— 任务 ID 每条 flow 独立从 T1 编起，而这两个文件是工作区共享的，不过滤时 A flow 的 T1 会把 B flow 同名任务的产物认领进来。无 `flow` 字段的旧行按 main 归属（字段引入前的存量日志都在 main 线上）。
+
 `--role-lock` 是给编排者用的便捷开关（`start` 的同时 `role set`）。subagent 自己开工时通常先 `role set` 再 `task start`，两种路径等价。
 
 ## Loop 执行

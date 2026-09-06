@@ -22,7 +22,7 @@ description: 工作台本地契约管理。登记、锁定、漂移校验、影�
 
 内容必须具体到**字段名、类型、可选性、错误码、分页形状、时间格式**。「返回用户列表」不是契约，会在联调时炸。
 
-**技术方案文档** `.workbench/artifacts/design/design.md` —— 由 `architect` 在 design 阶段登记为 `design-doc`，消费方是三个开发/测试角色。它和接口契约一样需要「多方对着同一版本干活、改动要通知所有人」，所以走同一套冻结与 revision 机制。
+**技术方案文档** `.workbench/artifacts/<flow>/design/design.md` —— 由 `architect` 在 design 阶段登记为 `design-doc`，消费方是三个开发/测试角色。它和接口契约一样需要「多方对着同一版本干活、改动要通知所有人」，所以走同一套冻结与 revision 机制。
 
 **阶段产物** `requirements.md` / `current-state.md` / `test-report.md` / `retro.md` —— `phase advance` 在门禁真通过时自动登记并锁定，名字是 `artifact-<文件名去扩展>`。阶段过了就是定稿，回头改也必须走申报和 bump。`develop` 不在里面：`verification.md` 由编排者写，没有角色 owner。
 
@@ -40,7 +40,7 @@ description: 工作台本地契约管理。登记、锁定、漂移校验、影�
 python3 .claude/hooks/wb.py contract add .workbench/contracts/user-api.yaml \
   --name user-api --owner backend-developer --consumers frontend-developer
 
-python3 .claude/hooks/wb.py contract add .workbench/artifacts/design/design.md \
+python3 .claude/hooks/wb.py contract add .workbench/artifacts/<flow>/design/design.md \
   --name design-doc --owner architect \
   --consumers frontend-developer,backend-developer,qa
 ```
@@ -146,7 +146,7 @@ python3 .claude/hooks/wb.py task check <任务ID>
 | verify、字段级核对 | `qa` |
 | 发现契约不够用 | 开发角色 `task block` + `contract dispute`，报回主线程 |
 
-开发角色的写入范围不含 `.workbench/contracts/` 与 `.workbench/artifacts/design/`，守卫会拦。这是有意的：契约由一个角色统一定义，才叫契约。
+开发角色的写入范围不含 `.workbench/contracts/` 与 `.workbench/artifacts/*/design/`，守卫会拦。这是有意的：契约由一个角色统一定义，才叫契约。
 
 ## 常见状况
 

@@ -41,10 +41,10 @@
 
 ### 技术方案文档
 
-`.workbench/artifacts/design/design.md`，由 `architect` 在写完方案后自己登记：
+`.workbench/artifacts/<flow>/design/design.md`，由 `architect` 在写完方案后自己登记：
 
 ```bash
-wb.py contract add .workbench/artifacts/design/design.md \
+wb.py contract add .workbench/artifacts/<flow>/design/design.md \
     --name design-doc --owner architect \
     --consumers frontend-developer,backend-developer,qa
 wb.py contract lock --name design-doc
@@ -121,7 +121,7 @@ wb.py contract bump --name user-api
 
 `--reason` 必填，不给直接拒绝。**理由必须在改之前留痕** —— 事后补的理由都是给已发生的事找解释，那时人已经知道自己改了什么，写出来的是辩护而不是动机。`bump` 不给 `--reason` 时继承申报时的理由：同一次变更只写一次理由，写两遍的机制最后会有一遍是敷衍的。
 
-窗口存在 `.workbench/unlock/`，一份契约一个文件，多份可以并存；开关时机与分片理由见 [permissions.md 第三层](permissions.md#第三层解冻窗口)。
+窗口存在 `.workbench/flows/<flow>/unlock/`，一份契约一个文件，多份可以并存；开关时机与分片理由见 [permissions.md 第三层](permissions.md#第三层解冻窗口)。
 
 **`unlock` / `bump` 只有 owner 和 architect 跑得了**（hook 里的特权子命令层，[permissions.md](permissions.md#wbpy-特权子命令只有-hook-拿得到调用者身份)）。这条防线补在 hook 而不是 wb.py 里，是因为 CLI 看不到调用者 —— 而「状态只能经 wb.py 改」意味着 wb.py 能改的一切任何角色都能改。不加的话，冻结层的拒绝信息教非 owner「报回编排者」，但子命令本身不校验：实测 backend-developer 能对 architect 登记的契约走完整套 unlock → 改写 → bump，事后 `contract verify` 干干净净。放行 architect（`CONTRACT_STEWARD`）是因为契约由它统一定义，其 agent 定义里写明的变更流程就是由它替 owner 走 unlock/bump —— 契约变更要给消费方建同步任务，那是架构决策。`--name` 在登记表里查不到也拒：核不了 owner 就不放行。
 
@@ -171,7 +171,7 @@ wb.py contract bump --name user-api
 
 全部子命令与参数见 `wb.py contract --help`，操作顺序见 [wb-contract skill](../.claude/skills/wb-contract/SKILL.md)。两处约束值得单独记：
 
-`add` 要求文件**已存在** —— 先写好接口定义再登记，不允许登记一个占位。`--name` 省略时取文件名主干，且只能含字母数字与 `.`、`_`、`-`：契约名会成为 `.workbench/unlock/` 下的文件名，不校验就能用 `--name ../../x` 让 `unlock` 写到项目根之外。
+`add` 要求文件**已存在** —— 先写好接口定义再登记，不允许登记一个占位。`--name` 省略时取文件名主干，且只能含字母数字与 `.`、`_`、`-`：契约名会成为解冻窗口目录下的文件名，不校验就能用 `--name ../../x` 让 `unlock` 写到项目根之外。
 
 ## bump 的影响面传播
 
@@ -216,13 +216,13 @@ $ wb.py contract impact --name user-api
 
 | 动作 | 谁 | 强制方式 |
 | --- | --- | --- |
-| 写契约文件、`add`、`lock` | `owner`（默认 `architect`） | `role_scopes` 里只有 architect 含 `.workbench/contracts/**` 与 `.workbench/artifacts/design/**` |
+| 写契约文件、`add`、`lock` | `owner`（默认 `architect`） | `role_scopes` 里只有 architect 含 `.workbench/contracts/**` 与 `.workbench/artifacts/*/design/**` |
 | `unlock` + 改 + `bump` | `owner` 或 `architect` | 冻结守卫拦所有人的直接写，包括 owner；hook 特权层拦非 owner 的 `unlock`/`bump` 子命令 |
 | 读契约、按契约实现 | 开发角色 | 提示词：契约是唯一事实来源 |
 | `verify`、字段级人工核对 | `qa` | qa agent 定义里的必做项 |
 | 发现契约不够用 | 开发角色 `task block` | 冻结守卫 + 提示词：禁止直接改契约文件 |
 
-开发角色的写入范围**不含** `.workbench/contracts/` 与 `.workbench/artifacts/design/`。这是有意的：**契约由单一角色统一定义，才叫契约。** 谁都能改的接口定义文件只是一份注释。
+开发角色的写入范围**不含** `.workbench/contracts/` 与 `.workbench/artifacts/*/design/`。这是有意的：**契约由单一角色统一定义，才叫契约。** 谁都能改的接口定义文件只是一份注释。
 
 这条断言依赖守卫第四层的一处收窄：开发角色的范围里有 `*.json`，而 `fnmatch` 的 `*` 跨 `/`，所以不收窄的话 `.workbench/contracts/events.json` 是匹配得上的 —— 冻结那层也补不上，它只认已 `lock` 的契约。守卫因此对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式（[permissions.md](permissions.md#第四层角色写入范围)）。
 
@@ -236,7 +236,7 @@ $ wb.py contract impact --name user-api
 
 **三类契约走的是同一条路。** 方案文档只是换成 `--name design-doc`（三个消费方各一条同步任务，设计变更本来就该三方重新对齐）；qa 打回要改需求换成 `--name artifact-requirements`，`impact` 会列出 `analyst` 与 `architect` —— 需求变了这两个阶段的产物也过期了。
 
-**改需求那一步要派 `pm`。** 它是 `artifact-requirements` 的 owner，且写入范围里只有它含 `artifacts/clarify/`。主线程解冻后自己改不会被拦（它没有角色限制），但那样落进 `artifacts.jsonl` 的记录里没有角色，事后追不到是谁改的需求。
+**改需求那一步要派 `pm`。** 它是 `artifact-requirements` 的 owner，且写入范围里只有它含 `artifacts/*/clarify/`。主线程解冻后自己改不会被拦（它没有角色限制），但那样落进 `artifacts.jsonl` 的记录里没有角色，事后追不到是谁改的需求。
 
 ## 失效模式与处置
 
@@ -249,8 +249,8 @@ $ wb.py contract impact --name user-api
 | 契约锁了但联调还是不一致 | 实现没逐字段对齐契约 | 这是 `qa` 的字段级核对该抓的。契约保证「双方看同一份」，不保证「双方读对了」 |
 | 契约文件语法错误 | 哈希不校验语法 | 挂 `gate_commands.lint` |
 | `bump` 后消费方任务堆积 | 契约设计不稳定，改动过频 | 复盘信号：设计阶段对接口的思考不足。看 `log` 里 `contract_bump` 的条数 |
-| 升级 `wb.py` 后契约的 Bash 防线失效 | 老项目没有 `.workbench/frozen` 缓存 | 已修：缺失**或为空**时从 `state.json` 现算。老项目顺手跑 `role scopes --reset` 刷新角色范围 |
-| 契约明明锁了，某次工具调用却放行了 | `.workbench/frozen` 被读到中间态（旧版就地截断重写它） | 已修：`write_frozen` 改成原子替换，见 [architecture.md](architecture.md#写入原子性与并发) |
+| 升级 `wb.py` 后契约的 Bash 防线失效 | 老项目没有冻结清单缓存 | 已修：缺失**或为空**时从 state 现算（聚合全部 flow）。老项目顺手跑 `role scopes --reset` 刷新角色范围 |
+| 契约明明锁了，某次工具调用却放行了 | 冻结缓存被读到中间态（旧版就地截断重写它） | 已修：`write_frozen` 改成原子替换，见 [architecture.md](architecture.md#写入原子性与并发) |
 
 冻结机制本身覆盖不到的写入路径（外部编辑器 / `git checkout` / `rsync` / 用户手改）与那些取舍的理由，见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。共同点：**守卫防的是模型主动绕过，不是防人。** 兜底始终是 `contract verify` 的哈希校验 —— 它不管改动从哪来。
 

@@ -8,7 +8,7 @@ model: opus
 你是评审者，负责 retro（总结复盘）阶段，也承担阶段性代码评审。
 
 第一件事：`python3 .claude/hooks/wb.py role set reviewer`
-写入范围：`.workbench/artifacts/retro/**`、`docs/**` 与 `*.md`（落 ADR、补说明属于评审产出）。**你不改代码** —— 评审者动手改代码就没人评审那次改动了。也不改方案文档与契约：设计有问题写进 `retro.md` 的改进项，由 `architect` 走 `contract unlock` → `bump`。`*.md` 跨不进 `.workbench/`，也跨不进 `.claude/` `.codex/` `.agents/`，所以别的阶段的产物与守卫本体你照样碰不到。
+写入范围：`.workbench/artifacts/*/retro/**`（当前需求线的 retro 目录）、`docs/**` 与 `*.md`（落 ADR、补说明属于评审产出）。**你不改代码** —— 评审者动手改代码就没人评审那次改动了。也不改方案文档与契约：设计有问题写进 `retro.md` 的改进项，由 `architect` 走 `contract unlock` → `bump`。`*.md` 跨不进 `.workbench/`，也跨不进 `.claude/` `.codex/` `.agents/`，所以别的阶段的产物与守卫本体你照样碰不到。
 
 ## 模式一：代码评审（被单独调用时）
 
@@ -34,8 +34,8 @@ path:line: <严重度>: <问题>。<怎么改>。
    python3 .claude/hooks/wb.py log --tail 200
    python3 .claude/hooks/wb.py report --write
    ```
-   `report --write` 生成 `artifacts/retro/delivery-report.md`（阶段门禁记录、任务表、契约变更历史）。日志里的 `forced=true`、`contract_bump`、`task_reopen`、`task_block` 是复盘的富矿 —— 每一条都是一次流程摩擦。
-2. 写 `.workbench/artifacts/retro/retro.md`。
+   `report --write` 生成 `artifacts/<flow>/retro/delivery-report.md`（阶段门禁记录、任务表、契约变更历史）。日志里的 `forced=true`、`contract_bump`、`task_reopen`、`task_block` 是复盘的富矿 —— 每一条都是一次流程摩擦。
+2. 写 `.workbench/artifacts/<flow>/retro/retro.md`。
 
 门禁会检查 `改进项` 章节存在。
 

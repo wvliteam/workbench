@@ -63,9 +63,9 @@ python3 .claude/hooks/wb.py init --name <需求名>   # 只在外层
 
 ```bash
 python3 .claude/hooks/wb.py config set role_scopes.frontend-developer \
-  '["repos/frontend/**",".workbench/artifacts/develop/tasks/**"]'
+  '["repos/frontend/**",".workbench/artifacts/*/develop/tasks/**"]'
 python3 .claude/hooks/wb.py config set role_scopes.backend-developer \
-  '["repos/backend/**","repos/shared/**",".workbench/artifacts/develop/tasks/**"]'
+  '["repos/backend/**","repos/shared/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
 `config set` 是**整条覆盖不是追加** —— 漏抄一个前缀，那个仓库就换成没人认领，`role scopes` 下一次会点它的名。
@@ -81,15 +81,36 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
   '(cd repos/frontend && npm test) && (cd repos/backend && pytest)'
 ```
 
-子 shell 括号让 `cd` 不外溢。`&&` 串联时先失败的那个决定退出码，哪个仓库红了看 `.workbench/gate-test.log` 的完整输出。
+子 shell 括号让 `cd` 不外溢。`&&` 串联时先失败的那个决定退出码，哪个仓库红了看 `.workbench/flows/<flow>/gate-test.log` 的完整输出。
 
 契约放哪里两种都行:放 `repos/backend/openapi.yaml` 会进那个仓库的 git(适合契约由该服务负责发布);放外层 `.workbench/contracts/` 则不进任何仓库(适合契约独立于双方)。两种都受同一套冻结保护 —— 实测跨仓库路径的契约,前端、后端 owner、主线程的 Write/Edit/`sed -i`/先 `cd` 再改全部拦住。
+
+### 多条需求并行：flow
+
+一份 `.workbench/` 可以同时跑多条流水线，每条一个 flow（需求线）：state、锁、门禁记录、产物目录都按 flow 隔离在 `.workbench/flows/<flow>/` 与 `.workbench/artifacts/<flow>/`。
+
+```bash
+python3 .claude/hooks/wb.py flow new feature-b   # 开一条新流水线并切换过去
+python3 .claude/hooks/wb.py flow list           # 全部 flow 与各自阶段
+python3 .claude/hooks/wb.py flow switch main   # 切回
+python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切走）
+```
+
+- `init --flow <名>` 可以直接初始化指定 flow；默认 `main`。
+- **新 flow 从 main 继承工作区级配置**（`role_scopes` / `gate_commands` / `gate_timeout` / `max_parallel`）：这些描述的是「这个工作区怎么干活」，不继承的话每条 flow 都要重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉。任务、契约、阶段不继承 —— 那是每条需求线自己的进度。
+- CLI 命令按 `.workbench/current-flow` 指针定位；`status` 的根行会显示当前 flow。指针是全部会话共享的一份文件：**两个终端并行推两条 flow 时，CLI 各自 `export WB_FLOW=<名>` 钉死**（只影响 wb.py 命令，hook 与守卫不受它影响）。不钉的话，状态命令会被对方切走的指针带到别的流水线上 —— 并发编排多条 flow 没有别的机制保护，要么各自钉 WB_FLOW，要么串行交错。
+- **守卫不看指针，看全部 flow 的并集**：A flow 锁定的契约在 B flow 视角下照样冻结；A flow 的契约争议会让所有 flow 的 developer 一起停工（争议本来就是全线停工信号）。
+- 解冻窗口按 flow 生命周期隔离：SubagentStop 与 `contract lock` / `bump` 只关**本 flow**的窗口，别的 flow 正在使用的窗口不会被顺带拆掉。同一契约名全工作区同时只允许一个窗口（`unlock` 聚合查重），A flow 开窗期间 B flow 对同名契约的 `unlock` 会被拒 —— 共享同一份契约文件的两条 flow，变更本来就要排队。
+- 产物归属（`task-agents.jsonl` / `artifacts.jsonl`）带 flow 字段：任务 ID 每条 flow 独立从 T1 编起，归属按任务所在 flow 过滤，跨 flow 同名任务不会互相认领对方的 agent 与产物。
+- 角色范围模式带 flow 通配（`.workbench/artifacts/*/clarify/**`），不用为每条需求改配置。
+- flow new/switch/remove 是编排者的调度决定，角色 subagent 跑不了（守卫特权层拦截）。
+- 同一仓库要并行第二个需求、又要代码也物理隔离时，仍可叠加 `git worktree`；只隔离状态时用 flow 就够。
 
 ### 两种模式共同的坑
 
 **每轮 `status` 先看「根」那一行。** 它是当前操作的状态归属。模式 A 下忘了 `cd` 进仓库,会改到外层工作台自己的状态 —— 不报错,只能靠看。
 
-同一个仓库要走第二个需求:先 `report --write` 归档,再 `init --force` 重开。需要两个需求并行改同一份代码,用 `git worktree add ../foo-featureB`,新 worktree 里再 `init` —— 代码与状态一起隔离。
+同一个仓库要走第二个需求:并行用 `flow new`(状态、门禁记录、产物按 flow 隔离);需要代码也物理隔离时,用 `git worktree add ../foo-featureB`,新 worktree 里再 `init`。串行接续则先 `report --write` 归档,再 `init --force` 重开。
 
 ## 六阶段与角色
 
@@ -97,12 +118,12 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
 
 | 阶段 | 角色 subagent | 必须产出 |
 | --- | --- | --- |
-| clarify | `pm` | `.workbench/artifacts/clarify/requirements.md`（含「验收标准」「非目标」） |
-| analyze | `analyst` | `analyze/current-state.md`（含「风险」） |
-| design | `architect` | `design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
-| develop | `frontend-developer` `backend-developer` | 代码 + `develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
-| verify | `qa` | `verify/test-report.md` |
-| retro | `reviewer` | `retro/retro.md`（含「改进项」） |
+| clarify | `pm` | `.workbench/artifacts/<flow>/clarify/requirements.md`（含「验收标准」「非目标」） |
+| analyze | `analyst` | `<flow>/analyze/current-state.md`（含「风险」） |
+| design | `architect` | `<flow>/design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
+| develop | `frontend-developer` `backend-developer` | 代码 + `<flow>/develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
+| verify | `qa` | `<flow>/verify/test-report.md` |
+| retro | `reviewer` | `<flow>/retro/retro.md`（含「改进项」） |
 
 编排者不亲自干活，派 subagent。派发时给足上下文：需求原话、上游产物路径、要读的契约文件、相关的验收标准条目。
 
@@ -125,7 +146,7 @@ python3 .claude/hooks/wb.py config set gate_commands.lint 'npm run lint'
 python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
 
-失败时完整输出落在 `.workbench/gate-<名>.log`，门禁说明里只带最后 5 行 —— 别为了看失败原因把命令再跑一遍。单条命令超过 `gate_timeout`（默认 1800 秒）记 FAIL，不是崩溃。
+失败时完整输出落在 `.workbench/flows/<flow>/gate-<名>.log`，门禁说明里只带最后 5 行 —— 别为了看失败原因把命令再跑一遍。单条命令超过 `gate_timeout`（默认 1800 秒）记 FAIL，不是崩溃。
 
 ## 权限守卫
 
@@ -142,17 +163,18 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
 python3 .claude/hooks/wb.py role scopes      # 当前范围 + 冻结清单 + 解冻窗口
 python3 .claude/hooks/wb.py role scopes --reset   # 老项目刷成当前默认值（跨仓库布局会重新按仓库前缀算）
-python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/**","migrations/**",".workbench/artifacts/develop/tasks/**"]'
+python3 .claude/hooks/wb.py config set role_scopes.backend-developer '["server/**","migrations/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
 ## 已知边界
 
 - 角色按 hook 载荷里的 `agent_type` 判定，并行 subagent 各自生效，与谁最后 `role set` 过无关。`.workbench/role` 只兜底主线程与非角色 agent（`general-purpose` / `Explore` 等）—— 开发活派给角色 agent，别派给 `general-purpose`，那时范围只能按最后一次 `role set` 兜底。
-- 解冻窗口是 `.workbench/unlock/` 目录，一份契约一个文件，多份可以同时开着。同一份契约上不区分申报者 —— 两个 agent 同时改一份契约本身就该避免。`bump` / `lock` 只关自己那一份；`SubagentStop` 关全部但只在没有任务处于 doing 时才关，否则先结束的那个会收掉仍在跑的兄弟的窗口。**所以每个任务收尾都要 `task done`。**
+- 解冻窗口按 flow 隔离在 `.workbench/flows/<flow>/unlock/`，一份契约一个文件，多份可以同时开着。同一份契约上不区分申报者 —— 两个 agent 同时改一份契约本身就该避免。`bump` / `lock` 只关自己那一份；`SubagentStop` 关全部但只在没有任务处于 doing 时才关，否则先结束的那个会收掉仍在跑的兄弟的窗口。**所以每个任务收尾都要 `task done`。**
 - 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
-- 改状态的命令走 `.workbench/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
+- 改状态的命令走 `.workbench/flows/<flow>/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
 - 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`GUARDED_PREFIXES`（`.workbench/` `.claude/` `.codex/` `.agents/`）下的路径只认显式以该前缀开头的模式，否则 `*.md` / `*.json` / `*.py` 会跨进产物与契约目录、以及守卫自己的权限引擎与 hook 注册表，把阶段隔离和防线本身一起绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
 - Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结、越根和角色范围；`sed -i` 只把 `-i` 之后真实存在的文件当写入目标，脚本表达式（`s/a/b/`）与 BSD 的空后缀不算。`cd`/`pushd` 切进 `.workbench` 后写仍有兜底。动态不可解析命令对 subagent 拒绝，不把「Bash 没被拦」当成「这个写入是允许的」。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。`cp .workbench/contracts/api.yaml /tmp/bak` 的源路径不再误报，目标在 safe 目录时放行。
+- 多仓库布局 A（`repos/<仓库>/.workbench/` 嵌套）下，冻结检查按写入目标反查嵌套根：外层会话写内层仓库的冻结契约或 `state.json` 照样拦，拒绝信息带内层工作台路径与实名契约名，申报解冻要在**那个仓库**里跑 `contract unlock`。写内层冻结路径用相对会话根的完整路径（`repos/foo/.workbench/...`），别 `cd` 进去再写相对路径 —— 那条 resolve() 追踪不了。
 - 特权子命令层的校验基于**解析出的 wb.py 参数**：heredoc body 不在其中、管道分段、`shlex` 分词后逐段核对。`--name` 用的是 flag 的字面值，`--name $C` 这类 shell 变量在 hook 里解析不了（不做变量展开），按「查不到 owner」拒绝 —— 报回编排者用实名重跑即可。主线程不受这层影响（没有 `agent_type`），这层的存在正是「状态只能经 wb.py 改」能成立的原因：没有它，wb.py 能改的一切任何角色都能改。
 - 门禁命令是 `shell=True` 的 subprocess，不经 Bash 守卫 —— 这是它作为门禁的前提（任意项目的任意测试命令）。已知上限：catastrophic 模式筛得掉，但 qa 配的非灾难命令就是会原样执行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
