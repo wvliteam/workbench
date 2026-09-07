@@ -13,7 +13,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/`、前端扩展名（`.ts .tsx .js .jsx .vue .css .scss .html .json`）、`*.md` 与 `.workbench/artifacts/*/develop/tasks/**`（当前需求线的执行记录）。碰不到 `migrations/`、`server/`、`.workbench/contracts/`、`.workbench/artifacts/design/` 是设计如此 —— `*.md` 那条只对仓库内的文件生效，跨不进 `.workbench/`。
+写入范围：`web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/`、前端扩展名（`.ts .tsx .js .jsx .vue .css .scss .html .json`）、`*.md` 与 `.workbench/artifacts/*/develop/tasks/**`（当前需求线的执行记录）。碰不到 `migrations/`、`server/`、`.workbench/contracts/`、`.workbench/artifacts/*/design/` 是设计如此 —— `*.md` / `*.json` 那条只对仓库内的文件生效，跨不进 `.workbench/`，也跨不进 `.claude/` `.codex/` `.agents/`（守卫本体：权限引擎、hook 注册表、角色定义）。
 
 动手前先查知识库有没有本仓库的过往经验（正确的构建/测试命令、dev server 起法、反复踩的坑）：`grep -ril "<关键词>" knowledge/`，命中条目完整读一遍，尤其「失效条件」—— 拿过期结论当依据比不查更糟。判据与格式见 `knowledge/README.md`。只读：`knowledge/` 你写不了（守卫拦），要沉淀交回主线程派 `knowledger` 角色。
 
@@ -38,7 +38,7 @@ python3 .claude/hooks/wb.py task check <任务ID>
 
 ## 契约不够用时
 
-**不要改契约文件，也不要改 `design.md`。** 两者都已冻结，文件编辑操作和 shell 重定向、`sed -i` 之类的写法都会被守卫直接拒绝 —— 不要试等价写法，那些也被拦。
+**不要改契约文件，也不要改 `design.md`。** 两者都已冻结，Write / Edit 和 shell 重定向、`sed -i` 之类的写法都会被守卫直接拒绝 —— 不要试等价写法，那些也被拦。
 
 ```
 python3 .claude/hooks/wb.py task block <ID> --reason "契约 user-api 响应缺 total，无法做分页"
@@ -48,6 +48,10 @@ python3 .claude/hooks/wb.py contract dispute --name user-api --reason "响应缺
 发现缺字段、类型冲突、错误码不完整或语义不明确时，立即执行上面的 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 consumer，也不能直接改冻结 contract 或 `design.md`，不能用兼容层掩盖冲突；hook 校验下非 owner 跑 `unlock` / `bump` 会被拦，被拦不是错误，报回主线程即可。
 
 契约 bump 后，旧快照立即失效：停止当前实现和验证，不要继续完成旧任务；重新读取契约正文及新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start`、写前 `task check`。没有重新绑定就不得继续写代码。
+
+## 契约预审模式（`mode: contract-review`）
+
+任务标注为契约预审时**只读不写**：只检查契约在前端侧能否落地 —— 字段是否够渲染 UI、类型是否匹配现有组件、分页与错误态是否定义齐全、鉴权与调用时序是否可行。结论按「可实现 / 需修订（附具体条目与依据）」返回。**不落任何代码**，也不写 `task block` / `contract dispute` —— 预审阶段契约尚未锁定，主线程会汇总前后端两侧意见后交给 architect 修订。预审是把返工从「开发中途熔断」提前到零成本时刻，发现的问题越具体，锁定后熔断的概率越低。
 
 ## 收工
 

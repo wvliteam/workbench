@@ -51,6 +51,10 @@ python3 .claude/hooks/wb.py contract dispute --name user-api --reason "响应缺
 
 契约 bump 后，旧快照立即失效：停止当前实现和验证，不要继续完成旧任务；重新读取契约正文及新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start`、写前 `task check`。没有重新绑定就不得继续写代码。
 
+## 契约预审模式（`mode: contract-review`）
+
+任务标注为契约预审时**只读不写**：只检查契约在前端侧能否落地 —— 字段是否够渲染 UI、类型是否匹配现有组件、分页与错误态是否定义齐全、鉴权与调用时序是否可行。结论按「可实现 / 需修订（附具体条目与依据）」返回。**不落任何代码**，也不写 `task block` / `contract dispute` —— 预审阶段契约尚未锁定，主线程会汇总前后端两侧意见后交给 architect 修订。预审是把返工从「开发中途熔断」提前到零成本时刻，发现的问题越具体，锁定后熔断的概率越低。
+
 ## 收工
 
 ```

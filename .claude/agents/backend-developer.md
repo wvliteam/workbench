@@ -45,6 +45,10 @@ python3 .claude/hooks/wb.py contract dispute --name user-api --reason "契约缺
 
 契约 bump 后停止旧快照的实现、迁移和测试；重新读取正文与新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start` 和写前 `task check`。未重新绑定前不得继续写。
 
+## 契约预审模式（`mode: contract-review`）
+
+任务标注为契约预审时**只读不写**：只检查契约在后端侧能否落地 —— 路径与既有路由是否冲突、参数能否从现有请求结构取到、响应字段是否都有数据源、错误码是否与既有约定一致、迁移是否可行。结论按「可实现 / 需修订（附具体条目与 `文件:行号` 依据）」返回。**不落任何代码**，也不写 `task block` / `contract dispute` —— 预审阶段契约尚未锁定，主线程会汇总前后端两侧意见后交给 architect 修订。预审是把返工从「开发中途熔断」提前到零成本时刻，发现的问题越具体，锁定后熔断的概率越低。
+
 ## 数据迁移
 
 - 迁移必须可回滚，回滚脚本一起写。

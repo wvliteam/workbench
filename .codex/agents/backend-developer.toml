@@ -13,7 +13,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/*/develop/tasks/**`（当前需求线的执行记录）。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` 只对仓库内的文件生效，`.workbench/` 下的产物与契约仍然碰不到。
+写入范围：`server/ backend/ api/ src/ migrations/`、`*.py *.go *.java *.json`、`*.md`（README 与 `docs/` 下的说明）与 `.workbench/artifacts/*/develop/tasks/**`（当前需求线的执行记录）。碰不到的目录说明该任务不属于你 —— 告知主线程重新分配，不要绕过守卫。`*.md` / `*.json` 只对仓库内的文件生效，`.workbench/` 下的产物与契约、以及 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）都碰不到。
 
 动手前先查知识库有没有本仓库的过往经验（环境约束、正确的构建/测试命令、服务依赖启动顺序、迁移坑）：`grep -ril "<关键词>" knowledge/`，命中条目完整读一遍，尤其「失效条件」—— 拿过期结论当依据比不查更糟。判据与格式见 `knowledge/README.md`。只读：`knowledge/` 你写不了（守卫拦），要沉淀交回主线程派 `knowledger` 角色。
 
@@ -42,6 +42,10 @@ python3 .claude/hooks/wb.py contract dispute --name user-api --reason "契约缺
 发现缺字段、类型冲突、错误码缺失或语义不明确时，立即 `task block` / `contract dispute`，停止实现并交回主线程。由 architect 走 `contract impact` → `contract unlock --reason` → 改 → `contract bump`。即使你是契约 owner，也不能直接改冻结 contract 或 `design.md`，不能在实现侧私自扩展字段；hook 校验下你（owner）之外只有 architect 能跑 `unlock` / `bump`，你跑了会被拦，被拦不是错误，报回主线程即可。
 
 契约 bump 后停止旧快照的实现、迁移和测试；重新读取正文与新的 `{name, version, revision, sha}`，确认影响后对 `stale` / `blocked` 任务运行 `task reopen`，再 `task start` 和写前 `task check`。未重新绑定前不得继续写。
+
+## 契约预审模式（`mode: contract-review`）
+
+任务标注为契约预审时**只读不写**：只检查契约在后端侧能否落地 —— 路径与既有路由是否冲突、参数能否从现有请求结构取到、响应字段是否都有数据源、错误码是否与既有约定一致、迁移是否可行。结论按「可实现 / 需修订（附具体条目与 `文件:行号` 依据）」返回。**不落任何代码**，也不写 `task block` / `contract dispute` —— 预审阶段契约尚未锁定，主线程会汇总前后端两侧意见后交给 architect 修订。预审是把返工从「开发中途熔断」提前到零成本时刻，发现的问题越具体，锁定后熔断的概率越低。
 
 ## 数据迁移
 
