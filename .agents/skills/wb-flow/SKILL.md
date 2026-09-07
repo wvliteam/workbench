@@ -32,7 +32,7 @@ python3 .claude/hooks/wb.py status
 | design 方案设计 | `architect` | `artifacts/<flow>/design/design.md` + 登记并锁定 `design-doc` + 接口契约 + 任务图 |
 | develop 开发实现 | `frontend-developer` / `backend-developer` | 代码 + 自带校验 |
 | verify 测试验证 | `qa` | `artifacts/<flow>/verify/test-report.md` |
-| retro 总结复盘 | `reviewer` | `artifacts/<flow>/retro/retro.md` + 交付报告 |
+| retro 总结复盘 | `reviewer` + `knowledger` | `artifacts/<flow>/retro/retro.md` + 交付报告 + `knowledge/` 沉淀条目 |
 
 `<flow>` 是当前需求线（`status` 根行显示），并行多需求线见 CLAUDE.md「多条需求并行：flow」。
 
@@ -51,6 +51,8 @@ python3 .claude/hooks/wb.py status
 ### 前四个阶段：单角色顺序执行
 
 clarify / analyze / design 各派一个 subagent，串行。前一个的产物是后一个的输入，并行没有意义。
+
+派发 analyze / design 之前先查知识库：`grep -ril "<关键词>" knowledge/`（或派 `knowledger` 角色），命中的条目**连同依据与失效条件**写进派发 prompt —— 上个需求踩过的坑不必再踩一次。知识库为空时跳过这步。
 
 派发时给足上下文：需求原话、上一阶段产物路径、本次要解决的具体问题。**不要只说「做需求澄清」**。
 
@@ -71,6 +73,14 @@ python3 .claude/hooks/wb.py next --all --json
 每批回来后，把 subagent 报的校验命令**自己跑一遍**，把命令与输出记进 `.workbench/artifacts/<flow>/develop/verification.md`（当前 flow）。用 `Write`：先读出文件现有内容，再连着新的一段一起写回 —— 两个开发角色共用这一份，且这份记录属于编排者；让 subagent 各自写会互相覆盖，shell 追加（`>> .workbench/...`）也被守卫拦。
 
 develop 门禁要求这个文件非空。它是硬规则「subagent 说做完了不等于做完了」的落盘依据 —— 记的是**编排者复核过**的结果，不是 subagent 的自我报告。
+
+### 异常时的执行记录
+
+subagent 只在计划内停止、契约熔断 / stale、范围外发现这三类异常触发点写执行记录，落 `.workbench/artifacts/<flow>/develop/tasks/<任务号>-<角色名>.md`（四行清单：已完成 / 已改 / 阻塞 / 下一步）。所以：
+
+- **一批回来后先 glob `tasks/<任务号>-*.md`**：有文件 = 有 agent 异常收尾，读完再决定 task done 还是打回。
+- **会话 / 进程中断后接续**：`status` 看 doing 任务，`task-agents.jsonl` + `artifacts.jsonl`（hook 自动写）已记录归属与改动清单，`tasks/` 下的执行记录补「为什么停」的叙述；三样合起来定位半成品，再 `task reopen` 重派。
+- 正常完成的任务没有执行记录文件，这不是缺失 —— `verification.md` 与两本账本已覆盖。
 
 ### 并发上限
 
@@ -124,13 +134,12 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 
 ## 收尾
 
-retro 阶段结束后：
+retro 阶段 reviewer 交回后：
 
-```
-python3 .claude/hooks/wb.py report --write
-```
-
-把 reviewer 报上来的「需要沉淀的规则」写进项目 CLAUDE.md 或门禁规则，否则复盘白做。
+1. 把 reviewer 报上来的**沉淀候选清单**派给 `knowledger` 角色落盘（判据、查重、条目格式见 wb-knowledge skill 与 `knowledge/README.md`）。知识角色回报全部不满足判据时，让 reviewer 在 `retro.md` 沉淀章节补「无可沉淀：<理由>」—— retro 门禁查 `knowledge_written`，这条声明是它的合法出口。
+2. `python3 .claude/hooks/wb.py report --write`
+3. 把「需要改进流程」的沉淀落掉：写进项目 CLAUDE.md、门禁规则或角色定义 —— 这些不属于 `knowledge/`，别塞进知识条目。
+4. `gate check` 过了再 `phase advance`；沉淀条目写完就锁进 git，下个需求 analyze/design 派发前记得查。
 
 ## 汇报给用户
 

@@ -18,6 +18,7 @@ wb — 软件开发工作台的状态内核。
 from __future__ import annotations
 
 import argparse
+import datetime
 import fnmatch
 import hashlib
 import json
@@ -59,6 +60,7 @@ ROLES = [
     "backend-developer",
     "qa",
     "reviewer",
+    "knowledger",
 ]
 
 # 争议熔断只拦 developer：pm / analyst / architect / qa / reviewer 不在列。
@@ -108,6 +110,10 @@ GATES = {
         "checks": [
             "artifact_contains:retro.md:改进项",
             "artifact_contains:retro.md:可复用",
+            # 沉淀出口（ROMA 对比第八节 / 落地顺序 9）：沉淀章节必须存在，
+            # 且经验真的落进 knowledge/（或显式声明无可沉淀）。
+            "artifact_contains:retro.md:沉淀",
+            "knowledge_written",
             "tasks_done:*",
         ],
     },
@@ -173,6 +179,10 @@ DEFAULT_ROLE_SCOPES = {
         "*.config.ts", "*.config.js", "*.config.mjs", "pytest.ini", "tox.ini",
     ],
     "reviewer": [".workbench/artifacts/*/retro/**", "docs/**", "*.md"],
+    # 知识库写权限专属（ROMA 对比第八节的沉淀出口）。knowledge/ 在 GUARDED_PREFIXES
+    # 里，别的角色（含持有 *.md 的 reviewer 与开发）写不进 —— 否则沉淀会退化成
+    # 「谁顺手谁写」，查找的人不知道哪条可信。
+    "knowledger": ["knowledge/**"],
 }
 
 # 跨仓库布局下按目录名认领仓库。只用于生成默认范围，认领不到的仓库谁都写不了 ——
@@ -197,8 +207,14 @@ ARTIFACT_LOG = "artifacts.jsonl"
 # 放行 settings.json、`*.md` 放行 agent 定义 —— 实测 backend-developer 能写
 # `.claude/hooks/wb.py`、frontend-developer 能写 `.claude/settings.json`，两者都不在
 # 任何哈希基线里，改完 `contract verify` 也发现不了。防线保护 state，却不保护防线自己。
-# 主线程不受影响（角色为空时这层整段跳过），改工作台本体仍走主线程。
-GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/")
+#
+# `knowledge/` 不是守卫本体，是沉淀知识库（ROMA 对比第八节的沉淀出口）：同样的
+# 前缀收窄解决同一类问题 —— reviewer 与两个开发都持有 `*.md`，裸扩展名跨 `/`，
+# 不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。它的
+# 拒绝话术与守卫本体不同，见 _check_write_target。
+# `references/` 是公共操作规范层（ROMA references 借鉴，见 docs/references-extraction.md）：
+# 性质等同角色定义 —— 规范由主线程维护、角色只读，reviewer 的裸 `*.md` 不收窄就能写它。
+GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/", "knowledge/", "references/")
 
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——
@@ -627,6 +643,7 @@ def default_state(name: str) -> dict:
         "role_scopes": json.loads(json.dumps(DEFAULT_ROLE_SCOPES)),
         "gate_commands": {},  # 例如 {"test": "npm test", "lint": "npm run lint"}
         "gate_timeout": 1800,  # 单条门禁命令的秒数上限，超时记 FAIL
+        "allowed_skills": [],  # subagent 可调的 skill 白名单（`*`=全部）；空=拒全部，只主线程能改
         "log": [],
     }
 
@@ -1201,6 +1218,26 @@ def contract_drift(root: Path, st: dict) -> list[str]:
     return bad
 
 
+def retro_enter_epoch(st: dict):
+    """本 flow 最近一次进入 retro 的时间（epoch 秒），拿不到返回 None。
+
+    knowledge/ 是跨 flow 共享的长期知识库（一个目录好 grep，见 README），所以
+    `knowledge_written` 不能只问「目录里有没有条目」—— 任何历史条目都会让所有后续
+    flow 的门禁白蹭过去，沉淀出口的强制性就没了。用「进入 retro 的时刻」当锚点，
+    只有本轮复盘期间新写/更新的条目才算数。log 里没有进 retro 的记录时返回 None，
+    调用方退回旧行为（不新增拦截），不因锚点缺失把门禁变严。"""
+    anchor = None
+    for e in st.get("log", []):
+        if e.get("event") in ("phase_advance", "phase_set") and e.get("to") == "retro":
+            anchor = e.get("at")
+    if not anchor:
+        return None
+    try:
+        return datetime.datetime.strptime(anchor, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
 def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, str]:
     """执行单条门禁断言，返回 (通过, 标签, 说明)。"""
     kind, _, rest = spec.partition(":")
@@ -1253,6 +1290,34 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         blocked = [t["id"] for t in pool if t["status"] in ("blocked", "stale")]
         label = "无阻塞/失效任务" if rest == "*" else f"{rest} 无阻塞/失效任务"
         return (not blocked), label, "无" if not blocked else f"阻塞/失效：{', '.join(blocked)}"
+
+    if kind == "knowledge_written":
+        # 沉淀出口：knowledge/ 有【本轮复盘写的】条目，或 retro.md 显式声明无可沉淀。
+        # 两个出口都没有 = 复盘学到的经验跟着 artifacts 一起归档了，下个需求重新踩。
+        # knowledge/ 是跨 flow 共享目录，只数「有没有条目」会让任何历史条目替所有后续
+        # flow 白过门禁 —— 按进入 retro 的时刻过滤，只认本轮新写/更新的（mtime >= 锚点）。
+        # 目录不存在按「无条目」处理而不是报错 —— 存量项目第一次跑 retro 门禁时还没有它。
+        kdir = root / "knowledge"
+        all_entries = sorted(p for p in kdir.glob("*.md") if p.name != "README.md") \
+            if kdir.is_dir() else []
+        anchor = retro_enter_epoch(st)
+        # 锚点拿不到（log 无进 retro 记录）退回旧行为：全部条目都算，不因缺锚点变严。
+        entries = [p for p in all_entries
+                   if anchor is None or p.stat().st_mtime >= anchor]
+        label = "经验已沉淀（knowledge/）"
+        if entries:
+            names = ", ".join(p.name for p in entries[:5])
+            if len(entries) > 5:
+                names += f" 等 {len(entries)} 条"
+            return True, label, f"{len(entries)} 条：{names}"
+        p = artifact_path(root, phase, "retro.md")
+        if p.is_file() and "无可沉淀" in p.read_text(encoding="utf-8", errors="replace"):
+            return True, label, "retro.md 显式声明无可沉淀"
+        stale = ("；knowledge/ 里已有 %d 条但都不是本轮写的（跨 flow 历史条目不替本轮过门禁）"
+                 % len(all_entries)) if all_entries else ""
+        return False, label, ("knowledge/ 无本轮沉淀条目。把可复用经验按判据写成条目"
+                              "（判据与格式见 knowledge/README.md，或派 knowledger 角色）；"
+                              "确无可沉淀时在 retro.md 沉淀章节写明「无可沉淀：<理由>」" + stale)
 
     if kind == "cmd":
         cmd = st["gate_commands"].get(rest)
@@ -1386,8 +1451,12 @@ def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
     for role, pats in DEFAULT_ROLE_SCOPES.items():
         mine = [r for r in repos if any(h in r.lower() for h in REPO_HINTS.get(role, ()))]
         extra = [f"repos/{r}/**" for r in mine] or \
-                [f"repos/*/{p}" for p in pats if not p.startswith(".workbench/")]
-        out[role] = [p for p in pats if p.startswith(".workbench/")] + extra
+                [f"repos/*/{p}" for p in pats
+                 if not p.startswith((".workbench/", "knowledge/"))]
+        # knowledge/ 与 .workbench/ 同免改写：知识库挂在工作区根（一个工作区一份），
+        # 改写成 repos/*/knowledge/** 会跟 knowledge_written 门禁检查点错位。
+        out[role] = [p for p in pats
+                     if p.startswith((".workbench/", "knowledge/"))] + extra
     return out
 
 
@@ -1531,6 +1600,12 @@ def cmd_status(args) -> None:
         print(f"契约：{len(st['contracts'])} 份" + (f"，漂移 {len(bad)} 份" if bad else "，一致"))
         for b in bad:
             print(f"  ! {b}")
+    # 知识库要出现在每轮 status 里，否则 analyze/design 派发时没人记得查它
+    kdir = root / "knowledge"
+    if kdir.is_dir():
+        n = len([p for p in kdir.glob("*.md") if p.name != "README.md"])
+        if n:
+            print(f"知识库：{n} 条（knowledge/ —— analyze/design 派发前先检索，判据见 knowledge/README.md）")
     for uname, ureason in read_unlocks(root).items():
         print(f"解冻窗口开启中：{uname} —— {ureason}")
         print(f"  改完必须 `contract bump --name {uname}`，否则窗口悬挂、文档处于无主状态")
@@ -1913,7 +1988,7 @@ def cmd_contract(args) -> None:
     # 只在会写状态的分支上锁。impact 在锁里跑 `git grep` 子进程，大仓库要几秒 ——
     # 而 wb-contract 要求改契约前先跑 impact，此时结束的 subagent 的 SubagentStop
     # 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。
-    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump"))
+    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump", "consumers"))
 
     if args.action == "add":
         p = Path(args.path)
@@ -2178,6 +2253,25 @@ def cmd_contract(args) -> None:
         print("所有 developer 角色的写入已全线停工（执行记录与 /tmp 除外）。")
         print(f"解除：wb.py contract dispute --clear --name {c['name']}")
         print(f"或修订契约后：wb.py contract bump --name {c['name']}")
+        return
+
+    if args.action == "consumers":
+        # 消费方角色随流程演进漂移（新增 knowledger 角色后 knowledge-convention 仍写着旧的
+        # reviewer）。consumers 只驱动 `contract impact` 的通知目标、不进契约正文哈希，
+        # 所以改它不动冻结文件、不走 unlock/bump、也不刷版本号 —— 单独一条元数据修正。
+        # 与 add 一致不校验角色名（bump 通知时会跳过非 ROLES），空串即清空。
+        c = find_contract(st, args.name)
+        if not c:
+            die(f"契约不存在：{args.name}")
+        if args.consumers is None:
+            die("consumers 修正必须带 --consumers '逗号分隔的角色名'（清空传空串）")
+        new = [x.strip() for x in args.consumers.split(",") if x.strip()]
+        old = list(c.get("consumers", []))
+        c["consumers"] = new
+        log(st, "contract_consumers", name=c["name"],
+            **{"from": ",".join(old), "to": ",".join(new)})
+        save_state(root, st)
+        print(f"{c['name']} 消费方：{','.join(old) or '-'} -> {','.join(new) or '-'}")
         return
 
 
@@ -2745,7 +2839,12 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
         globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
     if not any(fnmatch.fnmatch(rel, g) for g in globs):
         extra = ""
-        if guarded and guarded != ".workbench/":
+        if guarded == "knowledge/":
+            extra = ("（knowledge/ 是跨 flow 的长期知识库，只有 knowledger 角色可写。"
+                     "沉淀或查找用 wb-knowledge skill，或交回主线程派 knowledger 角色。）")
+        elif guarded == "references/":
+            extra = ("（references/ 是公共操作规范，任何角色只读。要改规范交回主线程。）")
+        elif guarded and guarded != ".workbench/":
             extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
                      f"要改它交回主线程，别给角色开范围。）")
         hook_deny(
@@ -2849,10 +2948,11 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
         elif sub_cmd == "contract" and action == "dispute" and "--clear" in flags:
             out.append(f"角色 {role} 不能跑 `contract dispute --clear`：解除争议熔断是"
                        f"编排者决策。{hint}")
-        elif sub_cmd == "contract" and action in ("unlock", "bump"):
-            # 冻结层的拒绝信息按 owner 分岔提示「不要自己申报解冻」，但 unlock / bump
-            # 本身不校验 owner —— 实测 backend-developer 能解冻、改写并重新基线化
-            # architect 的契约，事后 contract verify 干净。这里补成硬拦。
+        elif sub_cmd == "contract" and action in ("unlock", "bump", "consumers"):
+            # 冻结层的拒绝信息按 owner 分岔提示「不要自己申报解冻」，但 unlock / bump /
+            # consumers 本身不校验 owner —— 实测 backend-developer 能解冻、改写并重新基线化
+            # architect 的契约，事后 contract verify 干净。consumers 改的是通知目标，同样
+            # 该由 owner 定。这里补成硬拦。
             name = _flag_value(args, "--name")
             owner = _contract_owner(root, name)
             if owner is None:
@@ -2861,9 +2961,10 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
                     f"{name or '(缺)'} 查不到，无法核对 owner。先 `contract list` 看"
                     f"实名。{hint}")
             elif owner != role and role != CONTRACT_STEWARD:
+                tail = "别自己申报解冻。" if action in ("unlock", "bump") else "别自己改消费方。"
                 out.append(
                     f"角色 {role} 不能 `contract {action} --name {name}`：这份契约的"
-                    f" owner 是 {owner}。要改它把需求报给 {owner}，别自己申报解冻。{hint}")
+                    f" owner 是 {owner}。要改它把需求报给 {owner}，{tail}{hint}")
     return out
 
 
@@ -2908,11 +3009,47 @@ def _is_task_start(cmd: str, task_id: str) -> bool:
     return False
 
 
+def load_allowed_skills(root: Path) -> list[str]:
+    """审核过、允许 subagent 调用的 skill 名单（`*` = 全部放行）。
+
+    `config set` 在 privileged_wb_calls 里对角色一律拦，所以这个键只有主线程
+    能写 —— 「哪些 skill 能用」是编排者的审核决定。缺键/空表 = 一个都不放行：
+    subagent 拿到 Skill 工具但默认调不动，要用先审核。
+    """
+    sp = state_path(root)
+    if not sp.is_file():
+        return []
+    try:
+        v = json.loads(sp.read_text(encoding="utf-8")).get("allowed_skills")
+    except (OSError, json.JSONDecodeError):
+        return []
+    return v if isinstance(v, list) else []
+
+
 def hook_pre_tool(data: dict) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input") or {}
     cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
+
+    # --- Skill 审核 ---
+    # Skill 工具不属于 WRITE/SHELL/READ，本会落到末尾放行分支；这里先截。
+    # 非主线程调用者（有 agent_id 或 agent_type —— 角色、general-purpose、Explore、
+    # 老版本 UNKNOWN 全算）只能调审核过的 skill；主线程（两者都无）是审核者，不限。
+    # 门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来，那条
+    # spawn 出的 worker 顶 general-purpose 身份降级越权的路子也就无从触发。
+    if tool == "Skill":
+        if data.get("agent_id") or data.get("agent_type"):
+            name = (ti.get("skill") or "").strip()
+            allowed = load_allowed_skills(root)
+            if "*" not in allowed and name not in allowed:
+                hook_deny(
+                    f"skill `{name or '(缺名)'}` 不在工作台审核白名单内，subagent 不能调。"
+                    f"已审核：{', '.join(allowed) or '（空）'}。批准由主线程跑 "
+                    f"`wb.py config set allowed_skills '[\"{name}\"]'`（整表覆盖，"
+                    f"已有的一起写上；config set 只有主线程能跑）。`[\"*\"]`=全放行，"
+                    f"仅在已审阅所有已装 skill 时用。")
+        return
 
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
@@ -3614,6 +3751,25 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 2, "前端越权写迁移未被拦"
 
+        # Skill 审核：subagent 只能调白名单内的 skill，主线程是审核者不受限
+        quiet("config", "set", "allowed_skills", '["wb-flow"]')
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
+                      "agent_id": "be-1", "tool_input": {"skill": "evil-skill"}}) == 2, \
+            "未审核 skill 未被拦"
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
+                      "agent_id": "be-1", "tool_input": {"skill": "wb-flow"}}) == 0, \
+            "已审核 skill 被误拦"
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "general-purpose",
+                      "agent_id": "gp-1", "tool_input": {"skill": "evil-skill"}}) == 2, \
+            "非角色 subagent（general-purpose 身份降级）也应受审核约束"
+        assert guard({"tool_name": "Skill", "cwd": cw,
+                      "tool_input": {"skill": "evil-skill"}}) == 0, \
+            "主线程（无 agent_id/agent_type）是审核者，调 skill 不受白名单限制"
+        quiet("config", "set", "allowed_skills", '["*"]')
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "qa", "agent_id": "qa-1",
+                      "tool_input": {"skill": "anything"}}) == 0, "`*` 应放行全部 skill"
+        quiet("config", "set", "allowed_skills", "[]")
+
         # 并行 develop：角色按载荷的 agent_type 判定，不看那个被互相覆盖的单文件。
         # role 文件此刻是 frontend-developer —— 相当于后启动的前端 subagent 刚 role set 过。
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
@@ -3930,6 +4086,12 @@ def cmd_selfcheck(args) -> None:
             "qa 在跨仓库布局下配不了测试框架"
         assert allowed("repos/backend/tests/test_api.py", "qa")
         assert not allowed("repos/backend/src/app.py", "qa"), "qa 仍然不该碰产品代码"
+        # 知识库挂工作区根，与 .workbench/ 同免仓库前缀改写 —— 改写成
+        # repos/*/knowledge/** 会跟 knowledge_written 门禁的检查点（根 knowledge/）错位
+        assert rs["knowledger"] == ["knowledge/**"], \
+            f"knowledger 范围被跨仓库改写：{rs['knowledger']}"
+        assert allowed("knowledge/x.md", "knowledger")
+        assert not allowed("docs/x.md", "knowledger"), "knowledger 角色不该能写 docs/"
         # 认领靠目录名。认不出的仓库落在所有角色范围外 —— 是硬拦不是跨仓库放行，
         # 所以必须点名，否则要到 develop 阶段才撞成一次权限拒绝
         assert not allowed("repos/shared/src/x.py", "backend-developer"), \
@@ -4301,6 +4463,32 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": "README.md"}}) == 0, \
             "后端写 README 被误拦"
 
+        # --- 知识库写权限专属 knowledger 角色 ---
+        # *.md 裸扩展名跨 /，reviewer 与两个开发都持有它；knowledge/ 进
+        # GUARDED_PREFIXES 后只认显式 knowledge/ 前缀，否则沉淀谁顺手谁写，
+        # 查找的人无从判断哪条可信。
+        for role in ("reviewer", "frontend-developer", "backend-developer", "qa"):
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
+                          "tool_input": {"file_path": "knowledge/entry.md"}}) == 2, \
+                f"{role} 的裸 *.md 范围跨进了 knowledge/"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "echo x > knowledge/entry.md"}}) == 2, \
+                f"{role} 能用 shell 写知识库"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "knowledger",
+                      "tool_input": {"file_path": "knowledge/entry.md"}}) == 0, \
+            "knowledger 角色写自己的知识库被误拦"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "knowledger",
+                      "tool_input": {"file_path": "docs/adr.md"}}) == 2, \
+            "knowledger 角色不该能写 docs/"
+
+        # --- references/ 公共规范层只读 ---
+        # 与 knowledge/ 同型：reviewer 持裸 *.md，不收窄就能改全体角色必读的
+        # output-contract.md（docs/references-extraction.md 实现细节三）。
+        for role in ("reviewer", "knowledger", "backend-developer"):
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
+                          "tool_input": {"file_path": "references/output-contract.md"}}) == 2, \
+                f"{role} 的裸 *.md 范围跨进了 references/"
+
         # --- phase set 必须申报理由 ---
         # set 不跑门禁。无理由放行就等于给「门禁不通过不推进」开了一条不留痕的旁路。
         code, out = quiet("phase", "set", "retro")
@@ -4371,6 +4559,26 @@ def cmd_selfcheck(args) -> None:
                 assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
                               "tool_input": {"command": cmd_txt}}) == 2, \
                     f"非 owner {role} 能 contract {act}"
+        # contract consumers 改的是 impact 通知目标，同样按 owner 硬拦
+        for role in ("qa", "pm", "reviewer"):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command":
+                                         "python3 .claude/hooks/wb.py contract consumers "
+                                         "--name user-api --consumers pm"}}) == 2, \
+                f"非 owner {role} 能改 contract consumers"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command":
+                                     "python3 .claude/hooks/wb.py contract consumers "
+                                     "--name user-api --consumers qa"}}) == 0, \
+            "owner 改自己契约的消费方被误拦"
+        # 功能：owner 经 CLI 改消费方后落地 state；改完恢复，不影响后续断言
+        cons_before = find_contract(load_state(tmp), "user-api")["consumers"]
+        code, out = quiet("contract", "consumers", "--name", "user-api",
+                          "--consumers", "qa,pm")
+        assert code == 0 and \
+            find_contract(load_state(tmp), "user-api")["consumers"] == ["qa", "pm"], out
+        quiet("contract", "consumers", "--name", "user-api",
+              "--consumers", ",".join(cons_before))
         assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"command":
                                      "python3 .claude/hooks/wb.py contract unlock "
@@ -4451,6 +4659,50 @@ def cmd_selfcheck(args) -> None:
         code, out = quiet("report")
         assert "交付报告" in out and "user-api" in out
         assert "功能取消" in out, "报告里看不出任务是干完的还是跳过的"
+
+        # --- 沉淀出口：retro 门禁的 knowledge_written（ROMA 对比第八节）---
+        # 门禁失效是静默的：缺沉淀 FAIL / 本轮新条目 PASS / 显式声明 PASS，外加
+        # 跨 flow 白蹭（历史条目不替本轮过门禁）。只断言 knowledge_written 那一行。
+        # 先单测锚点解析：无进 retro 记录退回旧行为（None），有则解析出 epoch。
+        assert retro_enter_epoch({"log": []}) is None, \
+            "无进 retro 记录应返回 None（knowledge_written 退回旧行为）"
+        assert retro_enter_epoch({"log": [{"event": "phase_advance", "to": "retro",
+            "at": "2026-01-01T00:00:00+0800"}]}) is not None, \
+            "进 retro 的 log 应解析出锚点"
+        artifact_path(tmp, "retro", "retro.md").write_text(
+            "# 复盘\n## 改进项\n- a\n## 可复用\n- b\n## 沉淀\n- 候选\n", encoding="utf-8")
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is False and "无可沉淀" in kw[0][2], \
+            f"无沉淀时 knowledge_written 应 FAIL 且说明可操作：{kw}"
+        # 跨 flow 白蹭：mtime 早于「进入 retro」的历史条目必须仍判 FAIL。selfcheck
+        # 前面 phase set retro 已在 log 留下锚点（下方断言兜底），backdate 一条旧条目。
+        anchor = retro_enter_epoch(load_state(tmp))
+        assert anchor is not None, "selfcheck 此处应已有进入 retro 的 log 锚点"
+        (tmp / "knowledge").mkdir(exist_ok=True)
+        old_entry = tmp / "knowledge" / "old-flow-leftover.md"
+        old_entry.write_text("# 上一条 flow 的沉淀\n## 依据\nx\n", encoding="utf-8")
+        os.utime(old_entry, (anchor - 3600, anchor - 3600))
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is False and "不是本轮写的" in kw[0][2], \
+            f"历史条目不该替本轮复盘白过门禁：{kw}"
+        old_entry.unlink()
+        (tmp / "knowledge").mkdir(exist_ok=True)
+        (tmp / "knowledge" / "test-needs-docker-first.md").write_text(
+            "# 跑测试前先起 docker\n## 依据\n实测\n## 适用范围\n本仓库\n"
+            "## 失效条件\nci 改造后\n## 来源\nselfcheck\n", encoding="utf-8")
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is True and "test-needs-docker-first" in kw[0][2], \
+            f"有条目时 knowledge_written 应 PASS：{kw}"
+        (tmp / "knowledge" / "test-needs-docker-first.md").unlink()
+        artifact_path(tmp, "retro", "retro.md").write_text(
+            "# 复盘\n## 改进项\n- a\n## 可复用\n- b\n"
+            "## 沉淀\n无可沉淀：纯文档改动没有可复用约束\n", encoding="utf-8")
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is True, f"显式声明无可沉淀后应 PASS：{kw}"
 
         # --- flow（需求线）隔离 ---
         # 一条流水线一个 flow：state / 锁 / 产物互不覆盖；守卫读全部 flow 的并集。
@@ -4711,7 +4963,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("contract", help="契约登记 / 锁定 / 漂移校验 / 申报变更 / 争议熔断")
     p.add_argument("action",
                    choices=["add", "list", "lock", "unlock", "verify", "bump", "impact",
-                            "dispute"])
+                            "dispute", "consumers"])
     p.add_argument("path", nargs="?")
     p.add_argument("--name")
     p.add_argument("--owner", choices=ROLES)

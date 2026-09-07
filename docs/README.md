@@ -7,7 +7,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](architecture.md) | 分层、状态模型、单仓库/跨仓库两种拓扑、数据流、设计取舍、已知边界与升级路径 |
-| [roles.md](roles.md) | 七个角色的矩阵与写入范围、协作协议、交接格式、定制与新增 |
+| [roles.md](roles.md) | 八个角色的矩阵与写入范围、协作协议、交接格式、定制与新增 |
 | [gates.md](gates.md) | 门禁引擎：八种断言的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
 | [contracts.md](contracts.md) | 契约机制：哈希冻结 + 只读守卫、申报窗口、生命周期、`bump` 的影响面传播、失效模式 |
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、wb.py 特权子命令层、危险命令分级、hook 载荷与失败语义 |
@@ -18,7 +18,8 @@
 | [wb-init.md](wb-init.md) | 多仓库初始化 skill（2026-09-07）：需求与 ROMA 参照物（`materialize_repo_selection.py`）、清单/落点/合并策略等设计取舍、测试矩阵与已知边界 |
 | [wbsvr.md](wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
 | [codex-agent-migration.md](codex-agent-migration.md) | 迁移到 Codex 的适配层：工具名与载荷键的差异、输出协议差异。**配置层与守卫内核均已落地** —— `WRITE_TOOL`/`SHELL_TOOL` 覆盖 Codex 工具名、`apply_patch` 目标解析、`--format codex` 驱动 `SubagentStop` JSON 输出 |
-| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序。**第 1、2、3、5、6、10 节已落地，第 4、8、9 节仍是提案，第七节结论是不做** |
+| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序。**第 1–6、8、10 节已落地，第 9 节仍是提案，第七节结论是不做** |
+| [references-extraction.md](references-extraction.md) | ROMA `references/` 公共参考层的分析（2026-09-07）与落地记录：输出信封抽成 `references/output-contract.md`、16 份角色定义插必读指针与双保险底线、`references/` 进守卫前缀 |
 
 `review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
 
@@ -29,7 +30,7 @@
 ```
 需求澄清 → 现状分析 → 方案设计 → 开发实现 → 测试验证 → 总结复盘
 clarify    analyze    design     develop    verify     retro
-  pm       analyst   architect   fe/be dev    qa       reviewer
+  pm       analyst   architect   fe/be dev    qa       reviewer → knowledger
 ```
 
 三个机制让流程有约束力，而不只是提示词里的提醒：

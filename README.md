@@ -8,19 +8,23 @@
 .claude/
 ├── settings.json           权限规则 + 4 个 hook 注册
 ├── hooks/wb.py             状态内核：状态机 / 门禁 / 契约 / 调度 / 权限守卫（含自检）
-├── agents/                 7 个角色 subagent
+├── agents/                 8 个角色 subagent
 │   ├── pm.md                   需求澄清
 │   ├── analyst.md              现状分析（只读）
 │   ├── architect.md            方案设计 + 契约定义 + 任务拆解
 │   ├── frontend-developer.md
 │   ├── backend-developer.md
 │   ├── qa.md                   测试验证
-│   └── reviewer.md             代码评审 + 复盘
+│   ├── reviewer.md             代码评审 + 复盘
+│   └── knowledger.md           知识沉淀 + 检索（只写 knowledge/）
 └── skills/
     ├── wb-flow/                主编排：全链路推进
     ├── wb-loop/                自动排空循环
     ├── wb-init/                多仓库初始化：按清单 clone + workspace 文件
-    └── wb-contract/            契约生命周期
+    ├── wb-contract/            契约生命周期
+    └── wb-knowledge/           知识沉淀与查找（knowledge/）
+
+knowledge/                  跨 flow 的长期经验库（一经验一文件，判据见其 README）
 
 .workbench/                 全部状态，纯 JSON，可 git diff
 ├── state.json                  旧布局的 state（新布局在 flows/<flow>/state.json）

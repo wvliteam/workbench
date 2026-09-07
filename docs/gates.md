@@ -26,11 +26,11 @@
 | design | `design.md` | `方案对比` | `contracts_locked` `tasks_exist` `no_blocked:*` | `design-doc` —— architect 自己登记 |
 | develop | `verification.md` | — | `contracts_intact` `tasks_done:develop` `cmd:lint` `cmd:build` | 不冻结 |
 | verify | `test-report.md` | — | `contracts_intact` `tasks_done:verify` `cmd:test` | `artifact-test-report`（owner `qa`） |
-| retro | `retro.md` | `改进项` | `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
+| retro | `retro.md` | `改进项`、`沉淀` | `knowledge_written` `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
 
 产物路径与章节是**阶段间的接口** —— 下游 subagent 按固定路径读上游产物，所以它们硬编码在表里而不是配置项。
 
-## 八种断言
+## 九种断言
 
 | 断言 | 语法 | 通过条件 | 用意 |
 | --- | --- | --- | --- |
@@ -42,6 +42,7 @@
 | 任务完成 | `tasks_done:<阶段>` 或 `tasks_done:*` | 该范围内任务全部 `done` | 活干完了 |
 | 无阻塞 | `no_blocked:<阶段>` 或 `no_blocked:*` | 该范围内无 `blocked` 任务 | 阻塞项被处理而非绕过 |
 | 命令门禁 | `cmd:<键>` | `gate_commands[键]` 退出码 0 | 测试/构建/lint 真的通过 |
+| 经验已沉淀 | `knowledge_written` | `knowledge/` 有非 README 条目，或 `retro.md` 显式写「无可沉淀」 | 复盘学到的经验落进跨 flow 的知识库，而不是跟着 artifacts 归档 |
 
 ### 实现要点
 
@@ -54,6 +55,8 @@
 **`contracts_intact` 与权限守卫不是重复。** 守卫在改之前拦，能给出可操作的拒绝理由；这条断言在门禁时抓，不管改动从哪来（[architecture.md](architecture.md#冻结防线覆盖不到的写入路径)）。
 
 **`tasks_done:<阶段>` 在该阶段无任务时判 PASS**（说明「无任务（视为通过）」）。避免 develop 阶段没有前端任务时被自己卡住。
+
+**`knowledge_written` 有两个出口，是刻意的。** 只查「`knowledge/` 非空」会逼着确无可沉淀的项目造假条目 —— 假条目比没有条目更毒，查找的人会把没验证过的结论当实测经验。所以显式声明「无可沉淀：<理由>」（写在 retro.md 沉淀节）是合法出口。判据与条目格式在 `knowledge/README.md`（冻结契约 `knowledge-convention`），落盘归 `knowledger` 角色（写权限专属，`knowledge/` 在 `GUARDED_PREFIXES` 里），见 [roles.md](roles.md#角色矩阵)。条目本身不冻结 —— 知识是活文档，后续 flow 修订时写清原记录错在哪里即可；被冻结的只有 schema 本身。
 
 **`no_blocked` 用 `*` 而不是 `design`。** design 阶段产出的任务图里任务的 `phase` 基本都是 `develop`，design 自己通常没有任务 —— 只看本阶段这条断言近乎恒真，门禁列表看着 4 条实际生效 3 条。改成看全部任务后，架构师留下的任何阻塞项都拦得住。
 
@@ -155,4 +158,4 @@ if kind == "adr_exists":
 
 **加一个阶段**：改 `PHASES` 与 `PHASE_CN`，在 `GATES` 加条目，建 `artifacts/<新阶段>/`，写一个角色 agent，在 `wb-flow` 的阶段-角色表加一行。`PHASES` 的顺序决定推进顺序与 `next` 的排序权重。已初始化的项目改 `PHASES` 后老 `state.json` 的 `phases` 不会自动更新（`setdefault` 只补缺失字段），用 `config set phases '[...]'` 手动改。
 
-**每次改完跑 `selfcheck`。** 门禁失效是**静默的** —— 规则写错不会报错，只会让门禁永远 PASS。自检里有「缺产物时门禁应失败」「产物齐全后门禁应通过」两条对偶断言专门抓这个，新增断言类型时给它补一对。
+**每次改完跑 `selfcheck`。** 门禁失效是**静默的** —— 规则写错不会报错，只会让门禁永远 PASS。自检里有「缺产物时门禁应失败」「产物齐全后门禁应通过」两条对偶断言专门抓这个，新增断言类型时给它补一对（`knowledge_written` 有三条：缺沉淀 FAIL / 有条目 PASS / 显式声明 PASS）。

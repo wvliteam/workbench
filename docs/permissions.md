@@ -94,7 +94,7 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 **角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/`）。范围里没有以该前缀打头的模式，就是谁都不能写。
+**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。范围里没有以该前缀打头的模式，就是谁都不能写。
 
 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/main/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
@@ -103,6 +103,8 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 **另外三个前缀装的是守卫自己**：`.claude/hooks/wb.py` 是权限引擎，`.claude/settings.json` 是 hook 注册表，`.claude/agents/*.md` 是角色定义，`.codex/` `.agents/` 是 Codex 端的同一套。同样因为 `*` 跨 `/`，收窄之前 `*.py` 放行任意目录下的 `.py`、`*.json` 放行 `settings.json`、`*.md` 放行 agent 定义 —— 实测 `backend-developer` 能写 `.claude/hooks/wb.py`、`frontend-developer` 能写 `.claude/settings.json`。这些文件都不在任何哈希基线里，`contract verify` 也发现不了：**防线保护 state，却不保护防线自己。** 拒绝信息在这三个前缀上多打一句「要改它交回主线程，别给角色开范围」。主线程不受影响 —— 角色取不到时本层整段跳过，改工作台本体仍走主线程。
 
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
+
+**最后两个前缀是只读资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 是公共操作规范（输出信封等，任何角色只读，全体角色 prompt 里的「必读」都指向它 —— 不收窄的话 reviewer 与开发的裸 `*.md` 就能改全体角色的必读文档，性质等同改角色定义）。设计依据见 [references-extraction.md](references-extraction.md)。
 
 各角色的默认范围见 [roles.md](roles.md#角色矩阵)。这里只记它的形状：**产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这是第二层之外的纵深 —— 契约冻结挡「已定稿的东西被改」，阶段隔离挡「下游角色去改上游产物」，包括还没定稿的当前阶段产物。两者独立互补：`qa` 改 `design.md` 会被两层各自拦一次；阶段隔离只在守卫能判出角色时生效，冻结不依赖角色。
 
@@ -113,7 +115,7 @@ wb.py role scopes            # 看当前配置 + 冻结清单 + 解冻窗口
 wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES（会覆盖定制过的范围，先存一份）
                              # 跨仓库布局下改按仓库前缀算 —— 只写裸默认值会把隔离改坏
 wb.py config set role_scopes.backend-developer \
-    '["server/**","migrations/**","internal/**",".workbench/artifacts/*/develop/**"]'
+    '["server/**","migrations/**","internal/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
 **跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
@@ -128,7 +130,7 @@ wb.py config set role_scopes.backend-developer \
 
 三段：拒绝了什么、允许什么、怎么正确地做。只说「拒绝」会让 subagent 反复试同一件事。
 
-「允许什么」那段打的是**对这个路径实际生效的**模式集合，所以撞上 `.workbench/` 收窄时它只列 `.workbench/artifacts/*/develop/**` 一条，而不是把二十个模式全倒出来让读的人自己排除。
+「允许什么」那段打的是**对这个路径实际生效的**模式集合，所以撞上 `.workbench/` 收窄时它只列 `.workbench/artifacts/*/develop/tasks/**` 一条，而不是把二十个模式全倒出来让读的人自己排除。
 
 **冻结文件的第三段按 owner 分岔。** 契约名从 `state.json` 反查填实，不给 `<契约名>` 占位符 —— 只有 `pm` 的定义里硬编码了 `artifact-requirements`，其余角色撞上自己那份阶段产物时只能猜，而「不许换等价写法绕」这条要求拒绝信息把该跑的命令给全。分岔的三种：
 

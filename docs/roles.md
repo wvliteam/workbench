@@ -1,6 +1,6 @@
 # 角色设计
 
-七个角色 subagent，每个对应一个阶段（develop 阶段两个，reviewer 兼代码评审）。
+八个角色 subagent（develop 阶段两个，reviewer 兼代码评审，knowledger 兼沉淀与检索）。
 
 ## 为什么按角色划分而不按任务类型
 
@@ -21,10 +21,11 @@
 | `pm` | clarify | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
 | `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` | `artifacts/*/analyze/**` | sonnet |
 | `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` / `docs/**` | opus |
-| `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者） | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/**` | sonnet |
-| `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者） | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/**` | sonnet |
+| `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
+| `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
 | `qa` | verify | `artifacts/<flow>/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
 | `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` / `docs/**` / `*.md` | opus |
+| `knowledger` | retro 沉淀 + 随时检索 | `knowledge/` 下的经验条目 | `knowledge/**` | sonnet |
 
 **模型分配**：`architect` 与 `reviewer` 用 opus —— 方案取舍与复盘归因是判断密度最高的两件事，做错的成本由后面所有阶段承担。其余用 sonnet。
 
@@ -36,7 +37,7 @@
 | `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini` | `qa` | 测试框架配置按约定放仓库根，而 qa 原本只有四个测试**目录** —— 配 e2e 第一步就走不通。两族要一起给，否则 qa 配得了 vitest 配不了 pytest。`pyproject.toml` / `setup.cfg` 故意不给：那两个同时装着依赖与打包配置，不是测试专属文件 |
 | `components/ pages/ lib/ styles/` 与 `.js` `.jsx` `.vue` `.html` `.scss` | `frontend-developer` | 原列表默认了「源码在 `src/` 或 `web/` 下且用 TypeScript」，Next.js / Nuxt / Vite 的标准布局全在范围外 |
 
-放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。
+放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。`knowledge/` 是第四处：reviewer 与两个开发都持有 `*.md`，不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。`references/` 是第五处：公共操作规范（全体角色必读的输出信封），任何角色只读 —— 改规范等于改角色定义，交回主线程。
 
 **产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这挡的是下游角色去改上游产物 —— `qa` 发现需求写得不清楚，顺手把 `requirements.md` 改成自己理解的样子，之后就没人知道原始需求是什么了。改上游产物要走上游角色，或者报回主线程。
 
@@ -44,13 +45,14 @@
 
 ## 三个不许动手的角色
 
-`analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。这不是疏忽：
+`analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。这不是疏忽：
 
 | 角色 | 为什么不许改代码 |
 | --- | --- |
 | `analyst` | 分析阶段动手改代码是最常见的流程破坏 —— 边看边改会跳过方案设计，改完也没人评审 |
 | `qa` | 自己顺手改会让缺陷统计失真，也绕过了开发的自检责任。缺陷要打回成任务 |
 | `reviewer` | 评审者改代码就没人评审那次改动了 |
+| `knowledger` | 知识条目是它唯一的产出。让它顺手改别的，沉淀就从「专职判断」退化成「谁顺手谁写」，查找的人无从判断哪条可信 |
 
 `qa` 能写 `tests/` 与测试框架配置（`*.config.ts` / `pytest.ini` 之类）—— 搭测试与补测试是它的职责，改产品代码不是。`reviewer` 能写 `docs/**` 与 `*.md` 是同一个道理：落 ADR、补说明属于评审产出，动代码不属于。
 
@@ -91,7 +93,10 @@ pm ──requirements.md──> analyst ──current-state.md──> architect
               └──── be-dev ────┘
                             │
                             ▼
-                           qa ──test-report.md──> reviewer
+                           qa ──test-report.md──> reviewer ──沉淀候选──> knowledger
+                                                                    │
+                                                                    ▼
+                                                             knowledge/ 条目（跨 flow 存活）
 ```
 
 每个下游 agent 的定义里明确写了要读哪些上游产物的**具体路径**。`analyst` 的定义甚至规定：
@@ -147,12 +152,12 @@ wb.py role scopes            # 看当前配置 + 冻结清单 + 解冻窗口
 wb.py role scopes --reset    # 刷成 DEFAULT_ROLE_SCOPES（会覆盖定制，先存一份）
                              # 跨仓库布局下按仓库前缀重算，不是裸默认值
 wb.py config set role_scopes.backend-developer \
-    '["server/**","internal/**","migrations/**",".workbench/artifacts/*/develop/**"]'
+    '["server/**","internal/**","migrations/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
 单体项目里 `frontend-developer` 与 `backend-developer` 的默认范围都含 `src/**`，实际上不隔离。按真实目录改掉。跨仓库工作区的默认范围会歪成按语言隔离，必须改成按仓库前缀 —— 原因见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
 
-改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/*/develop/**"`, `".workbench/artifacts/*/verify/**"`）。
+改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/*/develop/tasks/**"`, `".workbench/artifacts/*/verify/**"`）。
 
 ### 加一个角色
 
