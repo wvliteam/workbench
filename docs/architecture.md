@@ -120,39 +120,37 @@ wb.py role scopes --reset    # 刷成当前默认值，顺带重写冻结清单�
 
 ## 状态归属：一个工作区多个仓库
 
-`find_root()` 向上查找最近的 `.workbench/`，这一条语义支撑了两种相反的拓扑，取决于 `.workbench/` 放在哪一层 —— 没有模式开关，没有配置项。这是这个设计的主要收益。操作步骤见 [CLAUDE.md](../CLAUDE.md)，这里记它为什么成立与代价在哪。
+`find_root()` 向上查找最近的 `.workbench/`，这一条语义决定「项目根」是哪一层 —— 没有模式开关，没有配置项。它曾同时支撑两种相反的拓扑（每仓库一份 / 只在外层一份）；2026-09-08 收敛为**唯一布局：外层根一份状态，各仓库里都不 init**。收敛理由：每仓库一份的「忘了 `cd` 进仓库就静默改到外层状态」是持续的误操作面，且遇到跨仓库需求要整体迁移；外层一份的两处必调（见下）是一次性成本，跨仓库需求天然支持。操作步骤见 [CLAUDE.md](../CLAUDE.md)，这里记它为什么成立与代价在哪。
 
-### 每仓库一份状态（默认）
+### 唯一布局：外层一份状态
 
 ```
 workbench/
-├── .claude/            # 工作台本体，唯一一份，用 $CLAUDE_PROJECT_DIR 定位
-├── .workbench/         # 工作台自身的状态
-└── repos/foo/.workbench/   # foo 的状态，在 repos/foo 下操作时命中这一份
+├── .claude/            # 工作台本体，唯一一份
+├── .workbench/         # 唯一的状态、契约、流水线（init 就 init 在这里）
+├── repos/foo/          # 纯代码目录，不 init；在里面跑命令状态归属外层
+└── scripts/            # 工作区级公共脚本（repos_apply.py / repos_tui.py）
 ```
 
-四件事让它成立，都不需要额外代码：
+三件事让它成立，都不需要额外代码：
 
 | 机制 | 效果 |
 | --- | --- |
-| `find_root()` 向上查找 | 在 `repos/foo/server/` 里跑命令，状态归属 `repos/foo` |
-| hook 用 `$CLAUDE_PROJECT_DIR` 绝对路径注册 | cwd 在任意子目录都能触发，不依赖相对路径 |
-| `cmd_init` 用 `Path.cwd()`（不是 `find_root()`） | 在子目录 init 会建自己的 `.workbench/`，不会误改外层 |
-| 守卫第一层按 `find_root(cwd)` 算项目根 | `repos/foo` 的角色写不到 `repos/bar`，也写不到外层 `docs/` |
+| `find_root()` 向上查找 | 在任意仓库子目录里跑命令，状态归属外层根 |
+| hook 用绝对路径注册（Claude 端 `$CLAUDE_PROJECT_DIR`，跨端 `WB_ROOT`） | cwd 在任意子目录都能触发，不依赖相对路径 |
+| 守卫第一层按 `find_root(cwd)` 算项目根 | 外层的角色范围（`repos/**` 前缀）管全部仓库 |
 
-角色范围的 glob 相对各仓库根，所以 `server/**`、`web/**` 不用改；`gate_commands` 的执行 cwd 就是仓库根，`npm test` 直接对。
+`cmd_init` 以 `Path.cwd()` 为准（不走 `find_root()`）：在 `repos/foo` 里误跑 init 会建出第二份 `.workbench/` —— 唯一布局下这是误操作入口，`nested_roots()` 反查（见下）拦它的冻结文件，文档教人别在仓库里 init。
 
-**代价：忘了 `cd` 进仓库就跑命令会操作到外层状态，且不报错**（外层已初始化，`load_state` 不会 die）。缓解是 `status` 与 `SessionStart` 都打一行根路径。没做成硬约束，因为「哪一份才是你要的」只有用户知道。
+**代价：子目录里跑命令影响的是整个工作区**，不是「只影响当前仓库」—— 从旧布局迁移的人会误以为状态按仓库隔离。缓解是 `status` 与 `SessionStart` 都打一行根路径，看到外层根就是对的。
 
 同一仓库的第二个需求：`report --write` 归档后 `init --force` 重开（串行），`flow new` 开一条新需求线（并行，状态、锁、门禁记录、产物按 flow 隔离在 `flows/<flow>/` 与 `artifacts/<flow>/`），代码也要物理隔离时叠加 `git worktree`。早期版本一份 `state.json` 只能一条流水线，当时认为多流程实例要在每个命令上加 `--flow` 选择器、worktree 已经免费解决；现在实现的是指针方案：CLI 按 `.workbench/current-flow` 指针定位单条 flow，守卫读全部 flow 的并集（A flow 锁的契约在 B flow 视角照样冻结），`load_state` 时以 `st["_flow"]` 定点写回目标，命令中途切指针不会把 A flow 的状态写进 B flow 的文件。选择器方案被否掉的原因不变：每命令一个 flag 是全量接口翻新，而指针只动两处（读与写），角色范围用 `artifacts/*/<phase>/**` 通配就跨 flow 复用。
 
-### 跨仓库：同一个语义的反面
+### 多仓库工作区的两处必调（不调是静默出错）
 
-上面那个布局让仓库互相隔离，这既是它的价值也是它挡住跨仓库需求的原因：守卫按 `find_root(cwd)` 算根，`repos/foo` 的角色写不到 `repos/bar`，而且两份 `state.json` 不共享契约列表。所以一个需求要同时改两个仓库时**只在外层 init，各仓库都不 init** —— 项目根 = 整个工作区，一份契约一条流水线。
+外层一份状态意味着项目根 = 整个工作区，一份契约一条流水线，前后端对着同一份锁定契约并行开发 —— 这正是收敛到唯一布局的收益。代价是两处配置必须跟着改，而且**改错是静默的**：
 
-代价是两处配置必须跟着改，而且**改错是静默的**：
-
-| 项 | 单仓库 | 跨仓库 | 不改的后果 |
+| 项 | 单仓库（无 repos/） | 多仓库工作区 | 不调的后果 |
 | --- | --- | --- | --- |
 | `role_scopes` | `server/**`、`web/**` | `repos/backend/**`、`repos/frontend/**` | 歪成按语言隔离，见下 |
 | `gate_commands` | `npm test` | `(cd repos/frontend && npm test) && (cd repos/backend && pytest)` | 在外层根跑，找不到 `package.json` |
@@ -169,7 +167,7 @@ frontend-developer repos/backend/**/*.tsx            放行 ['*.tsx']      ← �
 
 **猜不出名字的仓库谁都写不了。** 只要有一个仓库被认领，`repos/<仓库>/**` 这条分支就把范围钉在被认领的仓库上，于是 `shared` / `payments-core` 这类名字落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。这个失败只会在 develop 阶段暴露成一次权限拒绝，所以 `unclaimed_repos()` 判定它、`init` 与 `role scopes` 当场点名并给出手写认领的命令。判定按守卫自己的方式做：拿 `repos/<仓库>/src/probe.{ts,py}` 去撞两个开发角色的模式，撞不上就算没人认领。只看开发角色是因为 `qa` 的 `repos/*/tests/**` 覆盖所有仓库，而「只有 qa 能写它的测试目录」不构成认领。
 
-只有**一个仓库都认不出**时才退回「任意仓库的对应位置」（模式逐条加 `repos/*/` 前缀），那时才是跨仓库放行。这条回退分支必须**带上裸扩展名模式** —— 丢掉它们，`qa` 就只剩四个测试目录（它没有仓库提示词，永远走这条分支），配不了 `repos/frontend/vitest.config.ts`，与单仓库下同一个误拦，只是布局 B 下更难发现。跨仓库放行是这个分支本来就有的性质（`repos/*/src/**` 一样跨），加裸扩展名没有新破的边界。
+只有**一个仓库都认不出**时才退回「任意仓库的对应位置」（模式逐条加 `repos/*/` 前缀），那时才是跨仓库放行。这条回退分支必须**带上裸扩展名模式** —— 丢掉它们，`qa` 就只剩四个测试目录（它没有仓库提示词，永远走这条分支），配不了 `repos/frontend/vitest.config.ts`，与单仓库下同一个误拦，只是在多仓库工作区下更难发现。跨仓库放行是这个分支本来就有的性质（`repos/*/src/**` 一样跨），加裸扩展名没有新破的边界。
 
 `role scopes --reset` 走的是同一条路径（`repo_layout_scopes()` 先算，为 `None` 才落回裸默认值）。只写 `DEFAULT_ROLE_SCOPES` 会把跨仓库项目**两个方向同时刷坏**：后端从此写不了自己仓库的 `migrations/`，却能写别人仓库的同语言文件 —— 而输出看起来只是「刷成默认值」。自检对这两个方向与点名判定都有断言。
 
@@ -270,7 +268,7 @@ Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv
 
 **`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源和目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
 
-**嵌套工作台（布局 A）的冻结按写入目标反查根（2026-09-06 已落地）。** 会话 cwd 在工作区外层时 `find_root()` 命中外层，而目标可能落在某个自带 `.workbench/` 的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行（Bash 精确通道下 `real_hits` 过滤后 `hits=[]`，正是这个形态）。`_check_write_target` 因此从写入目标向上收集会话根之内的全部嵌套根，逐根按该根的相对路径查冻结与解冻窗口；拒绝话术带内层工作台标识与实名契约名。**顺带修掉一个存量洞**：清单里的目录条目带尾斜杠（`.workbench/flows/`），检查处 `f + "/"` 拼出双斜杠永远不中，flow 布局下 `flows/<flow>/state.json` 整类漏拦 —— selfcheck 此前只测 legacy 路径（`rel in frozen` 直接命中），没测到 startswith 分支。归一化成无尾斜杠再比，嵌套断言块先把它暴露了出来。
+**嵌套 `.workbench/` 的冻结按写入目标反查根（2026-09-06 已落地，当时为布局 A 而做；唯一布局下 `repos/` 里不该再有嵌套，这层反查保留为防误操作 init 的冗余）。** 会话 cwd 在工作区外层时 `find_root()` 命中外层，而目标可能落在某个自带 `.workbench/` 的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行（Bash 精确通道下 `real_hits` 过滤后 `hits=[]`，正是这个形态）。`_check_write_target` 因此从写入目标向上收集会话根之内的全部嵌套根，逐根按该根的相对路径查冻结与解冻窗口；拒绝话术带内层工作台标识与实名契约名。**顺带修掉一个存量洞**：清单里的目录条目带尾斜杠（`.workbench/flows/`），检查处 `f + "/"` 拼出双斜杠永远不中，flow 布局下 `flows/<flow>/state.json` 整类漏拦 —— selfcheck 此前只测 legacy 路径（`rel in frozen` 直接命中），没测到 startswith 分支。归一化成无尾斜杠再比，嵌套断言块先把它暴露了出来。
 
 **`cd repos/foo && sed -i ... .workbench/contracts/x.json` 仍是漏的。** `resolve()` 不追踪 `cd`，目标按会话根解析成错误路径后被 must_exist 滤掉。这不在嵌套反查的修复范围内 —— 单根下 `cd .workbench/ && ...` 同型写法也是既有边界，兜底正则只认切入 `.workbench` 的 cd。守卫文档早已教「写已冻结路径用相对会话根的完整路径，别 cd」，这条边界维持不变。角色范围层也维持会话根单根：外层会话写内层仓库的产品代码由外层角色的范围判定，跨线问题不存在。
 

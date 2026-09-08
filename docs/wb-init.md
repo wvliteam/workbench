@@ -1,5 +1,7 @@
 # wb-init：多仓库初始化 skill 的需求与实现（2026-09-07）
 
+> **现状按语（2026-09-08）**：本文是当时的设计记录。此后布局 A/B 已收敛为唯一布局（外层一份状态，各仓库不 init），`init_repos.py` 移到根级 `scripts/repos_apply.py`（`--init` 选项随布局 A 一并移除），并新增 `scripts/repos_tui.py` 交互式编辑清单。**下文正文与表格中所有 `--init` / 布局 A 条目都是历史设计与 ROMA 对照，不是当前用法**，当前命令见 AGENTS.md「多仓库工作区」。现状以 AGENTS.md「多仓库工作区」与 `.claude/skills/wb-init/SKILL.md` 为准。
+
 把「配置的代码仓库 clone 到本地 + 自动生成 VS Code 多根 workspace 文件」做成初始化 skill，让一个新工作区从清单到可开发状态一条命令完成。对照材料是 ROMA v0.3.6 源码快照（`output/agents.tgz`，`output/` 不进仓库）里的 `roma-onboarding` 与 `check-health` 两个 skill。
 
 改动范围：新增 `.claude/skills/wb-init/`（SKILL.md + `scripts/init_repos.py`）与 `.agents/skills/wb-init/` 双端副本；AGENTS.md / CLAUDE.md / README 入口各一段；顺带把三个旧 skill 的 `.agents` 副本同步成 `.claude` 权威版（它们停在 flow 改造前的旧产物路径）。**不动 `wb.py`** —— 初始化不是流程状态，不属于状态内核。

@@ -58,7 +58,7 @@
 - 本地 shell 和 `exec_command` 使用 `tool_name = "Bash"`；文件 patch 使用 `tool_name = "apply_patch"`，其输入放在 `tool_input.command`。
 - `PreToolUse` 可以用 `permissionDecision = "deny"` 拒绝，也兼容退出码 2 和 stderr。
 - `SessionStart` 的 stdout 会作为额外上下文；`SubagentStop` 则要求 JSON 输出。
-- 项目级 `.codex/` 配置和 hook 只有在项目受信任时才会加载；hook 需要通过 `/hooks` 审核和信任。布局 A 下，hook 入口从当前目录向上查找同时包含 `.codex/hooks.json` 与 `.claude/hooks/wb.py` 的工作台根，不依赖内层仓库的 Git 根。
+- 项目级 `.codex/` 配置和 hook 只有在项目受信任时才会加载；hook 需要通过 `/hooks` 审核和信任。hook 入口从当前目录向上查找同时包含 `.codex/hooks.json` 与 `.codex/hooks/wb.py` 的工作台根，不依赖仓库的 Git 根；`.codex/hooks/wb.py` 是指向 `.claude/hooks/wb.py` 的相对软链（单一实现，`Path(__file__).resolve()` 与守卫的 `resolve()` 都会解析回真实文件）。
 
 ## 3. 兼容性矩阵
 
@@ -78,7 +78,7 @@
 | SessionStart | 兼容 | 保留文本输出，调整 hook 注册 |
 | SubagentStop 清理 | 已兼容 | `--format codex` 输出 JSON；覆盖所有 Codex subagent |
 | Claude `settings.json` 权限 | 不兼容 | 改写为 `.codex/config.toml` / `hooks.json` |
-| 多仓库根路径 | 已验证（启动目录有前提） | hook 从当前目录向上查找工作台根；布局 A/B 的状态归属和角色范围需按文档配置 |
+| 多仓库根路径 | 已验证（启动目录有前提） | hook 从当前目录向上查找工作台根；外层唯一状态布局下，状态归属外层，角色范围按仓库前缀配置 |
 
 ## 4. 关键阻塞与风险
 
@@ -112,9 +112,9 @@ Codex 项目级 hook 在未信任项目或 hook hash 变化后不会运行。已
 
 ### R5：宿主配置和路径假设不兼容，中
 
-当前 Claude 配置依赖 `$CLAUDE_PROJECT_DIR`，技能和 README 也大量使用 `.claude/...` 路径。Codex hook 从当前目录向上查找同时包含 `.codex/hooks.json` 与 `.claude/hooks/wb.py` 的工作台根，状态根仍由 payload 的 `cwd` 交给 `find_root()` 判断。
+当前 Claude 配置依赖 `$CLAUDE_PROJECT_DIR`，技能和 README 也大量使用 `.claude/...` 路径。Codex hook 从当前目录向上查找同时包含 `.codex/hooks.json` 与 `.codex/hooks/wb.py`（指向 `.claude/hooks/wb.py` 的软链）的工作台根，状态根仍由 payload 的 `cwd` 交给 `find_root()` 判断。
 
-多仓库布局 A/B 已通过路径解析与角色范围自检：共享外层 `.codex` 时，hook 从当前目录向上找到同时包含 `.codex/hooks.json` 与 `.claude/hooks/wb.py` 的工作台根；状态仍由最近的 `.workbench/` 归属。运行前仍需从工作台根启动 Codex，并确认项目已信任、hook 已审核，否则项目级 hook 不会加载。
+多仓库工作区（外层唯一状态布局）已通过路径解析与角色范围自检：共享外层 `.codex` 时，hook 从当前目录向上找到同时包含 `.codex/hooks.json` 与 `.codex/hooks/wb.py` 的工作台根；状态归属外层 `.workbench/`。运行前仍需从工作台根启动 Codex，并确认项目已信任、hook 已审核，否则项目级 hook 不会加载。
 
 ## 5. 目标架构
 

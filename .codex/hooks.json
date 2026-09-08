@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook session-start --format codex; fi",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook session-start --format codex; fi",
             "timeout": 30
           }
         ]
@@ -19,7 +19,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook pre-tool --format codex; fi",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook pre-tool --format codex; fi",
             "timeout": 30
           }
         ]
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook post-tool --format codex; fi",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook post-tool --format codex; fi",
             "timeout": 30
           }
         ]
@@ -42,7 +42,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.claude/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.claude/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.claude/hooks/wb.py\" hook subagent-stop --format codex; fi",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook subagent-stop --format codex; fi",
             "timeout": 30
           }
         ]

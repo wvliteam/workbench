@@ -24,7 +24,9 @@
     ├── wb-contract/            契约生命周期
     └── wb-knowledge/           知识沉淀与查找（knowledge/）
 
-knowledge/                  跨 flow 的长期经验库（一经验一文件，判据见其 README）
+references/                角色输出契约等公共操作规范（任何角色只读，改走主线程）
+scripts/                  平台无关公共脚本：repos_apply.py（清单落地）、repos_tui.py（交互编辑）
+knowledge/                跨 flow 的长期经验库（一经验一文件，判据见其 README）
 
 .workbench/                 全部状态，纯 JSON，可 git diff
 ├── state.json                  旧布局的 state（新布局在 flows/<flow>/state.json）
@@ -51,25 +53,20 @@ python3 .claude/hooks/wb.py init --name my-project
 
 ### 把代码库 clone 进这个工作区
 
-不要把 `.claude/` 拷到每个项目里。反过来：代码库 clone 进来，共享同一套工作台。两种布局按「一个需求是否跨仓库」选，**不能混用**：
+不要把 `.claude/` 拷到每个项目里。反过来：代码库 clone 进来，共享同一套工作台。唯一布局：**外层根一份状态，各仓库里都不 init** —— 项目根 = 整个工作区，天然支持跨仓库需求：
 
 ```bash
-# A. 一个需求只改一个仓库（默认）—— 每个仓库自带一份状态
-git clone <url> repos/foo && cd repos/foo
-python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/wb.py" init --name foo
-echo '.workbench/' >> .git/info/exclude    # 不改仓库自己的 .gitignore
-
-# B. 一个需求跨多个仓库 —— 只在外层 init，各仓库都不 init
+# 唯一布局：外层根一份状态 —— 各仓库里都不 init，项目根 = 整个工作区
 python3 .claude/hooks/wb.py init --name <需求名>
 ```
 
-上面的 clone、布局 A 两步与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 .claude/skills/wb-init/scripts/init_repos.py --root . --init`（布局 B 不带 `--init`）—— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
+上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
 
-布局 A 之后在 `repos/foo` 里正常用全部命令 —— `wb.py` 向上查找最近的 `.workbench/`，hook 用绝对路径注册，都不受 cwd 影响。角色范围里的 `server/**`、`web/**` 相对各仓库根，不用改。
+之后正常用全部命令 —— `wb.py` 向上查找最近的 `.workbench/`，hook 用绝对路径注册，都不受 cwd 影响；在各仓库子目录里跑命令，状态仍归属外层。
 
-布局 B 必须调 `role_scopes`（改成按仓库前缀，否则会歪成按语言隔离）与 `gate_commands`（用子 shell 分别 `cd`），**不调是静默出错**。两种布局的完整步骤与逐条理由在 [CLAUDE.md](CLAUDE.md#多仓库工作区)，为什么一个 `find_root()` 能同时支撑两种拓扑见 [architecture.md](docs/architecture.md#状态归属一个工作区多个仓库)。
+init 之后必须调 `role_scopes`（改成按仓库前缀，否则会歪成按语言隔离）与 `gate_commands`（用子 shell 分别 `cd`），**不调是静默出错**。完整步骤与逐条理由在 [CLAUDE.md](CLAUDE.md#多仓库工作区)，`find_root()` 的状态归属机制见 [architecture.md](docs/architecture.md#状态归属一个工作区多个仓库)。
 
-`status` 与会话开头都会打一行根路径。**忘了 `cd` 进仓库就跑命令会操作到外层工作台自己的状态，且不报错** —— 看那一行。
+`status` 与会话开头都会打一行根路径。**状态归属以外层根为准，命令在子目录里跑也是** —— 看那一行确认归属没错。
 
 同一仓库的下一个需求：`report --write` 归档后 `init --force` 重开。要并行多个需求，`flow new <名>` 开新需求线（一条命令，状态与产物按 flow 隔离；详见 [CLAUDE.md](CLAUDE.md#多条需求并行flow)）。代码也要物理隔离时才用 `git worktree add`，工作树建在本工作区内。
 
@@ -136,12 +133,14 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 
 ### 权限控制
 
-`PreToolUse` hook 拦四类，退出码 2 阻止调用并把原因回灌给模型：
+`PreToolUse` hook 拦以下几类，退出码 2 阻止调用并把原因回灌给模型（完整清单与边界见 AGENTS.md「权限守卫」）：
 
 1. 写出项目根之外
 2. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
 3. 角色越权写 —— `pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`（产物目录按阶段隔离）
-4. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、`dd of=/dev/`、fork bomb）+ 提示级警告（`git reset --hard`、`git clean -fd`、`npm publish`）
+4. 角色跑特权 wb.py 子命令（`phase set`、`contract unlock|bump`、`config set`、`flow new/switch/remove` 等）
+5. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、`dd of=/dev/`、fork bomb）+ 提示级警告（`git reset --hard`、`git clean -fd`、`npm publish`）
+6. 未审核的 skill 调用 —— subagent 只能调 `allowed_skills` 白名单里的（主线程是审核者，不限）
 
 第 2 条**同时覆盖 Bash 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `python3 -c` `node -e` `ln -sf` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
 
@@ -168,7 +167,7 @@ python3 .claude/hooks/wb.py log --tail 200
 
 ## 适配到自己的项目
 
-1. 把 `.claude/` 和 `.workbench/` 拷进项目根。
+1. 把 `.claude/` 拷进项目根（`.workbench/` 不拷 —— `init` 会生成，拷旧的反倒带旧状态进来）。
 2. `wb.py init --name <项目名>`。
 3. 配门禁命令：`config set gate_commands.test '<你的测试命令>'`（lint / build 同理）。**不配等于那条门禁不存在。**
 4. 按实际目录布局调角色范围：`config set role_scopes.<角色> '<JSON 数组>'`。别把产物目录放宽回 `.workbench/artifacts/**` —— 那会撤掉阶段隔离。
@@ -178,6 +177,6 @@ python3 .claude/hooks/wb.py log --tail 200
 
 ## 设计与实现细节
 
-`docs/` 下有完整的设计文档，记的是**为什么这样设计、取舍是什么、已知边界在哪**：架构与状态模型、七个角色、门禁引擎、契约机制、权限模型、调度与 loop，以及一份实现评审。索引与一页速览在 [docs/README.md](docs/README.md)。
+`docs/` 下有完整的设计文档，记的是**为什么这样设计、取舍是什么、已知边界在哪**：架构与状态模型、八个角色、门禁引擎、契约机制、权限模型、调度与 loop，以及一份实现评审。索引与一页速览在 [docs/README.md](docs/README.md)。
 
 行为以 `wb.py` 与 `wb.py selfcheck` 为准 —— 文档不复述断言，跑一遍自检比读散文准。

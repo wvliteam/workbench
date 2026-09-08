@@ -214,7 +214,16 @@ ARTIFACT_LOG = "artifacts.jsonl"
 # 拒绝话术与守卫本体不同，见 _check_write_target。
 # `references/` 是公共操作规范层（ROMA references 借鉴，见 docs/references-extraction.md）：
 # 性质等同角色定义 —— 规范由主线程维护、角色只读，reviewer 的裸 `*.md` 不收窄就能写它。
-GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/", "knowledge/", "references/")
+# `scripts/` 是工作区级公共脚本（repos_apply.py / repos_tui.py 等）与 `repos.json` 清单：
+# 不收窄的话 backend-developer 的裸 `*.py` 能改 init 脚本、frontend-developer 的裸
+# `*.json` 能改清单 —— 都是初始化流程被静默改坏的形态。守卫本体在 `.claude/`，这层
+# 只是「公共脚本与清单同样由主线程维护、角色只读」的收窄。`.vscode/` 同理：机器本地
+# 的 IDE 配置由 repos_apply.py 生成，裸 `*.json` 一样跨得进去。
+# 这三条只在 workbench 布局（存在 repos/）下生效：README「适配到自己的项目」的单仓库
+# 场景里 scripts/ 是项目自己的代码目录、.vscode/ 是项目自己的配置，不归工作台管。
+GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/",
+                    "knowledge/", "references/")
+WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", ".vscode/")
 
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——
@@ -2763,6 +2772,22 @@ def active_task_contract_errors(root: Path, rel: str) -> list[str]:
     return errors
 
 
+def _guarded_prefix(root: Path, rel: str) -> str:
+    """命中的守卫前缀；目录条目按前缀、文件条目精确匹配（repos.json 是文件不是前缀）。
+
+    workspace 层条目（scripts/ repos.json .vscode/）只在 workbench 布局（存在 repos/）
+    下保留 —— 单仓库适配场景里它们是项目自己的目录，见 WORKSPACE_GUARDED_PREFIXES。
+    """
+    prefixes = GUARDED_PREFIXES + (WORKSPACE_GUARDED_PREFIXES if (root / "repos").is_dir() else ())
+    for g in prefixes:
+        if g.endswith("/"):
+            if rel.startswith(g):
+                return g
+        elif rel == g or rel.startswith(g + "/"):
+            return g
+    return ""
+
+
 def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
     """检查单个写入目标：越根 → 活动契约 → 争议 → 冻结 → 角色范围。"""
     target = resolve_target(cwd, raw_path)
@@ -2834,9 +2859,12 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
     globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))
     if not isinstance(globs, list):
         globs = []
-    guarded = next((g for g in GUARDED_PREFIXES if rel.startswith(g)), "")
+    guarded = _guarded_prefix(rootr, rel)
     if guarded:
-        globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
+        if guarded.endswith("/"):
+            globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
+        else:
+            globs = [g for g in globs if g == guarded or g.startswith(guarded + "/")] or ["（无）"]
     if not any(fnmatch.fnmatch(rel, g) for g in globs):
         extra = ""
         if guarded == "knowledge/":
@@ -2844,9 +2872,12 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                      "沉淀或查找用 wb-knowledge skill，或交回主线程派 knowledger 角色。）")
         elif guarded == "references/":
             extra = ("（references/ 是公共操作规范，任何角色只读。要改规范交回主线程。）")
-        elif guarded and guarded != ".workbench/":
+        elif guarded in (".claude/", ".codex/", ".agents/"):
             extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
                      f"要改它交回主线程，别给角色开范围。）")
+        elif guarded and guarded != ".workbench/":
+            extra = (f"（{guarded} 是工作区级公共资源（公共脚本、清单或本机 IDE 配置），"
+                     f"由主线程维护、角色只读。要改它交回主线程。）")
         hook_deny(
             f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs) or '（无）'}。{extra}"
             f"确需跨界请交给对应角色，或 wb.py config set role_scopes.{role} '<JSON 数组>'"
@@ -2864,6 +2895,32 @@ PRIVILEGED_WB = {
     ("flow", "switch"): "切 flow 会让后续状态命令落到另一条流水线",
     ("flow", "remove"): "删除的是整条流水线的状态与产物",
 }
+
+
+GUARDED_SCRIPTS = frozenset({"repos_apply.py", "repos_tui.py"})
+_SCRIPT_INTERPRETERS = frozenset({"python3", "python", "py", "bash", "sh", "zsh"})
+
+
+def _guarded_script_exec(cmd: str) -> bool:
+    """命令里是否执行了受守卫的公共脚本（角色执行 = 绕过只读收窄）。
+
+    只认「脚本被当成程序执行」：脚本名作为命令首 token，或解释器后紧跟脚本路径
+    （python3 scripts/repos_apply.py）。grep / cat / 读日志等把脚本名当参数的
+    用法不算执行，不误拦。
+    """
+    for seg in _split_pipeline(strip_heredocs(cmd)):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+        if Path(tokens[0]).name in GUARDED_SCRIPTS:
+            return True
+        for i, t in enumerate(tokens[:-1]):
+            if Path(t).name in _SCRIPT_INTERPRETERS and Path(tokens[i + 1]).name in GUARDED_SCRIPTS:
+                return True
+    return False
 
 
 def _wb_invocations(cmd: str) -> list[list[str]]:
@@ -3066,6 +3123,18 @@ def hook_pre_tool(data: dict) -> None:
         if wb_role in ROLES:
             for reason in privileged_wb_calls(cmd, rootr, wb_role):
                 hook_deny(reason)
+
+        # --- 受守卫脚本的执行绕过 ---
+        # python3 scripts/repos_apply.py 没有 Bash 能解析的写目标（不带 -c 的 python3
+        # 不是写命令），脚本内部却写 .vscode/、.workbench/*.code-workspace、repos.json
+        # 与 repos/* 软链 —— 角色执行脚本就把「公共脚本与清单角色只读」整个绕开。
+        # 脚本没有角色用得上的合法形态，非主线程一律拒绝。
+        if (data.get("agent_id") or data.get("agent_type")) and _guarded_script_exec(cmd):
+            hook_deny(
+                "repos_apply.py / repos_tui.py 的写入不被 Bash 守卫解析，subagent 执行"
+                "它们会绕过 scripts/、repos.json、.vscode/ 的只读收窄。"
+                "初始化清单与 IDE 配置交回主线程跑。"
+            )
 
         # --- 争议熔断 ---
         # 任何争议哨兵存在时，developer 角色全线停工。
@@ -3404,6 +3473,21 @@ def cmd_selfcheck(args) -> None:
 
     tmp = Path(tempfile.mkdtemp(prefix="wb-selfcheck-"))
     old = Path.cwd()
+    # 真实工作区：Codex hook 入口软链必须存在且已跟踪。selfcheck 的临时目录里没有
+    # .codex/hooks/，软链存在性测不到 —— 而软链是 Codex 端守卫的加载入口，缺失时
+    # 四个 hook（SessionStart/PreToolUse/PostToolUse/SubagentStop）在干净 checkout 上
+    # 全部静默失效（exit 0 无报错，守卫、契约冻结、角色执法全瘫）。
+    real_root = Path.cwd().resolve()
+    real_codex_hook = real_root / ".codex" / "hooks" / "wb.py"
+    if real_codex_hook.exists() or real_codex_hook.is_symlink():
+        assert real_codex_hook.resolve() == (real_root / ".claude" / "hooks" / "wb.py").resolve(), \
+            f"{real_codex_hook} 应软链到 .claude/hooks/wb.py，实际指向 {real_codex_hook.resolve()}"
+        git_ls = subprocess.run(
+            ["git", "-C", str(real_root), "ls-files", "--error-unmatch", "--",
+             ".codex/hooks/wb.py"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        assert git_ls.returncode == 0, \
+            f"{real_codex_hook} 未跟踪 —— 干净 checkout 上 Codex 守卫会静默失效（git add 它）"
     try:
         os.chdir(tmp)
 
@@ -3695,6 +3779,16 @@ def cmd_selfcheck(args) -> None:
             return 0
 
         cw = str(tmp)
+        # 单仓库布局（无 repos/）：scripts/ .vscode/ 是项目自己的目录，workspace 层
+        # 守卫前缀不生效（README「适配到自己的项目」的场景）。
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "scripts/deploy.py"}}) == 0, \
+            "单仓库布局下 scripts/ 被误当工作区公共资源"
+        # 进入 workbench 布局：有 repos/ 后 workspace 层前缀才生效。
+        (tmp / "repos").mkdir()
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "scripts/deploy.py"}}) == 2, \
+            "workbench 布局下 scripts/ 未被保留为工作区公共资源"
         # 活动任务一旦看到开放契约窗口，产品代码写入必须停下；执行记录仍可落盘。
         quiet("task", "add", "--title", "活动契约实现", "--role", "backend-developer",
               "--phase", "develop", "--contracts", "user-api")
@@ -4436,21 +4530,66 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"command": "python3 -c 'pass' > ../evil.py"}}) == 0, \
             "tempdir 场景下 ../ 重定向被误拦"
 
-        # --- 守卫本体不在任何角色范围内 ---
+        # --- 守卫本体与工作区级公共资源不在任何角色范围内 ---
         # fnmatch 的 * 跨 /，所以 *.py 会放行 .claude/hooks/wb.py（权限引擎本身）、
         # *.json 放行 settings.json（hook 注册表）、*.md 放行 agent 定义。这些文件不在
         # 任何哈希基线里，改完 contract verify 也发现不了 —— 防线必须保护防线自己。
+        # scripts/、repos.json、.vscode/ 同理：裸 *.py / *.json 会跨进公共脚本、
+        # 仓库清单与本机 IDE 配置，初始化流程会被静默改坏（GUARDED_PREFIXES 收窄层）。
+        # 上面 4213 行删掉了 repos/ 并重置了 scope，这里重新进入 workbench 布局。
+        (tmp / "repos").mkdir()
         for role, path in (("backend-developer", ".claude/hooks/wb.py"),
                            ("frontend-developer", ".claude/settings.json"),
                            ("reviewer", ".claude/agents/pm.md"),
                            ("qa", ".codex/hooks.json"),
-                           ("architect", ".agents/skills/wb-flow/SKILL.md")):
+                           ("architect", ".agents/skills/wb-flow/SKILL.md"),
+                           ("backend-developer", "scripts/repos_apply.py"),
+                           ("frontend-developer", "scripts/repos_tui.py"),
+                           ("frontend-developer", "repos.json"),
+                           ("frontend-developer", ".vscode/settings.json")):
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
                           "tool_input": {"file_path": path}}) == 2, \
-                f"{role} 能写守卫本体 {path}"
+                f"{role} 能写工作区级公共资源 {path}"
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
                           "tool_input": {"command": f"cp /tmp/x {path}"}}) == 2, \
-                f"{role} 能用 shell 写守卫本体 {path}"
+                f"{role} 能用 shell 写工作区级公共资源 {path}"
+        # 受守卫脚本的执行绕过：python3 scripts/repos_apply.py 没有 Bash 能解析的写
+        # 目标，脚本内部却写 .vscode/、repos.json —— 角色执行脚本就把上面的只读
+        # 收窄绕开了，必须拒绝。
+        for role in ("backend-developer", "frontend-developer"):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "python3 scripts/repos_apply.py --root ."}}) == 2, \
+                f"{role} 能执行受守卫的公共脚本 repos_apply.py"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "python3 scripts/repos_tui.py"}}) == 2, \
+                f"{role} 能执行受守卫的 TUI"
+            # 把脚本名当参数的读取不算执行，不误拦
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "grep repos_apply.py docs/wb-init.md"}}) == 0, \
+                f"{role} 读文档里的脚本名被误拦"
+        # Codex 端软链入口：路径在 .codex/ 前缀下（守卫前缀先拦），角色经软链改写
+        # 守卫本体也应被拒。tempdir 里造出与真实工作区相同的软链结构再断言两类：
+        # 字面前缀（.codex/）拦；Bash 的写目标 resolve 跟软链解析成 .claude/ 后仍拦
+        # （resolve_target 确实跟软链，旧注释说 Write 的 file_path 不解析软链是错的）。
+        claude_hook_file = tmp / ".claude" / "hooks" / "wb.py"
+        claude_hook_file.parent.mkdir(parents=True, exist_ok=True)
+        if not claude_hook_file.exists():
+            claude_hook_file.write_text("# fixture\n", encoding="utf-8")
+        codex_hook_link = tmp / ".codex" / "hooks" / "wb.py"
+        codex_hook_link.parent.mkdir(parents=True, exist_ok=True)
+        if not codex_hook_link.exists():
+            codex_hook_link.symlink_to(Path("../../.claude/hooks/wb.py"))
+        for role in ("backend-developer", "frontend-developer"):
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
+                          "tool_input": {"file_path": ".codex/hooks/wb.py"}}) == 2, \
+                f"{role} 能经软链路径写守卫本体"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "sed -i '' s/a/b/ .codex/hooks/wb.py"}}) == 2, \
+                f"{role} 能经软链解析路径改守卫本体"
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                          "tool_input": {"command": "ln -sf ../../.claude/hooks/wb.py "
+                                        ".codex/hooks/wb.py"}}) == 2, \
+                f"{role} 能改软链入口"
         # 主线程仍要能改工作台本体，否则没人能维护它
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 0, \
@@ -4488,6 +4627,20 @@ def cmd_selfcheck(args) -> None:
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
                           "tool_input": {"file_path": "references/output-contract.md"}}) == 2, \
                 f"{role} 的裸 *.md 范围跨进了 references/"
+
+        # --- repos.json 是精确文件名，不是前缀 ---
+        # 旧实现用 startswith 把 repos.json5 / repos.json.bak / 目录 repos.json/ 全当
+        # 清单：角色配了显式 scope 也写不了 .bak 兄弟文件，误配 repos.json5/** 却放行。
+        quiet("config", "set", "role_scopes.backend-developer",
+              json.dumps(["repos/backend/**", ".workbench/artifacts/*/develop/tasks/**",
+                          "repos.json.bak"]))
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "repos.json.bak"}}) == 0, \
+            "repos.json 前缀误拦了显式配了 scope 的 repos.json.bak"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "repos.json5"}}) == 2, \
+            "repos.json5 被清单前缀误放行"
+        quiet("role", "scopes", "--reset")
 
         # --- phase set 必须申报理由 ---
         # set 不跑门禁。无理由放行就等于给「门禁不通过不推进」开了一条不留痕的旁路。

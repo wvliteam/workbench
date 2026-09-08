@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """wb-init：按 repos.json 清单把代码仓库落到 repos/，并生成 VS Code 多根工作区。
 
+交互式编辑清单用同目录 repos_tui.py（curses 界面），本脚本是纯批处理 ——
+按已有清单幂等落地，不做任何交互。
+
 用法（在工作区根）：
 
-    python3 .claude/skills/wb-init/scripts/init_repos.py [--root PATH] [--init] [--json]
+    python3 scripts/repos_apply.py [--root PATH] [--config PATH] [--json]
 
 清单 `repos.json` 在工作区根（进 git，团队共享）：
 
@@ -29,7 +32,6 @@ import argparse
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 # 合并进 .vscode/settings.json 的 git 发现配置。git.scanRepositories 只管理
@@ -60,9 +62,39 @@ def run(cmd: list, cwd: Path | None = None) -> tuple[bool, str]:
 
 
 def derive_name(remote: str) -> str:
-    """remote 省略 name 时取最后一段（去 .git）。"""
-    seg = str(remote or "").rstrip("/").rsplit("/", 1)[-1]
-    return seg.removesuffix(".git")
+    """remote 省略 name 时取最后一段（去 .git）。
+
+    SCP 风格 remote（`git@gitlab.com:payments-core.git`，无路径段）取冒号后段 ——
+    旧逻辑整串返回，`git@gitlab.com:payments-core` 过不了 NAME_RE。
+    """
+    seg = str(remote or "").rstrip("/")
+    if ":" in seg and "://" not in seg:
+        seg = seg.rsplit(":", 1)[-1]
+    return seg.rsplit("/", 1)[-1].removesuffix(".git")
+
+
+def validate_entries(entries: list) -> str | None:
+    """逐条校验清单条目，返回错误信息或 None。文件读入与交互式内存编辑共用同一套规则。"""
+    seen: set[str] = set()
+    for i, e in enumerate(entries):
+        if not isinstance(e, dict):
+            return f"repos[{i}] 不是对象"
+        name = str(e.get("name") or derive_name(e.get("remote", "") or e.get("link", "")))
+        if not name or not NAME_RE.match(name):
+            return (f"repos[{i}] 的 name 非法：{name!r}（须为单段路径名，"
+                    "字母数字开头，不含 / 和空白）")
+        if name in seen:
+            return f"repos[{i}] 的 name 重复：{name}"
+        seen.add(name)
+        remote = str(e.get("remote") or "")
+        link = str(e.get("link") or "")
+        if not remote and not link:
+            return f"repos[{i}]（{name}）缺 remote 或 link"
+        if remote and link:
+            return f"repos[{i}]（{name}）remote 与 link 只能二选一"
+        if remote.startswith("-"):
+            return f"repos[{i}]（{name}）的 remote 以 - 开头，会被 git 当成选项"
+    return None
 
 
 def load_config(path: Path) -> tuple[list[dict], str | None]:
@@ -76,31 +108,15 @@ def load_config(path: Path) -> tuple[list[dict], str | None]:
     entries = data.get("repos", []) if isinstance(data, dict) else data
     if not isinstance(entries, list):
         return [], "repos.json 顶层应为对象（含 repos 数组）或数组"
-    seen: set[str] = set()
-    for i, e in enumerate(entries):
-        if not isinstance(e, dict):
-            return [], f"repos[{i}] 不是对象"
-        name = str(e.get("name") or derive_name(e.get("remote", "")))
-        if not name or not NAME_RE.match(name):
-            return [], (f"repos[{i}] 的 name 非法：{name!r}（须为单段路径名，"
-                        "字母数字开头，不含 / 和空白）")
-        if name in seen:
-            return [], f"repos[{i}] 的 name 重复：{name}"
-        seen.add(name)
-        remote = str(e.get("remote") or "")
-        link = str(e.get("link") or "")
-        if not remote and not link:
-            return [], f"repos[{i}]（{name}）缺 remote 或 link"
-        if remote and link:
-            return [], f"repos[{i}]（{name}）remote 与 link 只能二选一"
-        if remote.startswith("-"):
-            return [], f"repos[{i}]（{name}）的 remote 以 - 开头，会被 git 当成选项"
+    err = validate_entries(entries)
+    if err:
+        return [], err
     return entries, None
 
 
 def materialize(entry: dict, repos_dir: Path) -> dict:
     """把一个条目落到 repos/<name>：已存在不覆盖，clone 或软链。"""
-    name = str(entry.get("name") or derive_name(entry.get("remote", "")))
+    name = str(entry.get("name") or derive_name(entry.get("remote", "") or entry.get("link", "")))
     target = repos_dir / name
     if target.is_symlink() or target.exists():
         try:
@@ -109,6 +125,14 @@ def materialize(entry: dict, repos_dir: Path) -> dict:
             return {"repo": name, "action": "materialize", "status": "error",
                     "detail": f"目标已存在但是断链，不覆盖：{target}"}
         if (resolved / ".git").exists():
+            expected = str(entry.get("remote") or "").strip()
+            if expected:
+                ok, origin = run(["git", "-C", str(resolved), "remote", "get-url", "origin"])
+                if ok and origin and origin != expected:
+                    return {"repo": name, "action": "materialize", "status": "error",
+                            "detail": (f"{target} 已存在，但 origin 是 {origin}，与清单"
+                                       f"remote（{expected}）不一致，未改动。如需换源："
+                                       f"git -C {target} remote set-url origin {expected}")}
             return {"repo": name, "action": "materialize", "status": "exists",
                     "detail": str(target)}
         return {"repo": name, "action": "materialize", "status": "error",
@@ -120,7 +144,7 @@ def materialize(entry: dict, repos_dir: Path) -> dict:
 
 
 def link_repo(name: str, link: str, target: Path) -> dict:
-    """use_local：本机已有 checkout，软链接入，不复制代码。"""
+    """清单 link：本机已有 checkout，软链接入，不复制代码。"""
     root = target.parent.parent
     src = Path(link)
     if not src.is_absolute():
@@ -174,8 +198,14 @@ def collect_repos(root: Path) -> list[tuple[str, str, Path]]:
             resolved = entry.resolve(strict=True)
         except OSError:
             return
-        if (resolved / ".git").exists():
-            rel = entry.relative_to(root).as_posix()
+        if not (resolved / ".git").exists():
+            return
+        rel = entry.relative_to(root).as_posix()
+        if entry.is_symlink():
+            # 软链不覆盖真实目录：link 别名解析到已挂载的真实仓库时，真实仓库
+            # 是权威（IDE workspace 按真实路径登记），同源软链只登记一次。
+            found.setdefault(resolved, (rel, entry.name, resolved))
+        else:
             found[resolved] = (rel, entry.name, resolved)
 
     def walk(d: Path) -> None:
@@ -240,38 +270,6 @@ def ensure_vscode_settings(root: Path, repos: list[tuple[str, str, Path]]) -> tu
     return path, None
 
 
-def init_repo(root: Path, target: Path, name: str) -> dict:
-    """布局 A 每仓库两步：wb.py init --name <name> + .workbench/ 进 .git/info/exclude。
-
-    cmd_init 以 cwd（或 --root）为准、不走 find_root()，所以显式传 --root 不会
-    落到外层工作区。已有 .workbench/ 的仓库跳过，保证幂等。
-    """
-    if (target / ".workbench").is_dir():
-        return {"repo": name, "action": "init", "status": "exists",
-                "detail": "已有 .workbench/，跳过"}
-    wb_py = root / ".claude" / "hooks" / "wb.py"
-    if not wb_py.is_file():
-        return {"repo": name, "action": "init", "status": "error",
-                "detail": f"找不到工作台内核：{wb_py}"}
-    ok, out = run([sys.executable, wb_py, "init", "--name", name, "--root", target])
-    if not ok:
-        lines = out.splitlines()
-        return {"repo": name, "action": "init", "status": "error",
-                "detail": "wb.py init 失败：\n" + "\n".join(lines[-5:] or ["(无输出)"])}
-    exclude = target / ".git" / "info" / "exclude"
-    try:
-        current = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if ".workbench/" not in current.splitlines():
-            exclude.parent.mkdir(parents=True, exist_ok=True)
-            with exclude.open("a", encoding="utf-8") as f:
-                f.write(".workbench/\n")
-    except OSError as e:
-        return {"repo": name, "action": "init", "status": "error",
-                "detail": f"写 .git/info/exclude 失败：{e}"}
-    return {"repo": name, "action": "init", "status": "ok",
-            "detail": "wb.py init 完成，.workbench/ 已排除"}
-
-
 def warn_unignored(root: Path) -> str | None:
     """外层是 git 仓库且 repos/ 未被忽略时提醒 —— clone 进来的仓库会脏外层 status。"""
     if not (root / ".git").exists():
@@ -286,8 +284,6 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, default=Path.cwd(), help="工作区根（默认当前目录）")
     ap.add_argument("--config", type=Path, default=None, help="清单路径（默认 <root>/repos.json）")
-    ap.add_argument("--init", action="store_true",
-                    help="布局 A：对 repos/ 下缺 .workbench/ 的仓库补 wb.py init 两步")
     ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
     args = ap.parse_args()
 
@@ -311,10 +307,6 @@ def main() -> int:
     ws_path = ensure_workspace_file(root, repos)
     vs_path, vs_warn = ensure_vscode_settings(root, repos)
     warnings = [w for w in [vs_warn, warn_unignored(root)] if w]
-
-    if args.init:
-        for rel, name, abspath in repos:
-            results.append(init_repo(root, abspath, name))
 
     errors = [r for r in results if r["status"] == "error"]
     if args.json:

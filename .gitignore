@@ -7,6 +7,9 @@ repos/
 # Claude Code 本地覆盖配置
 .claude/settings.local.json
 
+# repos_apply.py 按本机磁盘扫描生成（scanRepositories 各机器仓库不同，提交会反复 churn）
+.vscode/
+
 __pycache__/
 *.py[cod]
 output/
