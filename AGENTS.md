@@ -166,7 +166,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 ## 多端适配
 
 - 本文件是唯一正文，其他入口文件名（如 `CLAUDE.md`）软链到它 —— 改协作约定只改 `AGENTS.md`，接入新端加软链即可。历史上两文件曾是各自维护的摘要，各端拿到的规则深度不一致，已收敛。
-- 各端 subagent / skill 定义是手工同步的多份拷贝（当前：`.claude/agents/*.md`、`.codex/agents/*.toml`、`.claude/skills/`、`.agents/skills/`），**角色名必须与 `wb.py` 的 `ROLES` 完全一致**。改完必须同步其余各端并 `diff -r` 确认 —— 漏同步不报错，只会静默漂移（判据见 `knowledge/skills-and-agents-are-manual-copies.md`）；新端接入时同样拷贝一份并纳入同步。
+- 角色定义唯一维护在根目录 `agents/`（每个角色一份 `.md` 与 `.toml`）；`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色只改 `agents/` 后检查两端软链与 TOML 解析。
 - hook 挂在各端自己的注册表里（如 `.claude/settings.json`、`.codex/hooks.json`），部分端要求项目受信任、hook 通过审核后才真正运行。不要把端上的完全放行模式（如 `danger-full-access`）当作角色权限控制 —— 守卫本身就是 hook，hook 不加载就什么都不是。
 - 端注入的环境变量（如 `$CLAUDE_PROJECT_DIR`）只在该端存在，脚本不要依赖它跨端可用；通用钉根用 `WB_ROOT`，或直接相对/绝对路径。
 
