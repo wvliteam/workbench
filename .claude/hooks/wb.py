@@ -41,6 +41,11 @@ except ImportError:  # pragma: no cover
 # 常量：阶段、门禁规则、角色写入范围、危险命令
 # --------------------------------------------------------------------------
 
+# state.json 结构版本。default_state 写这个值，load_state 拒绝「比本代码更新」的
+# state —— 更新的版本可能有本代码看不懂的字段，读改写会把它们丢掉。旧版本靠
+# load_state 的 setdefault 补齐字段容忍，不需要单独迁移函数。
+STATE_SCHEMA = 1
+
 PHASES = ["clarify", "analyze", "design", "develop", "verify", "retro"]
 
 PHASE_CN = {
@@ -639,7 +644,8 @@ def state_path(root: Path, flow: str | None = None) -> Path:
 
 def default_state(name: str) -> dict:
     return {
-        "version": 1,
+        "version": STATE_SCHEMA,
+        "state_rev": 0,  # 单调递增，每次 save_state +1；phase advance 用它做门禁前后的 CAS
         "project": name,
         "created": now(),
         "phase": "clarify",
@@ -651,7 +657,9 @@ def default_state(name: str) -> dict:
         "contracts": [],
         "role_scopes": json.loads(json.dumps(DEFAULT_ROLE_SCOPES)),
         "gate_commands": {},  # 例如 {"test": "npm test", "lint": "npm run lint"}
+        "gate_waivers": {},   # 显式豁免未配置的门禁，如 {"build": "纯文档项目，无构建"}
         "gate_timeout": 1800,  # 单条门禁命令的秒数上限，超时记 FAIL
+        "task_lease": 3600,   # task start 授予的租约秒数；过期只在 status/next 提示，不自动抢占
         "allowed_skills": [],  # subagent 可调的 skill 白名单（`*`=全部）；空=拒全部，只主线程能改
         "log": [],
     }
@@ -723,6 +731,10 @@ def load_state(root: Path, lock: bool = False) -> dict:
         die(f"state.json 无法解析：{e}")
     if not isinstance(st, dict):
         die("state.json 顶层必须是对象")
+    ver = st.get("version", STATE_SCHEMA)
+    if isinstance(ver, int) and ver > STATE_SCHEMA:
+        die(f"state.json 结构版本 {ver} 比本代码（{STATE_SCHEMA}）更新，可能含看不懂的字段。"
+            "读改写会丢掉它们 —— 升级 wb.py 再试，别用旧代码改新状态。")
     st["_flow"] = flow
     # 向前兼容：补齐新增字段。旧的字符串契约引用由迁移检查标记为不可安全重绑，
     # 只有显式 task reopen 才允许刷新为当前完整快照。
@@ -735,6 +747,7 @@ def load_state(root: Path, lock: bool = False) -> dict:
 
 def save_state(root: Path, st: dict) -> None:
     st["log"] = st["log"][-MAX_LOG:]
+    st["state_rev"] = int(st.get("state_rev", 0)) + 1
     # 写回读入时的那个 flow。state_path 不带参数时才看指针 —— 那正是会被
     # 中途切换的值，save_state 必须不受它影响。
     flow = st.pop("_flow", None) or read_current_flow(root)
@@ -1227,6 +1240,25 @@ def contract_drift(root: Path, st: dict) -> list[str]:
     return bad
 
 
+def _ts_epoch(ts):
+    """把 now() 写出的时间戳字符串转 epoch 秒；解析不了返回 None。"""
+    if not ts:
+        return None
+    try:
+        return datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def lease_expired(t: dict) -> bool:
+    """doing 任务的租约是否已过期。非 doing、无租约、解析不了时间都算未过期
+    （宁可不误报抢占，租约只是可见性提示，不自动改状态）。"""
+    if t.get("status") != "doing":
+        return False
+    exp = _ts_epoch(t.get("lease_until"))
+    return exp is not None and time.time() > exp
+
+
 def retro_enter_epoch(st: dict):
     """本 flow 最近一次进入 retro 的时间（epoch 秒），拿不到返回 None。
 
@@ -1332,7 +1364,16 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         cmd = st["gate_commands"].get(rest)
         label = f"命令门禁 {rest}"
         if not isinstance(cmd, str) or not cmd.strip():
-            return True, label, "未配置，跳过（config set gate_commands.%s '<命令>'）" % rest
+            # 三态：未配置 / 明确不适用（waiver）/ 已通过。未配置仍不阻断（纯文档项目
+            # 没有 build 命令），但要显著提示 —— 否则「没测试」是隐形绿灯，verify 门禁形同
+            # 虚设。项目确实没有该门禁时用 `config set gate_waivers.<名> '<理由>'` 显式声明，
+            # 把「碰巧没配」和「明确不需要」区分开。
+            waiver = st.get("gate_waivers", {}).get(rest)
+            if isinstance(waiver, str) and waiver.strip():
+                return True, label, f"已豁免（gate_waivers.{rest}）：{waiver}"
+            return True, label, ("未配置，跳过 —— 该门禁未生效。配置："
+                                 f"config set gate_commands.{rest} '<命令>'；"
+                                 f"项目确实不需要则显式豁免：config set gate_waivers.{rest} '<理由>'")
         # 老 state 里可能已经存着灾难性命令（新校验只管新写入），执行前再筛一遍。
         why = catastrophic_command(cmd)
         if why:
@@ -1598,11 +1639,17 @@ def cmd_status(args) -> None:
     print(f"任务：{total} 个，完成 {donen}（{pct}%）"
           + (f"，进行中 {by_status.get('doing', 0)}" if by_status.get("doing") else "")
           + (f"，阻塞 {by_status.get('blocked', 0)}" if by_status.get("blocked") else ""))
+    expired = [t["id"] for t in st["tasks"] if lease_expired(t)]
     for t in st["tasks"]:
         if args.all or t["status"] in ("doing", "blocked") or t["phase"] == cur:
             dep = f" 依赖:{','.join(t['deps'])}" if t.get("deps") else ""
             note = f" — {t['notes']}" if t.get("notes") else ""
-            print(f"  {t['id']:<5} [{t['status']:<7}] {t['phase']:<8} {t['role']:<19} {t['title']}{dep}{note}")
+            own = f" @{t['owner']}" if t.get("owner") else ""
+            lease = " ⏰租约过期" if lease_expired(t) else ""
+            print(f"  {t['id']:<5} [{t['status']:<7}] {t['phase']:<8} {t['role']:<19} {t['title']}{own}{dep}{note}{lease}")
+    if expired:
+        print(f"⏰ 租约过期（doing 超时，可能 agent 已中断）：{', '.join(expired)} —— "
+              f"读 tasks/<id>-<角色>.md 执行记录，决定 reopen 重派或续做")
 
     if st["contracts"]:
         bad = contract_drift(root, st)
@@ -1700,15 +1747,19 @@ def cmd_phase(args) -> None:
     # 期间落盘的 task done 因此不会被门禁前的旧快照盖掉。
     st = load_state(root)
     cur = st["phase"]
+    rev_before = int(st.get("state_rev", 0))
     results = gate_check(root, st, cur)
     passed = print_gate(cur, results)
     if not passed and not args.force:
         die("门禁未通过，阶段未推进。修完再来，或 --force 强推（会记入日志）", code=1)
     st = load_state(root, lock=True)
-    if st["phase"] != cur:
-        # 两段之间别人推进了阶段。仍按旧 cur 落记录会把 phase 写回去 —— 对方推了两次
-        # 就是倒退一个阶段。门禁结论已经作废（它算的是 cur 那个阶段），重跑即可。
-        die(f"阶段已被另一个进程从 {cur} 改到 {st['phase']}，这次门禁结论作废，重跑 phase advance")
+    if st["phase"] != cur or int(st.get("state_rev", 0)) != rev_before:
+        # 门禁在锁外跑（可能几分钟），期间别人可能推了阶段或落了 task done/block。
+        # 只比对 phase 漏掉后者：门禁算的是那一刻的 tasks 快照，期间新 block 的任务
+        # 不算进 tasks_done 结论，据此推进就把未完成的活当完成了。state_rev 每次
+        # save_state 自增，比对它能一并抓住 phase 与 tasks 两类改动。作废重跑即可。
+        die(f"状态在门禁期间被另一个进程改动（phase {cur}->{st['phase']}，"
+            f"rev {rev_before}->{st.get('state_rev', 0)}），这次门禁结论作废，重跑 phase advance")
     st["gates"][cur] = {
         "passed": passed,
         "at": now(),
@@ -1865,6 +1916,8 @@ def cmd_task(args) -> None:
         if find_task(st, tid):
             die(f"任务 {tid} 已存在")
         deps = [d.strip().upper() for d in (args.deps or "").split(",") if d.strip()]
+        if tid in deps:
+            die(f"任务 {tid} 不能依赖自己")
         for d in deps:
             if not find_task(st, d):
                 die(f"依赖的任务 {d} 不存在")
@@ -1912,6 +1965,12 @@ def cmd_task(args) -> None:
             die(f"任务 {t['id']} start 被拒：" + "; ".join(errors))
         t["status"] = "doing"
         t["started"] = now()
+        t["attempts"] = int(t.get("attempts", 0)) + 1
+        if args.owner:
+            t["owner"] = args.owner
+        lease = int(st.get("task_lease", 3600))
+        t["lease_until"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() + lease))
         if args.role_lock:
             (wb_dir(root) / "role").write_text(t["role"], encoding="utf-8")
     elif args.action == "done":
@@ -1952,6 +2011,10 @@ def cmd_task(args) -> None:
         t["notes"] = args.reason
         _restore_stale(root, st, t["id"])
     t["updated"] = now()
+    # 离开 doing 就没有活动租约了。留着过期的 lease_until 会让 status 对一个已 done
+    # 的任务打「租约过期」，虚惊。attempts 保留（它是累计重试次数，不随状态清零）。
+    if args.action in ("done", "block", "reopen", "skip"):
+        t.pop("lease_until", None)
     # skip / block 的理由必须进流水账。只写进 t["notes"] 的话，下一次 reopen --note
     # 就把它覆盖掉，日志里只剩一行 task_skip，「为什么跳过」从此查不到 ——
     # 而跳过全部任务能让 tasks_done 门禁变绿。
@@ -2983,13 +3046,15 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
 
         if sub_cmd == "config" and action == "set":
             key = pos[2] if len(pos) > 2 else "<键>"
-            # gate_commands.* 是 qa 的既定流程（.claude/agents/qa.md）；其余键
-            # ——尤其 role_scopes.* —— 改的是守卫自己的规则。
-            if not (role == "qa" and key.startswith("gate_commands.")):
+            # gate_commands.* / gate_waivers.* 是 qa 的既定流程（.claude/agents/qa.md）；
+            # 其余键 ——尤其 role_scopes.* —— 改的是守卫自己的规则。豁免和命令同属门禁
+            # 配置：qa 判定「这个项目不需要某门禁」就是它的活。
+            if not (role == "qa" and (key.startswith("gate_commands.")
+                                      or key.startswith("gate_waivers."))):
                 out.append(
                     f"角色 {role} 不能跑 `config set {key}`：它改的是守卫与调度自己的"
                     f"配置（role_scopes.* 能直接给自己开范围）。只有 qa 能设"
-                    f" gate_commands.*。{hint}")
+                    f" gate_commands.* / gate_waivers.*。{hint}")
         elif sub_cmd == "init" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `init --force`：它清空阶段、契约基线、"
                        f"门禁记录与冻结清单。{hint}")
@@ -3558,6 +3623,19 @@ def cmd_selfcheck(args) -> None:
         assert code == 0, "产物齐全后门禁应通过"
         quiet("phase", "advance")
         assert load_state(tmp)["phase"] == "analyze"
+
+        # state schema：save_state 每次自增 state_rev；load_state 拒绝比本代码更新的版本
+        st = load_state(tmp)
+        assert st["version"] == STATE_SCHEMA, st.get("version")
+        assert st["state_rev"] > 0, "save_state 应自增 state_rev"
+        sp = state_path(tmp)
+        bad = json.loads(sp.read_text(encoding="utf-8"))
+        bad["version"] = STATE_SCHEMA + 1
+        sp.write_text(json.dumps(bad, ensure_ascii=False), encoding="utf-8")
+        code, out = quiet("status")
+        assert code != 0 and "更新" in out, f"未来版本 state 应被拒：{out}"
+        sp.write_text(json.dumps(json.loads(sp.read_text(encoding="utf-8")) | {"version": STATE_SCHEMA},
+                                 ensure_ascii=False), encoding="utf-8")
 
         # 阶段产物过门禁即登记为契约，但它不能顶替接口契约 —— 否则 clarify 一过，
         # design 门禁的 contracts_locked 就永远非空，再也逼不出「接口先定」
@@ -5042,12 +5120,52 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": ".workbench/contracts/user-api.json"}}) == 2, \
             "嵌套检查影响了外层自己的冻结判定"
         shutil.rmtree(tmp / "repos")
+
+        # 任务租约 / owner / attempts（#2）、自依赖拒绝（#4）、门禁豁免三态（#5）。
+        # 用全新 tempdir 隔离 —— 上面的夹具可能已配 gate_commands.test，会让 run_check
+        # 真去跑命令而不是走「未配置」分支，污染 #5 判定。
+        tmp2 = Path(tempfile.mkdtemp(prefix="wb-selfcheck2-"))
+        os.chdir(tmp2)
+        quiet("init", "--name", "lease-selfcheck")
+        # #4：任务不能依赖自己（唯一的图漏洞 —— 依赖必须先存在已挡住环与悬空依赖）
+        code, out = quiet("task", "add", "S1", "--title", "x",
+                          "--role", "backend-developer", "--phase", "develop", "--deps", "S1")
+        assert code != 0 and "不能依赖自己" in out, f"#4 自依赖未被拒：{out}"
+        # #5：未配置门禁跳过但点明「未生效」；显式豁免则回豁免理由
+        ok, _, detail = run_check(tmp2, load_state(tmp2), "verify", "cmd:test")
+        assert ok and "未生效" in detail, f"#5 未配置门禁应提示未生效：{detail}"
+        sc = load_state(tmp2, lock=True)
+        sc["gate_waivers"] = {"test": "纯文档，无测试"}
+        save_state(tmp2, sc)
+        ok, _, detail = run_check(tmp2, load_state(tmp2), "verify", "cmd:test")
+        assert ok and "已豁免" in detail and "纯文档" in detail, f"#5 豁免未生效：{detail}"
+        # #2：start 记 owner / attempts / lease_until，新租约不过期
+        quiet("task", "add", "S2", "--title", "build",
+              "--role", "backend-developer", "--phase", "develop")
+        code, out = quiet("task", "start", "S2", "--owner", "be-agent-7")
+        assert code == 0, f"#2 start 失败：{out}"
+        s2 = find_task(load_state(tmp2), "S2")
+        assert s2.get("owner") == "be-agent-7", f"#2 owner 未记：{s2.get('owner')}"
+        assert s2.get("attempts") == 1, f"#2 attempts 应为 1：{s2.get('attempts')}"
+        assert s2.get("lease_until") and not lease_expired(s2), "#2 新租约不该过期"
+        # 过期租约要认出来；done 后清租约、attempts 累计保留、不再报过期
+        expired = dict(s2)
+        expired["lease_until"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() - 10))
+        assert lease_expired(expired), "#2 过期租约未被认出"
+        quiet("task", "done", "S2")
+        s2 = find_task(load_state(tmp2), "S2")
+        assert "lease_until" not in s2, f"#2 done 未清租约：{s2}"
+        assert s2.get("attempts") == 1 and not lease_expired(s2), "#2 done 后 attempts 应保留且不报过期"
+        os.chdir(old)
+        shutil.rmtree(tmp2, ignore_errors=True)
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
           "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / "
-          "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根")
+          "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
+          "任务租约 / 自依赖 / 门禁豁免")
 
 
 # --------------------------------------------------------------------------
@@ -5103,6 +5221,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--status")
     p.add_argument("--force", action="store_true")
     p.add_argument("--role-lock", action="store_true", help="start 时同时把写入范围锁到该任务角色")
+    p.add_argument("--owner", help="start 时记录认领者（如 agent_id），并行下辅助归属")
     p.set_defaults(func=cmd_task)
 
     p = sub.add_parser("next", help="调度：返回依赖已满足的就绪任务")
