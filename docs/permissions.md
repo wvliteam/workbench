@@ -94,7 +94,7 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 **角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。范围里没有以该前缀打头的模式，就是谁都不能写。
+**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。多仓库工作区布局（存在 `repos/`）下再叠加三个工作区级前缀：`scripts/`、`repos.json`、`.vscode/` —— 公共脚本、仓库清单与本机 IDE 配置由主线程维护，角色只读。范围里没有以该前缀打头的模式，就是谁都不能写。
 
 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/main/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
@@ -104,7 +104,7 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
-**最后两个前缀是只读资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 是公共操作规范（输出信封等，任何角色只读，全体角色 prompt 里的「必读」都指向它 —— 不收窄的话 reviewer 与开发的裸 `*.md` 就能改全体角色的必读文档，性质等同改角色定义）。设计依据见 [references-extraction.md](references-extraction.md)。
+**最后两个前缀是只读资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 是公共操作规范（输出信封等，任何角色只读，全体角色 prompt 里的「必读」都指向它 —— 不收窄的话 reviewer 与开发的裸 `*.md` 就能改全体角色的必读文档，性质等同改角色定义）。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
 
 各角色的默认范围见 [roles.md](roles.md#角色矩阵)。这里只记它的形状：**产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这是第二层之外的纵深 —— 契约冻结挡「已定稿的东西被改」，阶段隔离挡「下游角色去改上游产物」，包括还没定稿的当前阶段产物。两者独立互补：`qa` 改 `design.md` 会被两层各自拦一次；阶段隔离只在守卫能判出角色时生效，冻结不依赖角色。
 
@@ -219,10 +219,11 @@ if wb_role in ROLES:
 | `role scopes --reset` | 重写全部角色的写入范围 |
 | `task skip` | 跳过的任务在 `tasks_done` 门禁里等同完成 |
 | `init --force` | 清空阶段、契约基线、门禁记录与冻结清单 |
+| `flow new` / `flow switch` / `flow remove` | 开线、切线、删线是编排者的调度决定 —— 切走会让后续状态命令落到另一条流水线，删的是整条流水线的状态与产物 |
 | `contract dispute --clear` | 解除争议熔断是编排者决策 |
-| `config set <除 gate_commands.* 外的任何键>` | `role_scopes.*` 能直接给自己开范围，改的都是守卫自己的配置 |
+| `config set <除 gate_commands.* / gate_waivers.* 外的任何键>` | `role_scopes.*` 能直接给自己开范围，改的都是守卫自己的配置 |
 
-唯一例外：**qa 可以 `config set gate_commands.*`**（补上门禁命令是它的既定流程）。即使如此，`cmd_config` 在写入前、`run_check` 在执行前都会用 `catastrophic_command()` 筛一遍值 —— 见 [gates.md](gates.md)。
+唯一例外：**qa 可以 `config set gate_commands.*` 与 `gate_waivers.*`**（补上或豁免门禁配置是它的既定流程 —— 判定「这个项目不需要某门禁」就是它的活）。即使如此，`cmd_config` 在写入前、`run_check` 在执行前都会用 `catastrophic_command()` 筛一遍值 —— 见 [gates.md](gates.md)。
 
 `contract unlock` / `bump` 加的是 owner 校验：`--name` 必须能在登记表里查到 owner，owner 不是自己也不放行。唯一放行的是 `architect`（`CONTRACT_STEWARD`）—— 接口契约由它定义，`.claude/agents/architect.md` 里写明的流程就是由它替 owner 走 unlock/bump（契约变更要给消费方建同步任务，那是架构决策，不是实现者的局部动作）。`--name` 查不到（比如 flag 值是个变量）也拒：核不了 owner 就不放行。
 

@@ -26,11 +26,13 @@
 | design | `design.md` | `方案对比` | `contracts_locked` `tasks_exist` `no_blocked:*` | `design-doc` —— architect 自己登记 |
 | develop | `verification.md` | — | `contracts_intact` `tasks_done:develop` `cmd:lint` `cmd:build` | 不冻结 |
 | verify | `test-report.md` | — | `contracts_intact` `tasks_done:verify` `cmd:test` | `artifact-test-report`（owner `qa`） |
-| retro | `retro.md` | `改进项`、`沉淀` | `knowledge_written` `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
+| retro | `retro.md` | `改进项`、`可复用`、`沉淀` | `knowledge_written` `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
 
 产物路径与章节是**阶段间的接口** —— 下游 subagent 按固定路径读上游产物，所以它们硬编码在表里而不是配置项。
 
-## 九种断言
+## 断言总览
+
+九种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **8 种 `run_check()` 断言**。两者合称门禁断言，下文「八种」指后者。
 
 | 断言 | 语法 | 通过条件 | 用意 |
 | --- | --- | --- | --- |
@@ -64,7 +66,7 @@
 
 **写它的是编排者，不是 developer subagent。** 两个原因，缺一条这个安排就没必要：一是并行的两个开发角色共用这一份文件，各自 Write 会覆盖对方，而 shell 追加（`>> .workbench/...`）被守卫的 `.workbench` 兜底那条拦掉 —— subagent 没有安全的追加通道；二是这份文件的价值恰好在于它不是自我报告，subagent 声称跑过什么不构成证据，编排者自己跑一遍才构成。所以 developer agent 的定义只要求它把命令原文与完整输出报回来。
 
-**`cmd:<键>` 未配置时判 PASS 并说明「未配置，跳过」。** 这是最容易失效的一条 —— 未配置就等于门禁不存在。因此在 `wb-flow` skill、`qa` agent 与 `CLAUDE.md` 三处都写了「项目一旦有测试就配上」。
+**`cmd:<键>` 未配置时判 PASS，但分三态。** 纯跳过（「未配置，跳过」）只给「碰巧没配」；项目确实不需要某门禁时用 `config set gate_waivers.<名> '<理由>'` 显式声明，输出转为「已豁免（gate_waivers.<名>）：<理由>」—— 把「没测试是隐形绿灯」与「明确不需要」区分开。否则这条最容易失效：未配置就等于门禁不存在。因此在 `wb-flow` skill、`qa` agent 与 `CLAUDE.md` 三处都写了「项目一旦有测试就配上」。
 
 命令值必须是**非空字符串**：
 
@@ -81,7 +83,7 @@ if not isinstance(cmd, str) or not cmd.strip():
 
 qa 也不能设任意值。`cmd_config` 写入前、`run_check` 执行前都会用 `catastrophic_command()` 筛一遍命令值（删根删家目录、force push、`DROP`/`TRUNCATE`、下载远端脚本直接进 shell、直写块设备、格式化文件系统、fork bomb 那一套，与 Bash 分支共用同一张表）。写入时筛一遍防新增，执行时再筛一遍防**存量** —— 这层加上之前配进 `state.json` 的值不在当时任何检查里。筛掉的是灾难性模式，不是任意代码执行本身：qa 配一条 `npm test` 就是一条 `npm test`，这是流程要它干的事；这层的上限是「catastrophic 模式进不了门禁」，不是「qa 只能配已知命令」。后者做不了 —— 门禁命令天然是任意的（每个项目的测试命令都不同），把白名单写死在 wb.py 里等于让门禁只对已知技术栈的项目存在。
 
-**完整输出落盘 `.workbench/gate-<键>.log`，detail 只带最后 5 行加日志路径。** 之前只带最后一行，而测试框架的最后一行通常是汇总行（`2 failed, 8 passed in 3.2s`）—— 哪两个用例失败、为什么失败全部丢失，诊断只能手动重跑一遍刚跑完的命令。
+**完整输出落盘 `gate-<键>.log`（跟着 state 的位置：main flow 在 `.workbench/`，其余在 `.workbench/flows/<flow>/`），detail 只带最后 5 行加日志路径。** 之前只带最后一行，而测试框架的最后一行通常是汇总行（`2 failed, 8 passed in 3.2s`）—— 哪两个用例失败、为什么失败全部丢失，诊断只能手动重跑一遍刚跑完的命令。
 
 **超时是一条 FAIL，不是崩溃。** `subprocess.TimeoutExpired` 被捕获转成 FAIL。不捕获的话 hook 路径有 `cmd_hook` 的兜底 try，但 CLI 路径没有 —— `gate check` 与 `phase advance` 会打出 Traceback，退出码恰好也是 1，自动化脚本看不出区别，人看到的是崩溃。
 
@@ -92,7 +94,7 @@ $ python3 .claude/hooks/wb.py gate check
 门禁 · develop（开发实现）
   [PASS] 契约无漂移 — 一致
   [FAIL] develop 任务全部完成 — 未完成：T1, T2, T4
-  [PASS] 命令门禁 lint — 未配置，跳过（config set gate_commands.lint '<命令>'）
+  [PASS] 命令门禁 lint — 未配置，跳过（config set gate_commands.lint '<命令>'；项目确实不需要则 config set gate_waivers.lint '<理由>'）
 结论：未通过
 $ echo $?
 1

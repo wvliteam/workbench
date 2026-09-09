@@ -70,6 +70,10 @@
 | `contracts[].kind` | `"artifact"` = 阶段产物，`contracts_locked` 门禁不数它。接口契约与 `design-doc` 没有这个字段 |
 | `role_scopes` | 角色 → 可写路径 `fnmatch` 模式，产物目录按阶段隔离 |
 | `gate_commands` | 命令门禁，空值 = 跳过 |
+| `gate_waivers` | 显式豁免的门禁（`{"build": "纯文档项目，无构建"}`）—— 把「碰巧没配」与「明确不需要」区分开，豁免理由随门禁输出展示 |
+| `task_lease` | `task start` 授予的租约秒数（默认 3600）。过期只在 status/next 提示，不自动抢占 —— 抢占决定归编排者 |
+| `allowed_skills` | subagent 可调 skill 白名单（`"*"` = 全部）。空 = 拒全部，只有主线程能改（审核动作） |
+| `state_rev` | 每次 `save_state` 自增的 CAS 计数器，`phase advance` 落记录前重读比对（见下方并发节） |
 | `log` | 审计日志，尾部保留 `MAX_LOG`（500）条 |
 
 ### 写入原子性与并发
@@ -89,7 +93,7 @@
 
 **锁不能跨门禁命令持有。** `cmd:test` 可能是几分钟的 `npm test`，攥着锁跑会把并行 subagent 的 `task done` 全堵在等锁上。`phase advance` 因此分两段：先无锁算门禁并打印结论，再上锁重读状态落记录 —— 期间落盘的 `task done` 不会被门禁前的旧快照盖掉。代价是门禁结论反映的是它开跑那一刻的状态，晚 0.1 秒完成的任务不算进这次结论，下一次 `gate check` 才算。
 
-两段之间阶段可能已被另一个进程推走，所以第二段重读后要比对：还是 `cur` 才落记录，否则拒绝并让重跑。不比对的话记录会按旧 `cur` 写回 `phase` —— 对方推了两次就是**倒退一个阶段**，而这次的门禁结论算的本来就是 `cur` 那个阶段，已经作废。
+两段之间状态可能已被另一个进程改过，所以第二段重读后要做比对：**`phase` 还是 `cur`、且 `state_rev` 没变**才落记录，否则拒绝并让重跑。`state_rev` 是每次 `save_state` 自增的 CAS 计数器 —— 只比 phase 不够：门禁窗口期间落盘的 `task done` / `task block` 不动 phase，但让这次门禁结论作废，比对要抓的正是这种「阶段没被推走但结论已过时」。不比对的话记录会按旧 `cur` 写回 `phase` —— 对方推了两次就是**倒退一个阶段**，而这次的门禁结论算的本来就是 `cur` 那个阶段，已经作废。
 
 `PostToolUse` hook 仍然完全不写 `state.json`：它在每次文件写入时触发，上锁会把所有并行写入串行化到状态锁上。它只往 `artifacts.jsonl` 追加，纯 append 无竞态。
 
@@ -145,6 +149,8 @@ workbench/
 **代价：子目录里跑命令影响的是整个工作区**，不是「只影响当前仓库」—— 从旧布局迁移的人会误以为状态按仓库隔离。缓解是 `status` 与 `SessionStart` 都打一行根路径，看到外层根就是对的。
 
 同一仓库的第二个需求：`report --write` 归档后 `init --force` 重开（串行），`flow new` 开一条新需求线（并行，状态、锁、门禁记录、产物按 flow 隔离在 `flows/<flow>/` 与 `artifacts/<flow>/`），代码也要物理隔离时叠加 `git worktree`。早期版本一份 `state.json` 只能一条流水线，当时认为多流程实例要在每个命令上加 `--flow` 选择器、worktree 已经免费解决；现在实现的是指针方案：CLI 按 `.workbench/current-flow` 指针定位单条 flow，守卫读全部 flow 的并集（A flow 锁的契约在 B flow 视角照样冻结），`load_state` 时以 `st["_flow"]` 定点写回目标，命令中途切指针不会把 A flow 的状态写进 B flow 的文件。选择器方案被否掉的原因不变：每命令一个 flag 是全量接口翻新，而指针只动两处（读与写），角色范围用 `artifacts/*/<phase>/**` 通配就跨 flow 复用。
+
+**新 flow 从 main 深拷贝继承四个工作区级配置键**：`role_scopes` / `gate_commands` / `gate_timeout` / `max_parallel`（`INHERIT_KEYS`）。它们描述「这个工作区怎么干活」，不继承的话每条 flow 都要重抄一遍 —— 漏抄一个仓库认领会让指针切换后的角色范围判定整个换掉。任务、契约与阶段进度**不继承**：那是每条需求线自己的东西。
 
 ### 多仓库工作区的两处必调（不调是静默出错）
 
@@ -262,11 +268,11 @@ wb.py gate check（verification.md + contracts_intact + tasks_done:develop + cmd
 
 ### 冻结防线覆盖不到的写入路径
 
-Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv` / `install` 已纳入当前本地 `wb.py` hook 的 `resolve()` 解析；这些规则最初曾在已移除的 `wbsvr` 历史设计阶段 0 中被提出，但当前能力不依赖、也不调用该服务 —— 促成它的是状态文件：`cp` 覆盖 `state.json` 此前直接通过，而状态文件没有任何哈希兜底，契约有 `contract verify`、状态没有。仍未纳入的：`rsync`、编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
+Bash 分支的冻结检查靠 `BASH_WRITE` 正则识别写入意图。`cp` / `mv` / `ln` / `rsync` / `install` 已纳入当前本地 `wb.py` hook 的 `resolve()` 解析（`_LAST_ARG` 集合，取末参为写入目标）；这些规则最初曾在已移除的 `wbsvr` 历史设计阶段 0 中被提出，但当前能力不依赖、也不调用该服务 —— 促成它的是状态文件：`cp` 覆盖 `state.json` 此前直接通过，而状态文件没有任何哈希兜底，契约有 `contract verify`、状态没有。仍未纳入的：编译型工具的输出、外部编辑器、`git checkout`、用户自己动手改。
 
 **这一节的旧版预测「加进去会拦掉大量正常的构建与资源拷贝」，那个预测错了。** 判定是两段式的：命中 `BASH_WRITE` 只是第一段，还要 `frozen_hits()` 在命令文本里找到冻结路径才拒。`cp dist/x.js public/` 两段都不沾，构建与资源拷贝根本不进第二段。
 
-**`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源和目标）。实现细节见 [roma-comparison.md](roma-comparison.md) 第一节。
+**`cp`/`mv` 的源和目标区分已由 `resolve()` 精确处理。** `_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标，`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧行为（不区分源和目标）。实现细节见 [roma-comparison.md](../draft/roma-comparison.md) 第一节。
 
 **嵌套 `.workbench/` 的冻结按写入目标反查根（2026-09-06 已落地，当时为布局 A 而做；唯一布局下 `repos/` 里不该再有嵌套，这层反查保留为防误操作 init 的冗余）。** 会话 cwd 在工作区外层时 `find_root()` 命中外层，而目标可能落在某个自带 `.workbench/` 的仓库里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行（Bash 精确通道下 `real_hits` 过滤后 `hits=[]`，正是这个形态）。`_check_write_target` 因此从写入目标向上收集会话根之内的全部嵌套根，逐根按该根的相对路径查冻结与解冻窗口；拒绝话术带内层工作台标识与实名契约名。**顺带修掉一个存量洞**：清单里的目录条目带尾斜杠（`.workbench/flows/`），检查处 `f + "/"` 拼出双斜杠永远不中，flow 布局下 `flows/<flow>/state.json` 整类漏拦 —— selfcheck 此前只测 legacy 路径（`rel in frozen` 直接命中），没测到 startswith 分支。归一化成无尾斜杠再比，嵌套断言块先把它暴露了出来。
 

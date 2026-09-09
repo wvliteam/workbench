@@ -141,7 +141,7 @@ python3 .claude/hooks/wb.py config set gate_commands.lint 'npm run lint'
 python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 ```
 
-失败时完整输出落在 `.workbench/flows/<flow>/gate-<名>.log`，门禁说明里只带最后 5 行 —— 别为了看失败原因把命令再跑一遍。单条命令超过 `gate_timeout`（默认 1800 秒）记 FAIL，不是崩溃。
+失败时完整输出落在 `gate-<名>.log`（main flow 在 `.workbench/`，其余在 `.workbench/flows/<flow>/`），门禁说明里只带最后 5 行 —— 别为了看失败原因把命令再跑一遍。单条命令超过 `gate_timeout`（默认 1800 秒）记 FAIL，不是崩溃。
 
 ## 权限守卫
 

@@ -37,15 +37,15 @@
 | `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini` | `qa` | 测试框架配置按约定放仓库根，而 qa 原本只有四个测试**目录** —— 配 e2e 第一步就走不通。两族要一起给，否则 qa 配得了 vitest 配不了 pytest。`pyproject.toml` / `setup.cfg` 故意不给：那两个同时装着依赖与打包配置，不是测试专属文件 |
 | `components/ pages/ lib/ styles/` 与 `.js` `.jsx` `.vue` `.html` `.scss` | `frontend-developer` | 原列表默认了「源码在 `src/` 或 `web/` 下且用 TypeScript」，Next.js / Nuxt / Vite 的标准布局全在范围外 |
 
-放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。`knowledge/` 是第四处：reviewer 与两个开发都持有 `*.md`，不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。`references/` 是第五处：公共操作规范（全体角色必读的输出信封），任何角色只读 —— 改规范等于改角色定义，交回主线程。
+放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。多仓库工作区布局（存在 `repos/`）下还叠加 `scripts/` `repos.json` `.vscode/` 三个工作区级前缀，同属「主线程维护、角色只读」。`knowledge/` 是第四处：reviewer 与两个开发都持有 `*.md`，不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。`references/` 是第五处：公共操作规范（全体角色必读的输出信封），任何角色只读 —— 改规范等于改角色定义，交回主线程。
 
 **产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这挡的是下游角色去改上游产物 —— `qa` 发现需求写得不清楚，顺手把 `requirements.md` 改成自己理解的样子，之后就没人知道原始需求是什么了。改上游产物要走上游角色，或者报回主线程。
 
 阶段过了门禁之后还多一道：那份产物被登记成契约并锁定，连 owner 自己都要先 `contract unlock --reason` 申报才能改（见 [contracts.md](contracts.md#阶段产物)）。阶段隔离只在守卫判得出角色时生效，冻结不依赖角色 —— 主线程与非角色 agent 也拦得住。
 
-## 三个不许动手的角色
+## 四个不许动手的角色
 
-`analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。这不是疏忽：
+`analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。`pm` 同样不含代码路径（它只能写自己的产物目录），只是它的本职是澄清需求而非触碰代码，不算一个「诱惑」。这不是疏忽：
 
 | 角色 | 为什么不许改代码 |
 | --- | --- |

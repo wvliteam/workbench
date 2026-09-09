@@ -4,25 +4,36 @@
 
 **这些文档记的是「为什么这样设计、取舍是什么、已知边界在哪」，不是 API 参考。** 具体行为以 `wb.py` 与 `wb.py selfcheck` 的断言为准 —— 抄一份到散文里只会造出一份会漂移的副本。用法在 `CLAUDE.md` 与 `.claude/skills/` 里。
 
+本目录只保留**当前架构设计参考**。评估、调研、平台对齐、历史方案与逐日评审等过程文档移到了仓库根的 [`draft/`](../draft/)，见文末。
+
 | 文档 | 内容 |
 | --- | --- |
 | [architecture.md](architecture.md) | 分层、状态模型、外层唯一状态布局、数据流、设计取舍、已知边界与升级路径 |
 | [roles.md](roles.md) | 八个角色的矩阵与写入范围、协作协议、交接格式、定制与新增 |
-| [gates.md](gates.md) | 门禁引擎：八种断言的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
+| [gates.md](gates.md) | 门禁引擎：八种断言（加 `artifacts` 键共九种准出条件）的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
 | [contracts.md](contracts.md) | 契约机制：哈希冻结 + 只读守卫、申报窗口、生命周期、`bump` 的影响面传播、失效模式 |
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、wb.py 特权子命令层、危险命令分级、hook 载荷与失败语义 |
-| [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、产物归属、停止条件与防失控 |
-| [review.md](review.md) | 实现评审（2026-09-01）：19 项问题的结果一览，以及**评审自己判错的地方** |
-| [parallel-implementation.md](parallel-implementation.md) | 并行开发改造记录（2026-09-06）：环境变量钉根 / flow 维度 / 嵌套根反查三步实现，顺带修掉的存量洞、判错复盘、遗留边界 |
-| [cross-flow-review.md](cross-flow-review.md) | 跨 flow 并发评审（2026-09-06）：四处缺口（关窗死锁 / 归属串扰 / 指针竞态 / 配置丢失）的实证、修复方案、判错复盘与修复后的边界 |
-| [wb-init.md](wb-init.md) | 多仓库初始化 skill（2026-09-07）：需求与 ROMA 参照物（`materialize_repo_selection.py`）、清单/落点/合并策略等设计取舍、测试矩阵与已知边界 |
-| [wbsvr.md](wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
-| [codex-agent-migration.md](codex-agent-migration.md) | 迁移到 Codex 的适配层：工具名与载荷键的差异、输出协议差异。**配置层与守卫内核均已落地** —— `WRITE_TOOL`/`SHELL_TOOL` 覆盖 Codex 工具名、`apply_patch` 目标解析、`--format codex` 驱动 `SubagentStop` JSON 输出 |
-| [roma-comparison.md](roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序。**第 1–6、8、10 节已落地，第 9 节仍是提案，第七节结论是不做** |
-| [references-extraction.md](references-extraction.md) | ROMA `references/` 公共参考层的分析（2026-09-07）与落地记录：输出信封抽成 `references/output-contract.md`、16 份角色定义插必读指针与双保险底线、`references/` 进守卫前缀 |
-| [code-review-2026-09-09.md](code-review-2026-09-09.md) | 工作区未提交改动审查（2026-09-09）：wb-init 提为 `scripts/` + TUI + 清单 + Codex 软链的 20 项已确认问题，含守卫回归（未跟踪软链、脚本绕过只读守卫）、数据丢失路径与修复优先级 |
+| [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、任务生命周期与租约、产物归属、停止条件与防失控 |
+| [wb-init.md](wb-init.md) | 多仓库初始化 skill：需求与设计取舍、清单/落点/合并策略、测试矩阵与已知边界 |
 
-`review.md` 不是待办清单 —— 19 项已全部处理，它现在的用途是记录几处推理失误，包括一条被实测推翻的事实陈述。**任何文档与代码冲突时以代码为准。**
+**任何文档与代码冲突时以代码为准。**
+
+## draft/：过程文档（非当前架构参考）
+
+评估、调研、平台对齐、历史方案与逐日评审记录 —— 记的是「某个时点做过什么判断、为什么这么改」，不是当前设计的正文。留档备查，读时以正文与代码为准。
+
+| 文档 | 内容 |
+| --- | --- |
+| [review.md](../draft/review.md) | 实现评审（2026-09-01）：19 项问题的结果一览与**评审自己判错的地方**（19 项已全部处理，不是待办清单） |
+| [parallel-implementation.md](../draft/parallel-implementation.md) | 并行开发改造记录（2026-09-06）：环境变量钉根 / flow 维度 / 嵌套根反查三步实现，顺带修掉的存量洞、判错复盘、遗留边界 |
+| [cross-flow-review.md](../draft/cross-flow-review.md) | 跨 flow 并发评审（2026-09-06）：四处缺口（关窗死锁 / 归属串扰 / 指针竞态 / 配置丢失）的实证、修复方案、判错复盘与修复后的边界 |
+| [code-review-2026-09-09.md](../draft/code-review-2026-09-09.md) | 工作区未提交改动审查（2026-09-09）：wb-init 提为 `scripts/` + TUI + 清单 + Codex 软链的 20 项已确认问题，含守卫回归、数据丢失路径与修复优先级 |
+| [framework-assessment.md](../draft/framework-assessment.md) | 框架功能设计评估（2026-09-04）：已有能力盘点、主要缺口与控制面提案 |
+| [codex-claude-parity-review.md](../draft/codex-claude-parity-review.md) | Codex 与 Claude 平台能力对齐审阅：身份字段、静态 profile、shell 审计等的实测与结论 |
+| [codex-agent-migration.md](../draft/codex-agent-migration.md) | 迁移到 Codex 的适配层调研与方案（配置层与守卫内核均已落地）：工具名与载荷键差异、输出协议差异 |
+| [roma-comparison.md](../draft/roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序 |
+| [references-extraction.md](../draft/references-extraction.md) | ROMA `references/` 公共参考层的分析（2026-09-07）与落地记录 |
+| [wbsvr.md](../draft/wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
 
 ## 一页速览
 
