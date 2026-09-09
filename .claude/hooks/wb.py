@@ -2034,15 +2034,21 @@ def cmd_next(args) -> None:
     if not rt:
         blocked = [t for t in st["tasks"] if t["status"] == "blocked" and t["phase"] == phase]
         doing = [t for t in st["tasks"] if t["status"] == "doing"]
+        # stale 与 blocked 同为停机信号（wb-loop 见到就停下交人）：上游被推翻但还没
+        # reopen。漏了它会让只剩 stale 的阶段报「可以跑门禁了」，门禁的 tasks_done
+        # 撞上 stale 又是 FAIL —— 下一轮 loop 空转。
+        stale = [t for t in st["tasks"] if t["status"] == "stale"]
         if args.json:
             print(json.dumps({"tasks": [], "doing": [t["id"] for t in doing],
-                              "blocked": [t["id"] for t in blocked]}, ensure_ascii=False))
+                              "blocked": [t["id"] for t in blocked],
+                              "stale": [t["id"] for t in stale]}, ensure_ascii=False))
         else:
             print("无就绪任务。"
                   + (f" 进行中：{', '.join(t['id'] for t in doing)}." if doing else "")
                   + (f" 阻塞：{', '.join(t['id'] for t in blocked)}." if blocked else "")
-                  + (" 该阶段可以跑门禁了。" if not doing and not blocked else ""))
-        sys.exit(0 if not (doing or blocked) else 3)
+                  + (f" 失效：{', '.join(t['id'] for t in stale)} — 上游被推翻，需 reopen 后重跑." if stale else "")
+                  + (" 该阶段可以跑门禁了。" if not doing and not blocked and not stale else ""))
+        sys.exit(0 if not (doing or blocked or stale) else 3)
     batch = rt if args.all else rt[:1]
     if args.all:
         batch = rt[: st["max_parallel"]]
@@ -4450,6 +4456,13 @@ def cmd_selfcheck(args) -> None:
         pool = [t for t in st["tasks"] if t["phase"] == "develop"]
         left = [t["id"] for t in pool if t["status"] not in ("done", "skipped")]
         assert stid_e in left, "传递 stale 任务应被视为未完成"
+
+        # next 的停机信号必须含 stale：只剩 stale（无 doing/blocked）时 exit 3，
+        # 不是 0。漏了它 wb-loop 会误判「可以跑门禁了」。
+        code, out = quiet("next", "--json")
+        assert code == 3 and stid_e in out, \
+            "无就绪且仅剩 stale 时 next 应 exit 3 并报出 stale 任务，实际 " \
+            f"exit {code}：{out}"
 
         code, out = quiet("task", "reopen", stid_a)
         assert code == 0, out
