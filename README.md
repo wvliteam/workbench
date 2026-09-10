@@ -7,7 +7,14 @@
 ```
 .claude/
 ├── settings.json           权限规则 + 4 个 hook 注册
-├── hooks/wb.py             状态内核：状态机 / 门禁 / 契约 / 调度 / 权限守卫（含自检）
+├── hooks/                  状态内核：wb.py 是唯一入口，实现在同目录模块
+│   ├── wb.py                  入口：sys.path + 转发 main
+│   ├── wb_const.py            常量表：门禁规则 / 角色范围 / 守卫前缀（零依赖）
+│   ├── wb_bash.py             命令行静态解析（纯函数）
+│   ├── wb_core.py             状态 / flow / 锁 / 冻结 / 契约 / 门禁 / 调度
+│   ├── wb_guard.py            权限守卫与 4 个 hook 事件
+│   ├── wb_cli.py              CLI 命令、参数解析与 main()
+│   └── wb_selfcheck.py        自检（wb.py selfcheck）
 ├── agents/                 8 个角色 subagent
 │   ├── pm.md                   需求澄清
 │   ├── analyst.md              现状分析（只读）
@@ -74,7 +81,7 @@ init 之后必须调 `role_scopes`（改成按仓库前缀，否则会歪成按�
 
 ### 阶段门禁
 
-每个阶段有准出条件，不满足就推不动。规则在 `wb.py` 的 `GATES` 表里，一处修改。
+每个阶段有准出条件，不满足就推不动。规则在 `wb_const.py` 的 `GATES` 表里，一处修改。
 
 ```bash
 python3 .claude/hooks/wb.py gate check          # 退出码 1 = 未通过，逐条给原因
@@ -171,9 +178,9 @@ python3 .claude/hooks/wb.py log --tail 200
 2. `wb.py init --name <项目名>`。
 3. 配门禁命令：`config set gate_commands.test '<你的测试命令>'`（lint / build 同理）。**不配等于那条门禁不存在。**
 4. 按实际目录布局调角色范围：`config set role_scopes.<角色> '<JSON 数组>'`。别把产物目录放宽回 `.workbench/artifacts/**` —— 那会撤掉阶段隔离。
-5. 阶段准出条件要改就动 `wb.py` 里的 `GATES` 表，改完跑 `selfcheck`。
+5. 阶段准出条件要改就动 `wb_const.py` 里的 `GATES` 表，改完跑 `selfcheck`。
 
-升级已有项目的 `wb.py` 之后跑一次 `wb.py role scopes --reset`（先 `role scopes` 存一份定制值）—— 新增的默认值不会自动覆盖老 `state.json` 里的旧值。跨仓库布局（`repos/*`）下它跟 `init` 走同一条路径，重新按仓库前缀算，不会把范围刷成裸默认值。
+升级已有项目时 `.claude/hooks/` 要整目录拷贝 —— `wb.py` 只是入口，实现在同目录 `wb_*.py` 模块里，只拷 `wb.py` 会缺模块（入口会给出明确报错，`selfcheck` 有一条分发完整性断言兜底）。升级后跑一次 `wb.py role scopes --reset`（先 `role scopes` 存一份定制值）—— 新增的默认值不会自动覆盖老 `state.json` 里的旧值。跨仓库布局（`repos/*`）下它跟 `init` 走同一条路径，重新按仓库前缀算，不会把范围刷成裸默认值。
 
 ## 设计与实现细节
 

@@ -231,7 +231,7 @@ if wb_role in ROLES:
 
 ## 危险命令分级
 
-Bash 调用除了冻结检查，还按命令文本查危险命令，两级：`DENY_BASH` 退出码 2（删根删家目录、`rm -r ../../`、force push、`DROP`/`TRUNCATE`、`curl|sh`、直写块设备、`mkfs`、`chmod 777 /`、fork bomb、`dd of=/dev/`），`WARN_BASH` 放行并把提示写到 stdout（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish` / `twine upload`）。完整正则读 `wb.py` 里那两张表，这里不抄。
+Bash 调用除了冻结检查，还按命令文本查危险命令，两级：`DENY_BASH` 退出码 2（删根删家目录、`rm -r ../../`、force push、`DROP`/`TRUNCATE`、`curl|sh`、直写块设备、`mkfs`、`chmod 777 /`、fork bomb、`dd of=/dev/`），`WARN_BASH` 放行并把提示写到 stdout（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish` / `twine upload`）。完整正则读 `wb_bash.py` 里那两张表，这里不抄。
 
 分级的依据：不可逆或灾难性的进 DENY，开发中确有正当用途的进 WARN —— 后四条拒绝会很烦人，而提示出现在 transcript 里模型能看见。
 
@@ -322,7 +322,7 @@ hook 是主要机制，`settings.json` 做粗粒度兜底：
 
 ## 自检覆盖
 
-守卫的实际拦截边界**以 `selfcheck` 的断言为准**，这里不复述 —— 抄一份就是造一份会漂移的副本，而这份副本没人会去更新。跑 `python3 .claude/hooks/wb.py selfcheck` 看它跑什么，或读 `wb.py` 里 `cmd_selfcheck` 的「权限守卫」到「产物挂载」几段 —— 覆盖范围以跑出来的清单为准，正文不逐一列。
+守卫的实际拦截边界**以 `selfcheck` 的断言为准**，这里不复述 —— 抄一份就是造一份会漂移的副本，而这份副本没人会去更新。跑 `python3 .claude/hooks/wb.py selfcheck` 看它跑什么，或读 `wb_selfcheck.py` 里 `cmd_selfcheck` 的「权限守卫」到「产物挂载」几段 —— 覆盖范围以跑出来的清单为准，正文不逐一列。
 
 要知道的只有断言的组织方式：**正例与反例成对。** 只测「该拦的拦住了」会漏掉「不该拦的也拦了」，那种失效表现为 agent 无法工作，比漏拦更快被发现但同样是 bug。误报用例专门覆盖 `role` / `state.json` 这类在业务代码里高频出现的词。
 

@@ -34,7 +34,7 @@
 | 决策 | 选择 | 为什么 / 代价 |
 | --- | --- | --- |
 | 清单位置 | 工作区根 `repos.json`，进 git | 清单是团队共识不是本机状态；ROMA 的 `.repo-list` 同样进 git，它的 `init-selection.json`（用户选择）才不进。代价：仓库地址公开在仓库里，私有 fork 地址不适合入清单 |
-| clone 落点 | `repos/<name>` | 外层唯一布局的既有约定，不引入 ROMA 的 `repos/.source/` 第二层 —— `wb.py` 的 `repo_layout_scopes` / `nested_roots` 都按 `repos/*` 认 |
+| clone 落点 | `repos/<name>` | 外层唯一布局的既有约定，不引入 ROMA 的 `repos/.source/` 第二层 —— 内核的 `repo_layout_scopes`（`wb_core`）/ `nested_roots`（`wb_guard`）都按 `repos/*` 认 |
 | workspace 文件落点 | `.workbench/<工作区名>.code-workspace` | 对应 ROMA 的 `.roma/`：folders 用绝对路径，所以必须放 gitignore 里（`.workbench/` 已忽略），每台机器自理。绝对路径换机器失效的解药就是「始终刷新」—— 重跑一次脚本即修复 |
 | settings 合并策略 | `git.scanRepositories` 只管理 `repos/` 前缀（按磁盘重写），前缀外的用户条目原样保留；`git.autoRepositoryDetection` / `git.repositoryScanMaxDepth` 直接更新；无效 JSON 不覆盖只告警 | 照抄 check-health 的 `_init_ide_settings`。代价：用户手写的 `repos/xxx` 条目若目录不存在会被清掉 —— 这是「磁盘为准」的延伸，不是缺陷 |
 | 脚本归属 | 根级 `scripts/`（`repos_apply.py` / `repos_tui.py`），不进 `wb.py`，也不进 `.claude/skills/wb-init/scripts/` | clone 和 IDE 配置不是流程状态，`wb.py` 是状态内核；`scripts/` 与 `repos.json` 是工作区级公共资产，进守卫前缀、角色写不到（见 [permissions.md](permissions.md#第四层角色写入范围)），主线程直做 |

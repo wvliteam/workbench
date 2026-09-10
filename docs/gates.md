@@ -10,7 +10,7 @@
 
 ## 规则表
 
-全部规则集中在 `wb.py` 的 `GATES` 字典，两个键：
+全部规则集中在 `wb_const.py` 的 `GATES` 字典，两个键：
 
 - `artifacts` —— 文件必须存在于 `.workbench/artifacts/<阶段>/` 且**非空**。空文件不算产出。
 - `checks` —— 断言字符串，格式 `类型:参数[:参数]`，由 `run_check()` 分派。
@@ -81,7 +81,7 @@ if not isinstance(cmd, str) or not cmd.strip():
 
 **`shell=True` 意味着门禁命令是一条从不经过 Bash 守卫的 shell。** 它不撞 `PreToolUse` hook（不是工具调用）、不撞冻结清单（`config` 键不是契约）、不撞角色范围（subprocess 没有 `agent_type`）。谁能写 `gate_commands.*`，谁就有一段任意代码执行 —— 所以特权子命令层把 `config set` 收窄到**只有 qa 能设 `gate_commands.*`**，其余键任何角色都设不了（[permissions.md](permissions.md#wbpy-特权子命令只有-hook-拿得到调用者身份)）。
 
-qa 也不能设任意值。`cmd_config` 写入前、`run_check` 执行前都会用 `catastrophic_command()` 筛一遍命令值（删根删家目录、force push、`DROP`/`TRUNCATE`、下载远端脚本直接进 shell、直写块设备、格式化文件系统、fork bomb 那一套，与 Bash 分支共用同一张表）。写入时筛一遍防新增，执行时再筛一遍防**存量** —— 这层加上之前配进 `state.json` 的值不在当时任何检查里。筛掉的是灾难性模式，不是任意代码执行本身：qa 配一条 `npm test` 就是一条 `npm test`，这是流程要它干的事；这层的上限是「catastrophic 模式进不了门禁」，不是「qa 只能配已知命令」。后者做不了 —— 门禁命令天然是任意的（每个项目的测试命令都不同），把白名单写死在 wb.py 里等于让门禁只对已知技术栈的项目存在。
+qa 也不能设任意值。`cmd_config` 写入前、`run_check` 执行前都会用 `catastrophic_command()` 筛一遍命令值（删根删家目录、force push、`DROP`/`TRUNCATE`、下载远端脚本直接进 shell、直写块设备、格式化文件系统、fork bomb 那一套，与 Bash 分支共用同一张表）。写入时筛一遍防新增，执行时再筛一遍防**存量** —— 这层加上之前配进 `state.json` 的值不在当时任何检查里。筛掉的是灾难性模式，不是任意代码执行本身：qa 配一条 `npm test` 就是一条 `npm test`，这是流程要它干的事；这层的上限是「catastrophic 模式进不了门禁」，不是「qa 只能配已知命令」。后者做不了 —— 门禁命令天然是任意的（每个项目的测试命令都不同），把白名单写死在 `wb_const.py` 里等于让门禁只对已知技术栈的项目存在。
 
 **完整输出落盘 `gate-<键>.log`（跟着 state 的位置：main flow 在 `.workbench/`，其余在 `.workbench/flows/<flow>/`），detail 只带最后 5 行加日志路径。** 之前只带最后一行，而测试框架的最后一行通常是汇总行（`2 failed, 8 passed in 3.2s`）—— 哪两个用例失败、为什么失败全部丢失，诊断只能手动重跑一遍刚跑完的命令。
 

@@ -16,7 +16,7 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 
 - 主编排：`/wb-flow`；自动排空：`/wb-loop`；契约操作：`/wb-contract`；多仓库初始化：`/wb-init`；知识沉淀/查找：`/wb-knowledge`
 - skills 按端各放一份（当前 `.claude/skills/` 与 `.agents/skills/`，手工同步，见文末「多端适配」）
-- 状态内核：`.claude/hooks/wb.py`（全端共用同一份，`--format` 适配各端 hook 载荷与输出协议；各端 hook 注册表引用自己的入口 —— Claude 端直接引用，Codex 端经 `.codex/hooks/wb.py` 软链落到同一文件，`resolve()` 会解析回真实路径，守卫不受影响）
+- 状态内核：`.claude/hooks/wb.py` 是唯一入口，实现按层次拆在同目录（`wb_const` / `wb_bash` / `wb_core` / `wb_guard` / `wb_cli` / `wb_selfcheck`，分发时整目录拷贝，缺文件入口会明确报错），全端共用同一份，`--format` 适配各端 hook 载荷与输出协议；各端 hook 注册表引用自己的入口 —— Claude 端直接引用，Codex 端经 `.codex/hooks/wb.py` 软链落到同一入口文件，`resolve()` 会解析回真实路径，守卫不受影响
 
 ## 何时走流程，何时不走
 
@@ -166,7 +166,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 ## 多端适配
 
 - 本文件是唯一正文，其他入口文件名（如 `CLAUDE.md`）软链到它 —— 改协作约定只改 `AGENTS.md`，接入新端加软链即可。历史上两文件曾是各自维护的摘要，各端拿到的规则深度不一致，已收敛。
-- 角色定义唯一维护在根目录 `agents/`（每个角色一份 `.md` 与 `.toml`）；`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色只改 `agents/` 后检查两端软链与 TOML 解析。
+- 角色定义唯一维护在根目录 `agents/`（每个角色一份 `.md` 与 `.toml`）；`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb_const.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色只改 `agents/` 后检查两端软链与 TOML 解析。
 - hook 挂在各端自己的注册表里（如 `.claude/settings.json`、`.codex/hooks.json`），部分端要求项目受信任、hook 通过审核后才真正运行。不要把端上的完全放行模式（如 `danger-full-access`）当作角色权限控制 —— 守卫本身就是 hook，hook 不加载就什么都不是。
 - 端注入的环境变量（如 `$CLAUDE_PROJECT_DIR`）只在该端存在，脚本不要依赖它跨端可用；通用钉根用 `WB_ROOT`，或直接相对/绝对路径。
 

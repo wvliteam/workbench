@@ -52,7 +52,7 @@ clarify    analyze    design     develop    verify     retro
 2. **契约**（contract）—— 接口定义、技术方案文档与过了门禁的阶段产物锁定后哈希冻结、文件转只读，改它必须先申报理由。绕过守卫的改动被门禁检出漂移。
 3. **权限守卫**（`PreToolUse` hook）—— 角色越权写、写出项目根、写冻结文件（含 Bash 路径），退出码 2 阻止调用。
 
-三者共享同一份 `.workbench/state.json`，由单一 Python 内核 `.claude/hooks/wb.py` 读写。
+三者共享同一份 `.workbench/state.json`，由同一个 Python 内核（`.claude/hooks/wb.py` 入口 + 同目录 `wb_*` 模块，划分见 [architecture.md](architecture.md#内核的模块划分曾是单文件记录一次决策反转)）读写。
 
 ## 为什么需要这一层
 

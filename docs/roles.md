@@ -14,7 +14,7 @@
 
 ## 角色矩阵
 
-这里是角色写入范围的唯一出处，权威值以 `wb.py` 的 `DEFAULT_ROLE_SCOPES` 为准（`wb.py role scopes` 打当前项目的实际值）。
+这里是角色写入范围的唯一出处，权威值以 `wb_const.py` 的 `DEFAULT_ROLE_SCOPES` 为准（`wb.py role scopes` 打当前项目的实际值）。
 
 | 角色 | 阶段 | 产出 | 可写 | 模型 |
 | --- | --- | --- | --- | --- |
@@ -161,7 +161,7 @@ wb.py config set role_scopes.backend-developer \
 
 ### 加一个角色
 
-1. 把名字加进 `wb.py` 的 `ROLES` 列表（`task add --role` 与 `contract --owner` 的 choices 由它生成）。
+1. 把名字加进 `wb_const.py` 的 `ROLES` 列表（`task add --role` 与 `contract --owner` 的 choices 由它生成）。
 2. 在 `DEFAULT_ROLE_SCOPES` 加写入范围。
 3. 写 `.claude/agents/<名字>.md`，照现有 agent 的结构：frontmatter（`name` / `description` / `tools` / `model`）+ 开工三步 + 职责 + 产物模板 + 规则 + 交回报告格式。**`name` 必须与 `ROLES` 里的名字一字不差** —— 守卫按载荷 `agent_type` 查 `role_scopes`，对不上就退回读 `.workbench/role`，角色隔离静默降级。
 4. 在 `wb-flow` 的阶段-角色对应表里加一行。
