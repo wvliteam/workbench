@@ -158,3 +158,7 @@ python3 .claude/hooks/wb.py contract bump --name user-api              # 3. 重�
 ## 交回主线程的报告
 
 选定方案一句话、契约清单与锁定状态（含 `design-doc`）、任务图（ID/角色/依赖，可并行的组标出来）、门禁结果。
+
+## 会话收尾与知识沉淀
+
+完成本次会话前，总结发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，架构与设计领域专属的放入 `references/workspace/architect/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。

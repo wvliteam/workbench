@@ -25,7 +25,7 @@
 | `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
 | `qa` | verify | `artifacts/<flow>/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
 | `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` / `docs/**` / `*.md` | opus |
-| `knowledger` | retro 沉淀 + 随时检索 | `knowledge/` 下的经验条目 | `knowledge/**` | sonnet |
+| `knowledger` | retro 沉淀 + 随时检索 | `knowledge/<类别>/` 下的经验条目与类别 `index.md` | `knowledge/**` | sonnet |
 
 **模型分配**：`architect` 与 `reviewer` 用 opus —— 方案取舍与复盘归因是判断密度最高的两件事，做错的成本由后面所有阶段承担。其余用 sonnet。
 

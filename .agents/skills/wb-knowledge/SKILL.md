@@ -5,7 +5,7 @@ description: 工作台知识库操作。沉淀（把可复用经验按判据写�
 
 # 知识库：沉淀与查找
 
-工作区的长期经验库在 `knowledge/`（跟着仓库走 git，跨 flow 存活）。判据、格式、对照表的完整版在 `knowledge/README.md`，本 skill 是它的操作入口。
+工作区的长期经验库在 `knowledge/`（跟着仓库走 git，跨 flow 存活），**按知识类别分目录、一条经验一个文件**。判据、分类对照表、条目格式的完整版在 `knowledge/README.md`，本 skill 是它的操作入口。
 
 **先读 `knowledge/README.md` 再动手** —— 它是冻结契约 `knowledge-convention`，格式以它为准。
 
@@ -19,9 +19,10 @@ description: 工作台知识库操作。沉淀（把可复用经验按判据写�
 
 ## 沉淀步骤
 
-1. **查重**：`grep -ril "<关键词>" knowledge/`。已有相近条目 → 修订它（只改被实测推翻或已失效的内容，写清原记录错在哪里），不要新增平行条目。
-2. **一条经验一个文件**，文件名即主题（kebab-case，如 `test-needs-docker-first.md`）。
-3. 按模板写，四个章节缺一不可：
+1. **归类**：按「这是什么知识」选 `knowledge/<类别>/`（九类对照表在 `knowledge/README.md`）。现有类别都不合适时**扩展分类** —— 加一行到对照表、建 `knowledge/<新类别>/index.md`，不要塞进最近的目录，也别平铺在 `knowledge/` 根下。
+2. **查重**：`grep -ril "<关键词>" knowledge/`。已有相近条目 → 修订它（只改被实测推翻或已失效的内容，写清原记录错在哪里），不要新增平行条目。
+3. **一条经验一个文件**：`knowledge/<类别>/<主题>.md`，文件名即主题（kebab-case，如 `troubleshooting/test-needs-docker-first.md`）。
+4. 按模板写，四个章节缺一不可：
 
 ```markdown
 # <一句话结论>
@@ -39,11 +40,12 @@ description: 工作台知识库操作。沉淀（把可复用经验按判据写�
 哪条 flow / 哪次复盘 / 谁实测的。
 ```
 
-4. 权限边界：主线程与 `knowledger` 角色可写 `knowledge/**`；其他角色与 subagent 会被守卫拦 —— 拦了就交回主线程，别换写法。`knowledge/README.md` 是冻结契约，改它走 `contract unlock --name knowledge-convention`。
+5. **更新类别索引**：新增、移动、修订条目后，同步 `knowledge/<类别>/index.md` 的 `Knowledge Map`（`index.md` 是路由文件，不算沉淀条目）。
+6. 权限边界：主线程与 `knowledger` 角色可写 `knowledge/**`；其他角色与 subagent 会被守卫拦 —— 拦了就交回主线程，别换写法。`knowledge/README.md` 是冻结契约，改它走 `contract unlock --name knowledge-convention`。
 
 ## 查找步骤
 
-1. `grep -ril "<关键词>" knowledge/`，多换几组词（中英文、同义词、具体技术名）；或 `ls knowledge/` 按主题浏览 —— 目录列表即索引。
+1. `grep -ril "<关键词>" knowledge/`，多换几组词（中英文、同义词、具体技术名）；或 `ls knowledge/` 看有哪些类别、`cat knowledge/<类别>/index.md` 按类别索引浏览。
 2. 命中条目**完整读一遍**，返回时每条必须带：结论、依据、失效条件。只转述结论不给依据的结果不可信。
 3. 没有命中就明说「知识库无相关条目」。不脑补、不拿通识冒充沉淀经验 —— 沉淀的价值在于它是本工作区实测过的。
 

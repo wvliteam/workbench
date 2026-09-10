@@ -43,3 +43,5 @@
 ## 与 knowledge/ 的边界
 
 本目录（`references/`）装**操作规范**：normative，按角色必读，改规范走主线程。`knowledge/` 装**经验判据**：检索式，带依据/适用范围/失效条件，由 knowledger 角色沉淀。两者不互抄 —— 一条内容如果同时像两边，问「换台机器还成立吗」：成立进 knowledge/，是「怎么干活」的规矩进这里。
+
+知识分类、条目格式与查找入口见 [knowledge/README.md](../knowledge/README.md)；本文件及 `references/workspace/` 仍是角色的必读规范入口。

@@ -104,7 +104,7 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
-**最后两个前缀是只读资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 是公共操作规范（输出信封等，任何角色只读，全体角色 prompt 里的「必读」都指向它 —— 不收窄的话 reviewer 与开发的裸 `*.md` 就能改全体角色的必读文档，性质等同改角色定义）。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
+**最后两个前缀是知识与规范资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 的公共操作规范（输出信封等）对角色只读，`references/workspace/<role>/` 则是角色私有知识，只允许对应角色修改。主线程可维护全部内容。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
 
 各角色的默认范围见 [roles.md](roles.md#角色矩阵)。这里只记它的形状：**产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这是第二层之外的纵深 —— 契约冻结挡「已定稿的东西被改」，阶段隔离挡「下游角色去改上游产物」，包括还没定稿的当前阶段产物。两者独立互补：`qa` 改 `design.md` 会被两层各自拦一次；阶段隔离只在守卫能判出角色时生效，冻结不依赖角色。
 

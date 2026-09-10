@@ -1,6 +1,8 @@
 # 知识库（knowledge/）
 
-跨 flow 存活的长期经验库。每条经验一个 markdown 文件，沉淀与查找走 `wb-knowledge` skill 或 `knowledger` 角色。
+跨 flow 存活的长期经验库。**按知识类别分目录，一条经验一个 markdown 文件**（`knowledge/<类别>/<主题>.md`），沉淀与查找走 `wb-knowledge` skill 或 `knowledger` 角色。
+
+角色必须遵守的操作规范不在这里，而在 [references/output-contract.md](../references/output-contract.md) 与 `references/workspace/`；本目录只保存带依据、适用范围和失效条件的经验条目。
 
 这里放**换了环境还成立的东西**；只对本次执行成立的留在 `.workbench/artifacts/`，随 flow 归档。判据一句话：
 
@@ -20,9 +22,38 @@
 
 不放：本次验证通过的结论（验证通过是状态不是知识）、具体凭据值（只记凭据名称与来源位置）、任务进度与计划。
 
+## 知识分类
+
+按**这是什么知识**归类，不按它提到哪个技术、哪个系统归类。类别名回答「这类知识为什么存在」。
+
+| 类别 | 内容 |
+| --- | --- |
+| `architecture/` | 系统边界、稳定的服务或应用单元、依赖方向、关键技术流程、单仓画像 |
+| `product-spec/` | 产品需求、业务能力、概念与用户故事 |
+| `ui-design/` | UI/UX 规范、交互设计、线框与设计稿 |
+| `testing/` | 判定系统正确性的规则与质量门禁**本身**（不收纳验证活动碰到的其他对象） |
+| `development/` | 工程标准规约**本身**：编码约定、模块职责划分规则（同上） |
+| `features/` | 产品需求记录与面向用户能力的长期知识 |
+| `environment/` | 环境坐标、配置语义、环境差异、集成入口与凭据来源 |
+| `integrations/` | 外部供应商与第三方平台的接入契约：接口约定、字段语义、开关 |
+| `troubleshooting/` | 可复现现象、已确认根因、已实施修复，以及由此归纳的排查法则 |
+
+这是**已有路线，不是白名单**。归类规则：
+
+1. 先过上面的判据：不是长期知识就留在 `artifacts/`，不进这个库。
+2. 先识别**知识对象** —— 问「这是什么知识」，不要问「哪个目录最像」。
+3. 只有知识对象语义相同才复用类别；相似、实现相关、概念沾边都不够。
+4. `testing/` `development/` 按活动命名，只放该活动产出的权威规约本身；活动顺带碰到的对象（接口定义、产品行为、排障记录）归它自己的类别，从活动类别链接过去而不是复制一份。
+5. 文档形式（guide / runbook / checklist）与实现所在的目录都不决定类别。
+6. 没有类别能表达这个知识对象时**扩展分类**：往本表加一行、建 `knowledge/<新类别>/index.md`，不要塞进最近的目录，也不要落到别的目录。
+
+每个**已存在**的类别目录都要有 `index.md`：先一句 `Current Knowledge` 概述当前有什么，再用按主题分组的 `Knowledge Map` 链接到条目。没有长期内容的类别不必建目录，第一次落条目时再建。
+
+新增、迁移知识条目或升级工作台后运行 `python3 scripts/knowledge_check.py`：它校验类别索引、每条直接条目的索引链接，以及本库与 `references/` 的双向路由链接。
+
 ## 条目格式
 
-文件名即主题，kebab-case，英文或中文短语均可（如 `test-needs-docker-first.md`）。正文四个必填章节：
+类别目录表达归类，文件名表达主题（kebab-case，英文或中文短语均可，如 `knowledge/troubleshooting/test-needs-docker-first.md`）。正文四个必填章节：
 
 ```markdown
 # <一句话结论>
@@ -45,13 +76,16 @@
 1. **先查重**：沉淀前 grep 现有条目，已有条目优先修订而不是新增。
 2. **修订要留痕**：只改被实测推翻或已失效的条目，并在条目里写清原记录错在哪里、新的实测依据是什么。
 3. **一条一个结论**：一条经验一个文件，别把整次复盘粘成一个文件。
-4. 条目是活文档，**不进契约冻结**；只有本 README（schema 本身）是冻结契约 `knowledge-convention`，改它走 `contract unlock`。
+4. **先归类再落盘**：条目放进 `knowledge/<类别>/<主题>.md`；类别从上面的对照表选，选不出就扩展分类，别平铺在 `knowledge/` 根下。
+5. **同步类别索引**：新增、移动、修订条目后，更新对应类别 `index.md` 的 `Knowledge Map`。
+6. 条目是活文档，**不进契约冻结**；只有本 README（schema 本身，含分类）是冻结契约 `knowledge-convention`，改它走 `contract unlock`。
 
 ## 查找
 
 ```
-grep -ril "<关键词>" knowledge/          # 按内容找
-ls knowledge/                            # 按主题浏览（目录列表即索引）
+grep -ril "<关键词>" knowledge/          # 按内容找（递归进各类别目录）
+ls knowledge/                            # 先看有哪些类别
+cat knowledge/<类别>/index.md            # 再按类别索引找条目
 ```
 
 返回条目时必须带「依据」与「失效条件」—— 只转述结论不给依据的查找结果不可信。没有命中就明说没有，不脑补。

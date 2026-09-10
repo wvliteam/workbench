@@ -235,7 +235,7 @@ WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", ".vscode/")
 # hook 每次工具调用都要读它，读一个纯文本列表比解析整个 state.json 便宜一个量级。
 # 流水账在列表里是因为归属判定读它：能追加一行就能把别人的改动记到自己名下。
 # wb.py 自己写它不受影响 —— 守卫只拦工具调用，不拦这个进程内的文件写。
-FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG]
+FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG, "audit.jsonl"]
 
 # 写入型 shell 动作。仍保留用于 uncertain=True 时的兜底匹配。
 BASH_WRITE = re.compile(
@@ -531,6 +531,26 @@ def catastrophic_command(cmd: str) -> str:
 
 MAX_LOG = 500
 
+# `config set` 允许写入的顶层 key 白名单：既是合法性校验，也是「新字段需要先在
+# 代码里登记」的强制入口。之前 dotted_set 对任意 args.key 生效，只对
+# `gate_commands.*` 做灾难命令内容校验，其余字段（包括 role_scopes.* 这种能
+# 直接扩大自己写权限的）没有第二道防线 —— 特权层的命令名匹配一旦遗漏新字段，
+# 或者主线程被诱导拼出不合理的 config set，没有东西兜底。前缀匹配（以 "." 结尾）
+# 覆盖 dotted 子键（如 gate_commands.test）；不带 "." 的项精确匹配顶层 key。
+CONFIG_SCHEMA = (
+    "gate_commands.",
+    "gate_waivers.",
+    "role_scopes.",
+    "allowed_skills",
+    "max_parallel",
+    "gate_timeout",
+    "task_lease",
+)
+
+
+def config_key_allowed(key: str) -> bool:
+    return any(key == k or (k.endswith(".") and key.startswith(k)) for k in CONFIG_SCHEMA)
+
 
 # --------------------------------------------------------------------------
 # 基础设施
@@ -742,10 +762,26 @@ def load_state(root: Path, lock: bool = False) -> dict:
     for k, v in base.items():
         st.setdefault(k, v)
     migrate_contract_refs(st)
+    # 记录本次读入时的 log 长度，save_state 据此只把新增条目追加进 audit.jsonl，
+    # 不是每次都把全部历史重新扫一遍。下划线前缀：不参与字段补齐，也不落盘。
+    st["_log_len_before"] = len(st["log"])
     return st
 
 
 def save_state(root: Path, st: dict) -> None:
+    # log 只留最近 MAX_LOG 条给 status 快速展示；截断前把本次新增的条目追加进
+    # audit.jsonl（append-only，不受 MAX_LOG 限制）。用长度差找「新增的」而不是
+    # 整个重写 audit 文件 —— save_state 每次调用都可能加日志，重写整份文件是
+    # O(n) 的浪费，追加是 O(1)。旧 state 反序列化后没有 _log_len_before 属性，
+    # 缺失时保守地退回「本次全部当作新增」，不会漏记，最多首次重复写一次。
+    prev_len = st.pop("_log_len_before", None)
+    new_entries = st["log"][prev_len:] if isinstance(prev_len, int) else st["log"]
+    if new_entries:
+        flow_for_audit = st.get("_flow") or read_current_flow(root)
+        audit_path = state_path(root, flow_for_audit).parent / "audit.jsonl"
+        with audit_path.open("a", encoding="utf-8") as f:
+            for entry in new_entries:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     st["log"] = st["log"][-MAX_LOG:]
     st["state_rev"] = int(st.get("state_rev", 0)) + 1
     # 写回读入时的那个 flow。state_path 不带参数时才看指针 —— 那正是会被
@@ -1279,6 +1315,20 @@ def retro_enter_epoch(st: dict):
         return None
 
 
+def knowledge_entries(root: Path) -> list[Path]:
+    """知识库条目：`knowledge/` 下递归取全部条目文件。
+
+    条目按知识类别分目录（类别与边界见 knowledge/README.md），所以这里必须递归：
+    只 glob 顶层会让分目录后的条目对 `knowledge_written` 门禁与 status 计数隐形 ——
+    沉淀明明写了，门禁却说没有。类别索引 `index.md` 与库自身的 `README.md` 是路由
+    文件不是条目，不计数。"""
+    kdir = root / "knowledge"
+    if not kdir.is_dir():
+        return []
+    return sorted(p for p in kdir.rglob("*.md")
+                  if p.name not in ("README.md", "index.md"))
+
+
 def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, str]:
     """执行单条门禁断言，返回 (通过, 标签, 说明)。"""
     kind, _, rest = spec.partition(":")
@@ -1338,16 +1388,15 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         # knowledge/ 是跨 flow 共享目录，只数「有没有条目」会让任何历史条目替所有后续
         # flow 白过门禁 —— 按进入 retro 的时刻过滤，只认本轮新写/更新的（mtime >= 锚点）。
         # 目录不存在按「无条目」处理而不是报错 —— 存量项目第一次跑 retro 门禁时还没有它。
-        kdir = root / "knowledge"
-        all_entries = sorted(p for p in kdir.glob("*.md") if p.name != "README.md") \
-            if kdir.is_dir() else []
+        all_entries = knowledge_entries(root)
         anchor = retro_enter_epoch(st)
         # 锚点拿不到（log 无进 retro 记录）退回旧行为：全部条目都算，不因缺锚点变严。
         entries = [p for p in all_entries
                    if anchor is None or p.stat().st_mtime >= anchor]
         label = "经验已沉淀（knowledge/）"
         if entries:
-            names = ", ".join(p.name for p in entries[:5])
+            names = ", ".join(p.relative_to(root / "knowledge").as_posix()
+                              for p in entries[:5])
             if len(entries) > 5:
                 names += f" 等 {len(entries)} 条"
             return True, label, f"{len(entries)} 条：{names}"
@@ -1357,7 +1406,8 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         stale = ("；knowledge/ 里已有 %d 条但都不是本轮写的（跨 flow 历史条目不替本轮过门禁）"
                  % len(all_entries)) if all_entries else ""
         return False, label, ("knowledge/ 无本轮沉淀条目。把可复用经验按判据写成条目"
-                              "（判据与格式见 knowledge/README.md，或派 knowledger 角色）；"
+                              "（按类别放进 knowledge/<类别>/，判据、分类与格式见"
+                              " knowledge/README.md，或派 knowledger 角色）；"
                               "确无可沉淀时在 retro.md 沉淀章节写明「无可沉淀：<理由>」" + stale)
 
     if kind == "cmd":
@@ -1439,6 +1489,10 @@ def gate_check(root: Path, st: dict, phase: str) -> list[tuple[bool, str, str]]:
 
 
 def print_gate(phase: str, results: list[tuple[bool, str, str]]) -> bool:
+    # 门禁命令的完整输出已经落 gate-<key>.log（run_check 内部写的），但 detail
+    # 摘要只带最后 5 行 —— 摘要不够诊断时，人工抽查要能一眼找到日志路径，不能
+    # 逼着重跑一次命令才能看全量输出。detail 里已经嵌了 `完整输出见 <path>`，
+    # 这里不重复解析，只是让路径本身单独成行，方便脚本 grep。
     print(f"门禁 · {phase}（{PHASE_CN.get(phase, phase)}）")
     for ok, label, detail in results:
         print(f"  [{'PASS' if ok else 'FAIL'}] {label} — {detail}")
@@ -1629,6 +1683,20 @@ def cmd_status(args) -> None:
         line.append(f"{mark}{p}")
     print("阶段：" + "  ".join(line) + "   （* = 当前，v = 门禁已过，! = 强推）")
     print(f"当前：{cur}（{PHASE_CN.get(cur, cur)}）")
+    # unconfigured 与 waived-explicit 曾经在 status 里完全不可区分（run_check
+    # 的 detail 字符串里有差异，但 status 从不展示 detail）。新负责人接手时
+    # 无法从这里判断「忘配置」还是「确认不需要」，只能翻 gate-<键>.log。
+    waivers = {k: v for k, v in st.get("gate_waivers", {}).items() if isinstance(v, str) and v.strip()}
+    configured = set(st.get("gate_commands", {}))
+    unconfigured = sorted(set(rest for phase in GATES.values()
+                              for spec in phase.get("checks", [])
+                              if spec.startswith("cmd:")
+                              for rest in [spec.partition(":")[2]]
+                              if rest not in configured and rest not in waivers))
+    if waivers:
+        print("豁免门禁：" + ", ".join(f"{k}（{v}）" for k, v in waivers.items()))
+    if unconfigured:
+        print(f"⚠ 未配置门禁（隐形放行，不代表不需要）：{', '.join(unconfigured)}")
 
     by_status: dict[str, int] = {}
     for t in st["tasks"]:
@@ -1657,11 +1725,10 @@ def cmd_status(args) -> None:
         for b in bad:
             print(f"  ! {b}")
     # 知识库要出现在每轮 status 里，否则 analyze/design 派发时没人记得查它
-    kdir = root / "knowledge"
-    if kdir.is_dir():
-        n = len([p for p in kdir.glob("*.md") if p.name != "README.md"])
-        if n:
-            print(f"知识库：{n} 条（knowledge/ —— analyze/design 派发前先检索，判据见 knowledge/README.md）")
+    n = len(knowledge_entries(root))
+    if n:
+        print(f"知识库：{n} 条（knowledge/ —— analyze/design 派发前先检索，"
+              f"判据与分类见 knowledge/README.md）")
     for uname, ureason in read_unlocks(root).items():
         print(f"解冻窗口开启中：{uname} —— {ureason}")
         print(f"  改完必须 `contract bump --name {uname}`，否则窗口悬挂、文档处于无主状态")
@@ -1750,6 +1817,13 @@ def cmd_phase(args) -> None:
     rev_before = int(st.get("state_rev", 0))
     results = gate_check(root, st, cur)
     passed = print_gate(cur, results)
+    if args.force and not os.environ.get("WB_ALLOW_FORCE"):
+        # --force 本身已经被特权命令层限制（只有主线程/特定角色能跑到这一步），
+        # 但主线程自己的误操作没有第二道防线 —— 复制粘贴出来的 --force 会让阶段
+        # 无声推进，事后唯一线索是日志里的 forced: true。这里要求人在 shell 里
+        # 显式开一个环境变量，把「打算强推」和「不小心打了这个参数」分开。
+        die("--force 需要先在 shell 里设置 WB_ALLOW_FORCE=1 才生效"
+            "（防止误拼参数导致无声强推，需要人工确认这是有意的）。", code=1)
     if not passed and not args.force:
         die("门禁未通过，阶段未推进。修完再来，或 --force 强推（会记入日志）", code=1)
     st = load_state(root, lock=True)
@@ -2500,6 +2574,10 @@ def cmd_config(args) -> None:
         v = dotted_get(st, args.key) if args.key else st["gate_commands"]
         print(json.dumps(v, ensure_ascii=False, indent=2))
         return
+    if not config_key_allowed(args.key):
+        die(f"拒绝写入 {args.key}：不在 CONFIG_SCHEMA 白名单里。"
+            f"可写字段：{', '.join(CONFIG_SCHEMA)}。新增字段需要先在 wb.py 的 "
+            f"CONFIG_SCHEMA 里登记，不能隐式接受任意路径。")
     try:
         val = json.loads(args.value)
     except json.JSONDecodeError:
@@ -2778,6 +2856,12 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
 
 UNKNOWN_ROLE = "__unknown__"
 
+# 内置非角色 subagent 类型白名单：这些 agent_type 是 harness 自带的通用工具身份
+# （不在 ROLES 里），不是伪造或未知调用者，退回读 role 文件兜底是安全的 —— 文件空
+# 时它们本来就该落在「无角色」范围而非被当成越权写手。凡不在此列的非角色 agent_type
+# 都判 UNKNOWN_ROLE 拒写，堵住 AGENTS.md:176 说的「子 worker 顶陌生身份越权」缺口。
+BUILTIN_AGENT_TYPES = ("Explore", "general-purpose", "Plan")
+
 # 契约管理员。接口契约由 architect 定义，但 `--owner` 填的是实现方
 # （architect.md 里就是 `--owner backend-developer`），所以 owner 校验必须放它一条路，
 # 否则 architect.md 写明的「contract impact -> unlock -> 改 -> bump」直接走不通。
@@ -2795,22 +2879,23 @@ def current_role(root: Path, data: dict) -> str:
 
     三态而非两态：
     - 有 `agent_type` 且是角色名 → 用它
-    - 无 `agent_type` 但有 `agent_id` → UNKNOWN —— 来自某个 subagent 但类型被隐藏
+    - 有 `agent_type` 且是内置白名单类型（Explore / general-purpose / Plan）→ 读文件兜底
+    - 其余情况——`agent_type` 是陌生值，或无 `agent_type` 但有 `agent_id` → UNKNOWN
     - 两者都无 → 读 `.workbench/role`（真正的主线程兜底）
 
-    内置的 Explore / general-purpose / Plan 带 `agent_type`（只是不在 ROLES 里），
-    走「有 agent_type 但不是角色名」那条既有分支，不会落到 UNKNOWN。
-    真正触发 UNKNOWN 的只剩「老版本 Claude Code 不带这个字段」，那本来就该显式告警。
+    陌生 `agent_type`（既不是角色名也不在内置白名单）曾经和「Explore / general-purpose /
+    Plan」走同一条退回文件兜底分支：文件为空时 `_check_write_target` 的 `if not role: return`
+    直接放行，等于任何顶着陌生身份 spawn 出的子 worker 都能绕过角色范围写到 `.claude/`
+    守卫本体（AGENTS.md:176 记录的缺口）。现在陌生值单独判 UNKNOWN，与老版本不带字段的
+    `agent_id`-only 情况汇入同一个拒绝出口。
     """
     at = (data.get("agent_type") or "").strip()
     if at in ROLES:
         return at
-    if at:
-        # 有 agent_type 但不是角色名（Explore / general-purpose / Plan）：退回文件兜底
+    if at in BUILTIN_AGENT_TYPES:
         f = wb_dir(root) / "role"
         return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
-    # 无 agent_type：有 agent_id 说明是 subagent（老版本），没有才是主线程
-    if data.get("agent_id"):
+    if at or data.get("agent_id"):
         return UNKNOWN_ROLE
     f = wb_dir(root) / "role"
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
@@ -2915,6 +3000,16 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
             f"无法验证调用者身份，拒绝写入 {rel}：载荷有 agent_id 但没有可识别的 agent_type。"
             "升级 Codex/Claude CLI 后重试；主线程应不携带 agent_id。"
         )
+    # references/workspace/<role>/ 是角色私有知识：只有对应角色可修改。
+    # 公共 references/ 仍由下方范围规则保持角色只读，主线程可维护全部 references/。
+    private_match = re.match(r"references/workspace/([^/]+)/", rel)
+    if private_match and role and private_match.group(1) != role:
+        hook_deny(
+            f"角色 {role} 无权写角色 {private_match.group(1)} 的私有知识 {rel}。"
+            "只能修改 references/workspace/<自己的角色>/。"
+        )
+    if private_match and role == private_match.group(1):
+        return
     if not role or not state_path(rootr).is_file():
         return
     try:
@@ -3958,7 +4053,17 @@ def cmd_selfcheck(args) -> None:
             "载荷带 agent_type 时仍要按那个角色限制范围"
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "general-purpose",
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 2, \
-            "agent_type 不是角色名（Explore / general-purpose）时应退回读 role 文件"
+            "agent_type 是内置白名单类型（Explore / general-purpose / Plan）时应退回读 role 文件"
+        # 陌生 agent_type（既非角色名也不在内置白名单）曾经和 general-purpose 走同一条
+        # 退回文件兜底分支——文件为空时直接放行，等于顶着伪造身份的子 worker 能越权写
+        # 到 .claude/ 守卫本体（AGENTS.md:176 记录的缺口）。现在必须单独判 UNKNOWN 拒写，
+        # 不看 role 文件里写的是什么。
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "some-unknown-type",
+                      "tool_input": {"file_path": "migrations/001.sql"}}) == 2, \
+            "陌生 agent_type 应判 UNKNOWN_ROLE 直接拒写，不退回读 role 文件"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "some-unknown-type",
+                      "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 2, \
+            "陌生 agent_type 更不能借此写到守卫本体"
         # 产物归属同样按载荷取角色，否则并行下两个角色的改动全挂到同一个名下
         hook_post_tool({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                         "tool_input": {"file_path": "migrations/001.sql"}})
@@ -4369,7 +4474,11 @@ def cmd_selfcheck(args) -> None:
         assert not (wb_dir(tmp) / "role").is_file()
 
         # 强推的阶段必须与真正过门禁的区分开：status 是最常看的看板
-        quiet("phase", "advance", "--force")
+        # --force 需要 WB_ALLOW_FORCE 环境变量门（防止误拼参数导致无声强推）
+        os.environ["WB_ALLOW_FORCE"] = "1"
+        code, out = quiet("phase", "advance", "--force")
+        del os.environ["WB_ALLOW_FORCE"]
+        assert code == 0, out
         st = load_state(tmp)
         assert st["phase"] == "design"
         assert not st["gates"]["analyze"]["passed"] and st["gates"]["analyze"]["forced"], \
@@ -4719,6 +4828,17 @@ def cmd_selfcheck(args) -> None:
                           "tool_input": {"file_path": "references/output-contract.md"}}) == 2, \
                 f"{role} 的裸 *.md 范围跨进了 references/"
 
+        # --- references/workspace/<role>/ 私有知识按角色隔离 ---
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "analyst",
+                      "tool_input": {"file_path": "references/workspace/analyst/role.md"}}) == 0, \
+            "角色应能修改自己的私有知识"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "references/workspace/analyst/role.md"}}) == 2, \
+            "角色不应能修改其他角色的私有知识"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "reviewer",
+                      "tool_input": {"command": "echo x > references/workspace/analyst/role.md"}}) == 2, \
+            "shell 不应绕过角色私有知识隔离"
+
         # --- repos.json 是精确文件名，不是前缀 ---
         # 旧实现用 startswith 把 repos.json5 / repos.json.bak / 目录 repos.json/ 全当
         # 清单：角色配了显式 scope 也写不了 .bak 兄弟文件，误配 repos.json5/** 却放行。
@@ -4941,6 +5061,24 @@ def cmd_selfcheck(args) -> None:
         assert kw and kw[0][0] is True and "test-needs-docker-first" in kw[0][2], \
             f"有条目时 knowledge_written 应 PASS：{kw}"
         (tmp / "knowledge" / "test-needs-docker-first.md").unlink()
+        # 条目按知识类别分目录后仍要计数：只 glob 顶层会让分目录的条目对门禁
+        # 隐形 —— 沉淀明明写了，门禁却说没有。index.md / README.md 是路由文件，不计数。
+        (tmp / "knowledge" / "development").mkdir(exist_ok=True)
+        nested_entry = tmp / "knowledge" / "development" / "nested-entry.md"
+        nested_entry.write_text(
+            "# 分目录条目仍算沉淀\n## 依据\nselfcheck\n## 适用范围\n本工作区\n"
+            "## 失效条件\n改回平铺后\n## 来源\nselfcheck\n", encoding="utf-8")
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is True and "development/nested-entry.md" in kw[0][2], \
+            f"分目录条目应被识别且带类别路径：{kw}"
+        nested_entry.unlink()
+        (tmp / "knowledge" / "development" / "index.md").write_text(
+            "# 开发类知识\n\n## Current Knowledge\n\n本类别暂无条目。\n", encoding="utf-8")
+        kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
+              if r[1] == "经验已沉淀（knowledge/）"]
+        assert kw and kw[0][0] is False, f"只有类别索引不该算沉淀：{kw}"
+        (tmp / "knowledge" / "development" / "index.md").unlink()
         artifact_path(tmp, "retro", "retro.md").write_text(
             "# 复盘\n## 改进项\n- a\n## 可复用\n- b\n"
             "## 沉淀\n无可沉淀：纯文档改动没有可复用约束\n", encoding="utf-8")
@@ -5152,7 +5290,65 @@ def cmd_selfcheck(args) -> None:
         save_state(tmp2, sc)
         ok, _, detail = run_check(tmp2, load_state(tmp2), "verify", "cmd:test")
         assert ok and "已豁免" in detail and "纯文档" in detail, f"#5 豁免未生效：{detail}"
-        # #2：start 记 owner / attempts / lease_until，新租约不过期
+        # #5b：unconfigured 与 waived-explicit 曾经在 status 里完全不可区分，
+        # 现在 status 应分别展示「未配置门禁」提示与「豁免门禁」理由。
+        code, out = quiet("status")
+        assert "豁免门禁" in out and "纯文档" in out, f"#5b status 未展示豁免理由：{out}"
+        assert "未配置门禁" in out and "lint" in out, f"#5b status 未展示未配置门禁：{out}"
+
+        # #6：config set 字段级白名单 —— 未登记的 key 直接拒绝，即使调用者是主线程
+        code, out = quiet("config", "set", "some_未登记字段", "1")
+        assert code != 0 and "CONFIG_SCHEMA" in out, f"#6 未登记字段应被拒：{out}"
+        code, out = quiet("config", "set", "max_parallel", "5")
+        assert code == 0, f"#6 已登记字段应放行：{out}"
+
+        # #7：phase advance --force 需要 WB_ALLOW_FORCE 环境变量门，防止误拼参数
+        # 导致无声强推。特权层已拦了角色调用 --force，这里补的是主线程自己的
+        # 误操作没有第二道防线的缺口。
+        os.environ.pop("WB_ALLOW_FORCE", None)
+        code, out = quiet("phase", "advance", "--force")
+        assert code != 0 and "WB_ALLOW_FORCE" in out, f"#7 未设 WB_ALLOW_FORCE 时 --force 应被拒：{out}"
+        os.environ["WB_ALLOW_FORCE"] = "1"
+        code, out = quiet("phase", "advance", "--force")
+        del os.environ["WB_ALLOW_FORCE"]
+        assert code == 0, f"#7 设了 WB_ALLOW_FORCE 后 --force 应生效：{out}"
+
+        # #8：audit.jsonl 追加写全部日志，不受 MAX_LOG=500 截断影响；且它本身是
+        # 冻结文件（FROZEN_ALWAYS），角色不能用 Bash 直接篡改历史记录。
+        for i in range(MAX_LOG + 10):
+            st8 = load_state(tmp2, lock=True)
+            log(st8, "audit_selfcheck_probe", i=i)
+            save_state(tmp2, st8)
+        audit_path = state_path(tmp2).parent / "audit.jsonl"
+        assert audit_path.is_file(), "#8 audit.jsonl 未生成"
+        audit_lines = audit_path.read_text(encoding="utf-8").splitlines()
+        probe_count = sum(1 for l in audit_lines if "audit_selfcheck_probe" in l)
+        assert probe_count == MAX_LOG + 10, \
+            f"#8 audit.jsonl 应保留全部 {MAX_LOG + 10} 条探针日志，实际 {probe_count} 条"
+        assert len(load_state(tmp2)["log"]) <= MAX_LOG, \
+            "#8 state.json 里的 log 仍应按 MAX_LOG 截断（快速查看用）"
+        assert guard({"tool_name": "Bash", "cwd": str(tmp2),
+                      "tool_input": {"command": f"echo x >> {audit_path}"}}) == 2, \
+            "#8 audit.jsonl 应是冻结文件，Bash 重定向追加也要拦"
+
+        # #9：任务图不能出现多节点环。当前唯一的图漏洞防线是「依赖必须先存在
+        # 才能被引用」这一创建顺序约束（task add 校验）——add 时被依赖方必须
+        # 已存在，因此不可能构造出环。没有独立于创建顺序的显式环检测算法，这条
+        # 断言固化「当前没有任何命令能编辑已有任务的 deps 字段」这一前提本身：
+        # 一旦未来新增编辑 deps 的入口，隐式约束失效，这里必须先失败提醒，
+        # 而不是让环静默出现在任务图里。
+        quiet("task", "add", "C1", "--title", "环检测A", "--role", "backend-developer", "--phase", "develop")
+        code, out = quiet("task", "add", "C2", "--title", "环检测B",
+                          "--role", "backend-developer", "--phase", "develop", "--deps", "C1")
+        assert code == 0, f"#9 正常依赖链应放行：{out}"
+        import inspect
+        src = inspect.getsource(cmd_task)
+        for action in ("start", "done", "block", "reopen", "skip"):
+            branch, _, rest = src.partition(f'args.action == "{action}"')
+            body = rest.split("elif")[0].split("if args.action")[0]
+            assert '["deps"]' not in body and "'deps'" not in body, \
+                f"#9 {action} 分支不应修改 deps，否则先创建顺序约束失效，需要补显式环检测"
+
         quiet("task", "add", "S2", "--title", "build",
               "--role", "backend-developer", "--phase", "develop")
         code, out = quiet("task", "start", "S2", "--owner", "be-agent-7")

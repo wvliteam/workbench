@@ -101,3 +101,7 @@ python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
 范围已放行 `tasks/**`，无需 `contract unlock`。文件名带自己的角色名（`<任务号>-backend-developer.md`），并行时两位开发各写一份，编排者按 `<任务号>-*.md` glob 拉取，不会互相覆盖。
+
+## 会话收尾与知识沉淀
+
+完成本次会话前，总结发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，后端开发领域专属的放入 `references/workspace/backend-developer/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。

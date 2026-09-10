@@ -82,3 +82,7 @@ python3 .claude/hooks/wb.py task add --title "修复：分页 total 恒为 0" \
 ## 交回主线程的报告
 
 通过/不通过结论、AC 通过率、缺陷清单（严重度排序）、打回的任务 ID、UNRUN 清单、门禁结果、未覆盖项。
+
+## 会话收尾与知识沉淀
+
+完成本次会话前，总结发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，测试与验证领域专属的放入 `references/workspace/qa/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。

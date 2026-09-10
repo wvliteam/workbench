@@ -118,7 +118,7 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 | design | `architect` | `<flow>/design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
 | develop | `frontend-developer` `backend-developer` | 代码 + `<flow>/develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
 | verify | `qa` | `<flow>/verify/test-report.md` |
-| retro | `reviewer` `knowledger` | `<flow>/retro/retro.md`（含「改进项」「沉淀」）+ `knowledge/` 沉淀条目（retro 门禁查 `knowledge_written`：有条目，或 retro.md 显式「无可沉淀」） |
+| retro | `reviewer` `knowledger` | `<flow>/retro/retro.md`（含「改进项」「沉淀」）+ `knowledge/<类别>/` 沉淀条目（retro 门禁查 `knowledge_written`：递归数条目，或 retro.md 显式「无可沉淀」） |
 
 编排者不亲自干活，派 subagent。派发时给足上下文：需求原话、上游产物路径、要读的契约文件、相关的验收标准条目。
 
@@ -149,7 +149,7 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 
 - 写出项目根之外
 - 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash 的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
-- 角色越权写（`pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`）—— 产物目录按阶段隔离；`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值；`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（知识库，专属 `knowledger` 角色）、`references/`（公共操作规范，任何角色只读）、`scripts/` `repos.json`（工作区级公共脚本与清单）与 `.vscode/`（本机 IDE 配置，repos_apply.py 生成）任何角色都写不到，要改交回主线程
+- 角色越权写（`pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`）—— 产物目录按阶段隔离；`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值；`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（按知识类别分目录的知识库，专属 `knowledger` 角色）、`references/` 公共规范任何角色只读；仅 `references/workspace/<自己的角色>/` 可由对应角色修改，其他角色目录不可写
 - 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
 - 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()`
 - 未审核的 skill 调用 —— 角色 subagent 都带了 `Skill` 工具，但只能调 `allowed_skills` 白名单里的 skill。任何非主线程调用者（角色、`general-purpose`、`Explore`，凡带 `agent_type`/`agent_id`）都受这层约束；主线程（两者都无）是审核者，不限。默认空表 = 拒全部，`["*"]` = 全放行。白名单只有主线程能改（`config set` 对角色一律拦），所以「哪些 skill 能用」就是编排者的审核动作。被拦的 skill 报回主线程审核，别绕
@@ -172,8 +172,8 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 
 ## 已知边界
 
-- 角色按 hook 载荷里的 `agent_type` 判定，并行 subagent 各自生效，与谁最后 `role set` 过无关。`.workbench/role` 只兜底主线程与非角色 agent（`general-purpose` / `Explore` 等）—— 开发活派给角色 agent，别派给 `general-purpose`，那时范围只能按最后一次 `role set` 兜底。
-- `allowed_skills` 审核门设在「subagent 调用 skill」这一步，管的是**哪些 skill 能跑**，不是**跑起来的 skill 的子 worker 能写什么**。纯 inline 指令型 skill（第三方效率 skill 多是这类）无风险：执行者还是本角色，`agent_type` 不变，写入照旧受本角色范围约束，连恶意 inline skill 也越不过本角色天花板。要留意的只有会 spawn 子 agent 的 skill：若 harness 给 spawn 出的 worker 打非角色 `agent_type`（如 `general-purpose`）且 `.workbench/role` 为空，那 worker 会顺 `_check_write_target` 的 `if not role: return` 早退拿到主线程范围，能写 `.claude/` 守卫本体。所以审核时只放行 spawn 行为你已核过的 skill；要彻底堵，把 `current_role` 里「有 `agent_id`/`agent_type` 但非角色名」一支从「读 role 文件兜底」改判 `UNKNOWN_ROLE`（拒写）。
+- 角色按 hook 载荷里的 `agent_type` 判定，并行 subagent 各自生效，与谁最后 `role set` 过无关。`.workbench/role` 只兜底主线程与内置非角色 agent（`BUILTIN_AGENT_TYPES`：`general-purpose` / `Explore` / `Plan`）—— 开发活派给角色 agent，别派给 `general-purpose`，那时范围只能按最后一次 `role set` 兜底。`agent_type` 是陌生值（既非角色名也不在内置白名单）时判 `UNKNOWN_ROLE`，不读 `role` 文件，直接拒写。
+- `allowed_skills` 审核门设在「subagent 调用 skill」这一步，管的是**哪些 skill 能跑**，不是**跑起来的 skill 的子 worker 能写什么**。纯 inline 指令型 skill（第三方效率 skill 多是这类）无风险：执行者还是本角色，`agent_type` 不变，写入照旧受本角色范围约束，连恶意 inline skill 也越不过本角色天花板。要留意的只有会 spawn 子 agent 的 skill：若 harness 给 spawn 出的 worker 打不在 `BUILTIN_AGENT_TYPES` 里的陌生 `agent_type`，`current_role` 判 `UNKNOWN_ROLE` 直接拒写，不会退回读 `role` 文件、也不会早退放行——`_check_write_target` 已经在角色解析之前挡住了这类调用者。仍要留意的是白名单本身：只放行 spawn 行为你已核过的 skill，避免恶意 skill 让子 worker 顶着 `general-purpose`/`Explore`/`Plan` 这几个被信任的内置身份行事。
 - 解冻窗口按 flow 隔离在 `.workbench/flows/<flow>/unlock/`，一份契约一个文件，多份可以同时开着。同一份契约上不区分申报者 —— 两个 agent 同时改一份契约本身就该避免。`bump` / `lock` 只关自己那一份；`SubagentStop` 关全部但只在没有任务处于 doing 时才关，否则先结束的那个会收掉仍在跑的兄弟的窗口。**所以每个任务收尾都要 `task done`。**
 - 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
 - 改状态的命令走 `.workbench/flows/<flow>/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。

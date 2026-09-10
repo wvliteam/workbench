@@ -16,17 +16,17 @@
 │   ├── backend-developer.md
 │   ├── qa.md                   测试验证
 │   ├── reviewer.md             代码评审 + 复盘
-│   └── knowledger.md           知识沉淀 + 检索（只写 knowledge/）
+│   └── knowledger.md           知识沉淀 + 检索（只写 knowledge/<类别>/）
 └── skills/
     ├── wb-flow/                主编排：全链路推进
     ├── wb-loop/                自动排空循环
     ├── wb-init/                多仓库初始化：按清单 clone + workspace 文件
     ├── wb-contract/            契约生命周期
-    └── wb-knowledge/           知识沉淀与查找（knowledge/）
+    └── wb-knowledge/           知识沉淀与查找（knowledge/<类别>/）
 
-references/                角色输出契约等公共操作规范（任何角色只读，改走主线程）
+references/                公共操作规范 + workspace 角色私有知识（仅对应角色可改）
 scripts/                  平台无关公共脚本：repos_apply.py（清单落地）、repos_tui.py（交互编辑）
-knowledge/                跨 flow 的长期经验库（一经验一文件，判据见其 README）
+knowledge/                跨 flow 的长期经验库（按知识类别分目录、一经验一文件，类别与判据见其 README）
 
 .workbench/                 全部状态，纯 JSON，可 git diff
 ├── state.json                  旧布局的 state（新布局在 flows/<flow>/state.json）
