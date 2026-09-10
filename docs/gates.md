@@ -26,13 +26,13 @@
 | design | `design.md` | `方案对比` | `contracts_locked` `tasks_exist` `no_blocked:*` | `design-doc` —— architect 自己登记 |
 | develop | `verification.md` | — | `contracts_intact` `tasks_done:develop` `cmd:lint` `cmd:build` | 不冻结 |
 | verify | `test-report.md` | — | `contracts_intact` `tasks_done:verify` `cmd:test` | `artifact-test-report`（owner `qa`） |
-| retro | `retro.md` | `改进项`、`可复用`、`沉淀` | `knowledge_written` `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
+| retro | `retro.md` | `改进项`、`可复用`、`沉淀` | `knowledge_written` `improvements_tracked` `tasks_done:*` | `artifact-retro`（owner `reviewer`） |
 
 产物路径与章节是**阶段间的接口** —— 下游 subagent 按固定路径读上游产物，所以它们硬编码在表里而不是配置项。
 
 ## 断言总览
 
-九种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **8 种 `run_check()` 断言**。两者合称门禁断言，下文「八种」指后者。
+十种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **9 种 `run_check()` 断言**。两者合称门禁断言，下文「九种」指后者。
 
 | 断言 | 语法 | 通过条件 | 用意 |
 | --- | --- | --- | --- |
@@ -45,6 +45,7 @@
 | 无阻塞 | `no_blocked:<阶段>` 或 `no_blocked:*` | 该范围内无 `blocked` 任务 | 阻塞项被处理而非绕过 |
 | 命令门禁 | `cmd:<键>` | `gate_commands[键]` 退出码 0 | 测试/构建/lint 真的通过 |
 | 经验已沉淀 | `knowledge_written` | 递归数 `knowledge/` 下的条目（排除 `README.md` 与类别 `index.md`）非空，或 `retro.md` 显式写「无可沉淀」 | 复盘学到的经验落进跨 flow 的知识库，而不是跟着 artifacts 归档 |
+| 改进项已跟踪 | `improvements_tracked` | `retro.md` 改进项表的每个数据行含 `T<ID>` / `已落地` / `不修：` 三者之一；无表格行时要求章节含「无改进项」 | 改进项真的落地，而不是写进散文就消失 |
 
 ### 实现要点
 
@@ -59,6 +60,8 @@
 **`tasks_done:<阶段>` 在该阶段无任务时判 PASS**（说明「无任务（视为通过）」）。避免 develop 阶段没有前端任务时被自己卡住。
 
 **`knowledge_written` 有两个出口，是刻意的。** 只查「`knowledge/` 非空」会逼着确无可沉淀的项目造假条目 —— 假条目比没有条目更毒，查找的人会把没验证过的结论当实测经验。所以显式声明「无可沉淀：<理由>」（写在 retro.md 沉淀节）是合法出口。条目按知识类别分目录落在 `knowledge/<类别>/`，条目发现**递归** `rglob("*.md")` —— 只 glob 顶层会让分目录后的条目对门禁与 status 计数隐形，沉淀明明写了门禁却说没有。判据、分类与条目格式在 `knowledge/README.md`（冻结契约 `knowledge-convention`），落盘归 `knowledger` 角色（写权限专属，`knowledge/` 在 `GUARDED_PREFIXES` 里），见 [roles.md](roles.md#角色矩阵)。条目本身不冻结 —— 知识是活文档，后续 flow 修订时写清原记录错在哪里即可；被冻结的只有 schema 本身。
+
+**`improvements_tracked` 与 `knowledge_written` 同构：只查章节存在等于没查。** retro 门禁原本只断言 `retro.md` 里有「改进项」三个字 —— 实证它拦不住任何东西：flow main 的两条改进项（`role scopes` 按角色分节输出、门禁命令的噪音标注）有落地动作、有验收判据，写在表里，之后无人跟踪、至今未做。「改进项超过五条 = 一条也落不了地」是 reviewer 定义里已有的判据，缺的是让它可被检查。所以逐行要求落地标识：`T<ID>`（已转成任务，任务表是编排者每轮都读的东西）、`已落地`（当场改完）、`不修：<理由>`（明确放弃）；无表格行时给「无改进项」这个显式出口 —— 与 `knowledge_written` 的「无可沉淀」同一条理由：**逼人写假条目比允许声明没有更毒**。
 
 **`no_blocked` 用 `*` 而不是 `design`。** design 阶段产出的任务图里任务的 `phase` 基本都是 `develop`，design 自己通常没有任务 —— 只看本阶段这条断言近乎恒真，门禁列表看着 4 条实际生效 3 条。改成看全部任务后，架构师留下的任何阻塞项都拦得住。
 
@@ -148,7 +151,7 @@ wb.py gate check --phase X   # 只校验不推进（会执行该阶段的 cmd:* 
 
 ## 扩展
 
-**加一条准出条件**：往 `GATES[阶段]["checks"]` 加一行，用现有的八种断言之一（例如 `artifact_contains:design.md:回滚`）。
+**加一条准出条件**：往 `GATES[阶段]["checks"]` 加一行，用现有的九种断言之一（例如 `artifact_contains:design.md:回滚`）。
 
 **加一种断言类型**：在 `run_check()` 里加一个 `if kind == "...":` 分支，返回 `(bool, 标签, 说明)`：
 
@@ -160,4 +163,4 @@ if kind == "adr_exists":
 
 **加一个阶段**：改 `PHASES` 与 `PHASE_CN`，在 `GATES` 加条目，建 `artifacts/<新阶段>/`，写一个角色 agent，在 `wb-flow` 的阶段-角色表加一行。`PHASES` 的顺序决定推进顺序与 `next` 的排序权重。已初始化的项目改 `PHASES` 后老 `state.json` 的 `phases` 不会自动更新（`setdefault` 只补缺失字段），用 `config set phases '[...]'` 手动改。
 
-**每次改完跑 `selfcheck`。** 门禁失效是**静默的** —— 规则写错不会报错，只会让门禁永远 PASS。自检里有「缺产物时门禁应失败」「产物齐全后门禁应通过」两条对偶断言专门抓这个，新增断言类型时给它补一对（`knowledge_written` 有五条：缺沉淀 FAIL / 有条目 PASS / 显式声明 PASS / 分目录条目仍 PASS / 只有类别索引 FAIL）。
+**每次改完跑 `selfcheck`。** 门禁失效是**静默的** —— 规则写错不会报错，只会让门禁永远 PASS。自检里有「缺产物时门禁应失败」「产物齐全后门禁应通过」两条对偶断言专门抓这个，新增断言类型时给它补一对（`knowledge_written` 有五条：缺沉淀 FAIL / 有条目 PASS / 显式声明 PASS / 分目录条目仍 PASS / 只有类别索引 FAIL；`improvements_tracked` 有五条：无落地标识 FAIL / 转任务 PASS / 已落地 PASS / 无改进项 PASS / 空章节 FAIL）。

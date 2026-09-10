@@ -242,7 +242,7 @@ $ wb.py contract impact --name user-api
 
 | 现象 | 根因 | 处置 |
 | --- | --- | --- |
-| `verify` 报漂移 | 改动走了守卫覆盖不到的路径：外部编辑器、`git checkout`、`rsync`、用户手改 | `git diff` 看改了什么。有意变更 → `unlock --reason` 补申报再 `bump`；误改 → 还原文件 |
+| `verify` 报漂移 | 改动走了守卫覆盖不到的路径：外部编辑器、`git checkout`、`rsync`、用户手改 | `git diff` 看改了什么。误改 → 还原文件；有意变更 → **不能事后补 unlock**（`unlock` 要求正文与锁定哈希一致，理由是「改之前」留的），按序走：`git checkout <锁定版本> -- <路径>` 恢复锁定正文 → `unlock --reason` → 重新应用改动 → `bump` |
 | 守卫拦住了但该改 | 忘了申报 | `contract unlock --name X --reason '...'`。**不要换等价写法绕** —— Bash 路径也被拦，且绕过意图会留在日志里 |
 | `bump` 说「内容未变」 | 申报了但没真改，或改完又改回去了 | 确认要不要改。不改就 `contract lock --name X` 关掉窗口 |
 | 门禁「尚未登记任何契约」 | 确实没有跨角色接口，或漏了登记 | 前者 `phase advance --force` 并说明；后者补 `add` + `lock`。`design-doc` 本身该登记，所以 design 之后这条基本不出现 |

@@ -898,6 +898,37 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
                               " knowledge/README.md，或派 knowledger 角色）；"
                               "确无可沉淀时在 retro.md 沉淀章节写明「无可沉淀：<理由>」" + stale)
 
+    if kind == "improvements_tracked":
+        # 改进项要能落地：每条要么已转成任务（T<ID>），要么当场改完，要么明确放弃。
+        # 没有落地标识的改进项 = 写进散文就消失 —— 实证：flow main 的 retro.md 里
+        # 「role scopes 分节」「门禁噪音标注」两条改进项有落地动作、有验收判据，
+        # 之后无人跟踪、至今未做。与 knowledge_written 同构：给「无改进项」一个显式
+        # 出口，避免为过门禁造假条目。
+        p = artifact_path(root, phase, "retro.md")
+        label = "改进项已跟踪落地"
+        if not p.is_file():
+            return False, label, "产物文件不存在"
+        m = re.search(r"^#+[^\n]*改进项[^\n]*\n(.*?)(?=^#+\s|\Z)",
+                      p.read_text(encoding="utf-8", errors="replace"), re.M | re.S)
+        if not m:
+            return False, label, "缺少「改进项」章节"
+        section = m.group(1)
+        rows = [l.strip() for l in section.splitlines() if l.strip().startswith("|")]
+        # 表格首行是表头，分隔行只含 | - : 空格
+        data_rows = [l for l in rows if re.search(r"[^\s|:\-]", l)][1:]
+        if not data_rows:
+            if "无改进项" in section:
+                return True, label, "已声明无改进项"
+            return False, label, ("改进项章节没有条目；确实没有时在该章节写明「无改进项」"
+                                  "（有改进项则用表格逐条列出）")
+        bad = [r for r in data_rows
+               if not (re.search(r"T\d+", r) or "已落地" in r or "不修" in r)]
+        if bad:
+            return False, label, ("未跟踪：" + " / ".join(b[:40] for b in bad[:3])
+                                  + " —— 转成任务写 `T<ID>`，当场改完写「已落地」，"
+                                    "放弃写「不修：<理由>」")
+        return True, label, f"{len(data_rows)} 条均有落地标识"
+
     if kind == "cmd":
         cmd = st["gate_commands"].get(rest)
         label = f"命令门禁 {rest}"
@@ -929,7 +960,14 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         def _record(out: str, verdict: str) -> str:
             logf.write_text(f"$ {cmd}\n[{verdict}] {now()}\n\n{out}", encoding="utf-8")
             tail = out.strip().splitlines()[-5:]
-            return (f"完整输出见 {rel_log}" + ("\n" + "\n".join("      " + l[:200] for l in tail) if tail else ""))
+            # selfcheck 类命令的输出里满是「拒绝」行 —— 那是它自己的负向用例（故意触发
+            # 守卫验证拦截生效），不是门禁失败。不注明会让人愣一下（flow main 的 retro
+            # 改进项 3）。
+            note = ("\n      （输出中的「拒绝」行是被测命令自身的负向用例，属预期）"
+                    if "selfcheck" in cmd else "")
+            return (f"完整输出见 {rel_log}"
+                    + ("\n" + "\n".join("      " + l[:200] for l in tail) if tail else "")
+                    + note)
 
         limit = st.get("gate_timeout") or 1800
         try:

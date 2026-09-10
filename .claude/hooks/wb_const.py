@@ -19,6 +19,11 @@ import re
 # load_state 的 setdefault 补齐字段容忍，不需要单独迁移函数。
 STATE_SCHEMA = 1
 
+# 工作台本体版本。与 STATE_SCHEMA 是两件事：那个是数据结构版本，这个是工具版本 ——
+# 多个项目各部署一份工作台时用它对齐（`status` 根行显示），升级步骤见 README「升级」。
+# 改动分发内容（内核 / agents / skills）时递增。
+WB_VERSION = "0.1.0"
+
 PHASES = ["clarify", "analyze", "design", "develop", "verify", "retro"]
 
 PHASE_CN = {
@@ -92,6 +97,9 @@ GATES = {
             # 且经验真的落进 knowledge/（或显式声明无可沉淀）。
             "artifact_contains:retro.md:沉淀",
             "knowledge_written",
+            # 改进项出口：每条要么转成任务（T<ID>）、要么当场落地、要么明确放弃。
+            # 只查章节存在等于「写进散文就消失」—— flow main 的两条改进项即为实例。
+            "improvements_tracked",
             "tasks_done:*",
         ],
     },

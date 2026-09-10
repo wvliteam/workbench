@@ -20,7 +20,7 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from wb_const import ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, STATE_SCHEMA
+from wb_const import ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, STATE_SCHEMA, WB_VERSION
 from wb_bash import MAX_LOG, resolve
 from wb_core import (
     INHERIT_KEYS, acquire_state_lock, artifact_path, close_unlock, find_contract,
@@ -73,6 +73,41 @@ def cmd_selfcheck(args) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         assert git_ls.returncode == 0, \
             f"{real_codex_hook} 未跟踪 —— 干净 checkout 上 Codex 守卫会静默失效（git add 它）"
+    # skills 是手工同步的两份拷贝（.claude/skills 与 .agents/skills，见
+    # knowledge/development/skills-and-agents-are-manual-copies.md）。不一致时两端
+    # 拿到不同版本的编排约定，且不报错 —— 靠人记得 diff 就是迟早漂移。
+    skill_pair = [real_root / ".claude" / "skills", real_root / ".agents" / "skills"]
+    if all(d.is_dir() for d in skill_pair):
+        left = {f.relative_to(skill_pair[0]): f
+                for f in skill_pair[0].rglob("*") if f.is_file()}
+        right = {f.relative_to(skill_pair[1]): f
+                 for f in skill_pair[1].rglob("*") if f.is_file()}
+        for rel in sorted(set(left) | set(right)):
+            if rel not in left or rel not in right:
+                raise AssertionError(
+                    f"skills 双份拷贝不一致：{rel} 只存在于 "
+                    f"{'.claude' if rel in left else '.agents'}/skills —— "
+                    f"两端手工同步，加文件也要两边都加")
+            assert left[rel].read_bytes() == right[rel].read_bytes(), (
+                f"skills 双份拷贝内容不一致：{rel} —— 改完 .claude/skills 要 cp 到 "
+                f".agents/skills（反之亦然），否则两端 agent 拿到不同版本的约定")
+    # 角色定义 TOML 必须能被解析：description 里嵌裸双引号会静默破坏解析，
+    # Codex 端加载不出这个角色且不报错（实测踩过，flow main 的 retro 改进项 2，
+    # 见 knowledge/troubleshooting/codex-agent-toml-quote-escapes.md）。手工写
+    # toml 后靠「记得跑 tomllib.load」不是机制 —— 把这一步固化成断言。
+    toml_dir = real_root / "agents"
+    if toml_dir.is_dir():
+        try:
+            import tomllib
+        except ImportError:  # pragma: no cover — Python < 3.11
+            tomllib = None
+        if tomllib is not None:
+            for f in sorted(toml_dir.glob("*.toml")):
+                try:
+                    tomllib.loads(f.read_text(encoding="utf-8"))
+                except Exception as e:
+                    raise AssertionError(
+                        f"agents/{f.name} 不是合法 TOML（Codex 端会加载不出这个角色）：{e}")
     try:
         os.chdir(tmp)
 
@@ -244,6 +279,17 @@ def cmd_selfcheck(args) -> None:
         assert sync_task["contracts"][0]["sha"] == find_contract(st, "user-api")["sha"]
         assert find_task(st, api_task["id"])["status"] == "stale", \
             "bump 应将旧契约绑定任务标记 stale"
+        # 漂移后不能事后补 unlock：理由必须在改之前留痕，否则 unlock 退化成「改完补个理由」。
+        # 合规路径是恢复锁定正文 -> unlock --reason -> 重新应用改动 -> bump
+        # （knowledge-convention v3 补申报就是这么走通的）。
+        drifted = '{"GET /users": {"200": ["id", "name", "email", "extra"]}}\n'
+        cpath.write_text(drifted, encoding="utf-8")
+        code, out = quiet("contract", "unlock", "--name", "user-api", "--reason", "事后补申报")
+        assert code == 1 and "事后" in out, \
+            f"漂移状态下 unlock 必须被拒（改完补理由不算申报）：{out}"
+        cpath.write_text('{"GET /users": {"200": ["id", "name", "email"]}}\n', encoding="utf-8")
+        code, _ = quiet("contract", "verify")
+        assert code == 0, "恢复锁定正文后不应再报漂移"
         # 旧版任务只有契约名，load_state 不能把它猜成当前 v2；必须显式 reopen
         # 才能获得完整快照，否则读取动作本身就会悄悄改写任务基线。
         st["seq"] += 1
@@ -359,6 +405,15 @@ def cmd_selfcheck(args) -> None:
         logf = state_path(tmp).parent / "gate-test.log"
         assert not ok and "gate-test.log" in detail, detail
         assert "BOOM" in logf.read_text(encoding="utf-8"), "完整输出未落盘"
+
+        # selfcheck 类门禁命令的 detail 要注明「拒绝」行属预期 —— 它的输出里满是被测
+        # 命令自己的负向用例，不注明会让人以为门禁在报错（flow main retro 改进项 3）
+        quiet("config", "set", "gate_commands.test", "echo selfcheck-ok")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert ok and "负向用例" in detail, f"selfcheck 类命令应带噪音标注：{detail}"
+        quiet("config", "set", "gate_commands.test", "echo plain-ok")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert ok and "负向用例" not in detail, f"非 selfcheck 命令不该带标注：{detail}"
 
         # 超时是 FAIL，不是 Traceback（CLI 路径没有兜底 try）
         quiet("config", "set", "gate_timeout", "1")
@@ -762,6 +817,13 @@ def cmd_selfcheck(args) -> None:
         quiet("config", "set", "role_scopes.qa", '["everything/**"]')
         quiet("role", "scopes", "--reset")
         assert load_state(tmp)["role_scopes"]["qa"] == DEFAULT_ROLE_SCOPES["qa"]
+
+        # 输出按角色分节：原来一行一个角色，紧接着冻结清单与解冻窗口，找单个角色要在
+        # 流水里翻（flow main retro 改进项 1）—— 角色名独立成行才能一眼定位
+        code, out = quiet("role", "scopes")
+        assert code == 0
+        for r in DEFAULT_ROLE_SCOPES:
+            assert f"\n  {r}\n" in out, f"role scopes 应按角色分节，{r} 独立成行：{out[:200]}"
 
         # 跨仓库布局：默认范围静默错两个方向，init 要换成按仓库前缀
         assert repo_layout_scopes(tmp) is None, "没有 repos/ 时不该动默认范围"
@@ -1499,11 +1561,42 @@ def cmd_selfcheck(args) -> None:
         assert kw and kw[0][0] is False, f"只有类别索引不该算沉淀：{kw}"
         (tmp / "knowledge" / "development" / "index.md").unlink()
         artifact_path(tmp, "retro", "retro.md").write_text(
-            "# 复盘\n## 改进项\n- a\n## 可复用\n- b\n"
+            "# 复盘\n## 改进项\n无改进项\n## 可复用\n- b\n"
             "## 沉淀\n无可沉淀：纯文档改动没有可复用约束\n", encoding="utf-8")
         kw = [r for r in gate_check(tmp, load_state(tmp), "retro")
               if r[1] == "经验已沉淀（knowledge/）"]
         assert kw and kw[0][0] is True, f"显式声明无可沉淀后应 PASS：{kw}"
+
+        # --- 改进项出口：retro 门禁的 improvements_tracked ---
+        # 门禁失效是静默的：无落地标识 FAIL / 转任务 PASS / 当场落地 PASS /
+        # 显式「无改进项」PASS / 空章节 FAIL。与 knowledge_written 同构 ——
+        # 给「确实没有改进项」留合法出口，避免为过门禁造假条目。
+        def improve_verdict(body: str):
+            artifact_path(tmp, "retro", "retro.md").write_text(
+                "# 复盘\n## 可复用\n- b\n## 沉淀\n无可沉淀：x\n" + body,
+                encoding="utf-8")
+            hits = [r for r in gate_check(tmp, load_state(tmp), "retro")
+                    if r[1] == "改进项已跟踪落地"]
+            assert hits, "improvements_tracked 未出现在 retro 门禁里"
+            return hits[0]
+
+        ok, _, detail = improve_verdict(
+            "## 改进项\n| 改进项 | 落地动作 | 判断是否做到 |\n| --- | --- | --- |\n"
+            "| role scopes 分节 | 下次动 wb.py 时改 | 输出能定位 |\n")
+        assert ok is False and "未跟踪" in detail, \
+            f"无落地标识的改进项应 FAIL（写进散文就消失）：{ok} {detail}"
+        ok, _, detail = improve_verdict(
+            "## 改进项\n| 改进项 | 落地动作 | 判断是否做到 |\n| --- | --- | --- |\n"
+            "| role scopes 分节 | 已建任务 T7 | 输出能定位 |\n")
+        assert ok is True, f"转成任务的改进项应 PASS：{detail}"
+        ok, _, detail = improve_verdict(
+            "## 改进项\n| 改进项 | 落地动作 | 判断是否做到 |\n| --- | --- | --- |\n"
+            "| role scopes 分节 | 已落地 | 输出能定位 |\n")
+        assert ok is True, f"当场落地的改进项应 PASS：{detail}"
+        ok, _, detail = improve_verdict("## 改进项\n本次无改进项。\n")
+        assert ok is True, f"显式声明无改进项应 PASS：{detail}"
+        ok, _, detail = improve_verdict("## 改进项\n")
+        assert ok is False, f"空改进项章节应 FAIL（不能靠不写绕过）：{ok} {detail}"
 
         # --- flow（需求线）隔离 ---
         # 一条流水线一个 flow：state / 锁 / 产物互不覆盖；守卫读全部 flow 的并集。
@@ -1785,6 +1878,19 @@ def cmd_selfcheck(args) -> None:
         s2 = find_task(load_state(tmp2), "S2")
         assert "lease_until" not in s2, f"#2 done 未清租约：{s2}"
         assert s2.get("attempts") == 1 and not lease_expired(s2), "#2 done 后 attempts 应保留且不报过期"
+
+        # #10：status 要能看出「守卫少了一道」。角色锁未设置时，主线程与非角色 agent
+        # 不受 role_scopes 约束（harness 派不出角色 subagent 的降级模式下这是常态，
+        # 见 wb-flow「派不出角色 subagent 时」）—— 只显示版本号没人知道守卫缺一层。
+        role_file = wb_dir(tmp2) / "role"
+        role_file.unlink(missing_ok=True)
+        code, out = quiet("status")
+        assert "角色锁未设置" in out, f"#10 未设角色锁时 status 应提示守卫降级：{out}"
+        assert f"wb {WB_VERSION}" in out, f"#10 status 应显示工作台版本：{out}"
+        role_file.write_text("qa", encoding="utf-8")
+        code, out = quiet("status")
+        assert "角色锁未设置" not in out, f"#10 已设角色锁就不该再提示：{out}"
+        role_file.unlink(missing_ok=True)
         os.chdir(old)
         shutil.rmtree(tmp2, ignore_errors=True)
     finally:
@@ -1793,6 +1899,6 @@ def cmd_selfcheck(args) -> None:
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
           "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / "
           "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
-          "任务租约 / 自依赖 / 门禁豁免")
+          "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / skills 双份同步")
 
 

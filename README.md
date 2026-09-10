@@ -180,7 +180,22 @@ python3 .claude/hooks/wb.py log --tail 200
 4. 按实际目录布局调角色范围：`config set role_scopes.<角色> '<JSON 数组>'`。别把产物目录放宽回 `.workbench/artifacts/**` —— 那会撤掉阶段隔离。
 5. 阶段准出条件要改就动 `wb_const.py` 里的 `GATES` 表，改完跑 `selfcheck`。
 
-升级已有项目时 `.claude/hooks/` 要整目录拷贝 —— `wb.py` 只是入口，实现在同目录 `wb_*.py` 模块里，只拷 `wb.py` 会缺模块（入口会给出明确报错，`selfcheck` 有一条分发完整性断言兜底）。升级后跑一次 `wb.py role scopes --reset`（先 `role scopes` 存一份定制值）—— 新增的默认值不会自动覆盖老 `state.json` 里的旧值。跨仓库布局（`repos/*`）下它跟 `init` 走同一条路径，重新按仓库前缀算，不会把范围刷成裸默认值。
+### 升级已有项目
+
+1. `.claude/hooks/` 与 `.claude/skills/` **整目录**拷贝 —— `wb.py` 只是入口，实现在同目录 `wb_*.py` 模块里，只拷 `wb.py` 会缺模块（入口给出明确报错，`selfcheck` 有一条分发完整性断值守着）。
+2. 升级后跑一次 `wb.py role scopes --reset`（先 `role scopes` 存一份定制值）—— 新增的默认值不会自动覆盖老 `state.json` 里的旧值。跨仓库布局（`repos/*`）下它跟 `init` 走同一条路径，重新按仓库前缀算，不会把范围刷成裸默认值。
+3. 跑 `wb.py selfcheck`。`status` 根行显示的 `wb <版本>`（`wb_const.py` 的 `WB_VERSION`）用来确认换成了哪一份；`state.json` 的 schema 版本（`STATE_SCHEMA`）只增不改语义，老状态靠 `setdefault` 补齐字段，不需要迁移脚本。
+4. `.agents/skills/` 与 `.claude/skills/` 是**手工同步的两份拷贝**，改一边必须同步另一边 —— `selfcheck` 会逐文件比对内容，不一致直接失败（角色定义不受此影响，`.claude/agents/` 与 `.codex/agents/` 都是指向根 `agents/` 的软链）。
+
+### 回归防线
+
+门禁与守卫的失效是**静默的**：规则表写错不报错，只会让流程悄悄失去约束力。所以分发内容改完必须跑 `wb.py selfcheck`。仓库自带 pre-commit 钩子把它固定下来，每个 clone 启用一次：
+
+```bash
+git config core.hooksPath .githooks      # 撤销：git config --unset core.hooksPath
+```
+
+改了 `.claude/hooks/`、`agents/`、`.claude/skills/`、`.claude/settings.json` 等分发内容时自动跑并拦住不过的提交；`docs/`、`draft/` 这类纯文档改动不触发。
 
 ## 设计与实现细节
 

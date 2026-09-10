@@ -46,6 +46,21 @@ python3 .claude/hooks/wb.py status
 
 依赖语义统一为：`done` 与带理由的 `skipped` 满足下游；`blocked` 与 `stale` 阻断下游。任何任务变为 `blocked` / `stale` 都要沿依赖图递归使传递下游 stale，包括原先 done 的任务。只有依赖全部恢复后才可 `task reopen`，并刷新任务绑定的契约快照。
 
+## 推进前的用户确认
+
+门禁管「产物齐不齐」，管不了「用户认不认」。两处必须在 `phase advance` **之前**用 `AskUserQuestion` 问用户：
+
+| 阶段 | 确认什么 | 不问的代价 |
+| --- | --- | --- |
+| clarify | 验收标准、非目标，以及 pm 报上来的阻塞待确认项 | 产物过门禁即冻结成 `artifact-requirements`，改它要 unlock → bump → 下游返工。偏差在这里拦最便宜 |
+| design | 方案对比里选哪个（取舍影响后续成本时） | 方案定了才拆任务，选错的返工由全部开发阶段承担 |
+
+用户批量授权后续（「这次你全权处理」）时不再逐阶段问，按授权推进并在汇报里说明。确认完写一条留痕：
+
+```
+python3 .claude/hooks/wb.py log "用户确认 clarify：验收标准 5 条、非目标 2 条，无异议"
+```
+
 ## 派发
 
 ### 前四个阶段：单角色顺序执行
@@ -72,6 +87,12 @@ python3 .claude/hooks/wb.py next --all --json
 
 一批回来后，先确认产物和契约检查，再由编排者独立复核后 `task done`；不要只依据 subagent 的自报结果标记完成。
 
+### 评审（按需，`task done` 之前）
+
+绑定契约的任务、跨前后端接口的改动、或改动面明显大于其余的任务，在 `task done` **之前**派一个只读 `reviewer`（模式一）：给任务 ID、契约文件路径、改动范围（`git diff` 或指定文件）。`blocker` / `major` 打回成任务（`task reopen` 或 `task add`），`minor` 记进 `verification.md` 对应任务段。纯文案、样式、依赖版本号这类改动跳过。
+
+评审要在**还能改的时候**做。攒到 retro 时全部任务已 done、产物已冻结，`blocker` 只能降级成改进项 —— 那时改不动了。
+
 ### develop 的落盘校验记录
 
 每批回来后，把 subagent 报的校验命令**自己跑一遍**，把命令与输出记进 `.workbench/artifacts/<flow>/develop/verification.md`（当前 flow）。用 `Write`：先读出文件现有内容，再连着新的一段一起写回 —— 两个开发角色共用这一份，且这份记录属于编排者；让 subagent 各自写会互相覆盖，shell 追加（`>> .workbench/...`）也被守卫拦。
@@ -89,6 +110,16 @@ subagent 只在计划内停止、契约熔断 / stale、范围外发现这三类
 ### 并发上限
 
 `config set max_parallel 5` 可调。往上调之前确认这些任务写入的目录不重叠 —— 同一批里两个 agent 改同一个文件会互相覆盖。
+
+### 派不出角色 subagent 时（降级模式）
+
+有些 harness 只暴露 `general-purpose` / `Explore` 这类内置类型，`.claude/agents/` 里的角色不在可派发列表里（本仓库实测过，见 `knowledge/environment/harness-dispatches-no-role-subagents.md`）。此时**不要等派发、也不要跳过阶段**：主线程直接执行各阶段产物，门禁纪律一项不减 ——
+
+- 产物照样落盘、`gate check` 照样真过、校验命令照样由编排者亲跑并写进 `verification.md`；
+- 角色产物（`requirements.md` 等）由主线程代写，但同样必须先过门禁再冻结，`role set <角色>` 照打（`status` 里能看出当前范围）；
+- 六阶段照走，`retro.md` 的改进项与沉淀出口照查。
+
+**失效的东西要说明白**：角色越权守卫整层跳过（主线程没有 `agent_type`，不受 `role_scopes` 约束），此时只剩冻结（契约与阶段产物）和门禁两道防线。所以降级时三件事不能做 —— 直接改已冻结的产物（走 `contract unlock`）、跳过门禁推进、把「我读过代码了」当验证证据。
 
 ## 阻塞与契约变更
 
@@ -141,9 +172,17 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 retro 阶段 reviewer 交回后：
 
 1. 把 reviewer 报上来的**沉淀候选清单**派给 `knowledger` 角色落盘（判据、查重、条目格式见 wb-knowledge skill 与 `knowledge/README.md`）。知识角色回报全部不满足判据时，让 reviewer 在 `retro.md` 沉淀章节补「无可沉淀：<理由>」—— retro 门禁查 `knowledge_written`，这条声明是它的合法出口。
-2. `python3 .claude/hooks/wb.py report --write`
-3. 把「需要改进流程」的沉淀落掉：写进项目 CLAUDE.md、门禁规则或角色定义 —— 这些不属于 `knowledge/`，别塞进知识条目。
-4. `gate check` 过了再 `phase advance`；沉淀条目写完就锁进 git，下个需求 analyze/design 派发前记得查。
+2. **改进项逐条落地。** `retro.md` 改进项表每行要有落地标识，门禁 `improvements_tracked` 逐行检查：能当场改的当场改（改完写 `已落地`），改不完的建任务再把 ID 写回表格：
+
+```
+python3 .claude/hooks/wb.py task add --title "role scopes 按角色分节输出" \
+    --role architect --phase retro
+```
+
+   只写在 retro.md 里的改进项会跟着 artifacts 一起归档 —— 上一轮 flow 的两条改进项就是这么漂掉的，下个需求重新发现同一件事。
+3. `python3 .claude/hooks/wb.py report --write`
+4. 把「需要改进流程」的沉淀落掉：写进项目 CLAUDE.md、门禁规则或角色定义 —— 这些不属于 `knowledge/`，别塞进知识条目。
+5. `gate check` 过了再 `phase advance`；沉淀条目写完就锁进 git，下个需求 analyze/design 派发前记得查。
 
 ## 汇报给用户
 

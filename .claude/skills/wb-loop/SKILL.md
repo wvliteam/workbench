@@ -20,7 +20,7 @@ python3 .claude/hooks/wb.py next --all --json
 
 按 `next` 的结果分支：
 
-**有就绪任务** → 同一条消息里多个 subagent 调用并行派发整批。每个 subagent 必须收到任务 ID、契约路径、相关验收标准和绑定的完整 `{name,version,revision,sha}` 快照，并被要求在每批写入前运行 `task check <ID>`。回来后先确认产物和契约检查，再由编排者独立复核文件与验证命令，最后执行 `task done <ID>`。**subagent 说做完了不等于做完了** —— 不得把自报结果当成完成证据。develop 阶段把编排者实际复核的命令与输出记进 `.workbench/artifacts/<flow>/develop/verification.md`（当前 flow，路径见 `status` 根行；用 `Write`，读出现有内容后连着新的一起写；这份文件属于编排者，subagent 不得写；shell 追加被守卫拦），门禁要求它非空。
+**有就绪任务** → 同一条消息里多个 subagent 调用并行派发整批。每个 subagent 必须收到任务 ID、契约路径、相关验收标准和绑定的完整 `{name,version,revision,sha}` 快照，并被要求在每批写入前运行 `task check <ID>`。回来后先确认产物和契约检查，再由编排者独立复核文件与验证命令，最后执行 `task done <ID>`。**subagent 说做完了不等于做完了** —— 不得把自报结果当成完成证据。develop 阶段把编排者实际复核的命令与输出记进 `.workbench/artifacts/<flow>/develop/verification.md`（当前 flow，路径见 `status` 根行；用 `Write`，读出现有内容后连着新的一起写；这份文件属于编排者，subagent 不得写；shell 追加被守卫拦），门禁要求它非空。绑定契约或跨端的任务，在 `task done` 前按 `wb-flow`「评审」派一次只读 `reviewer`，`blocker` / `major` 打回成任务再收尾 —— 无人值守不是跳过评审的理由。
 
 **无就绪任务、有进行中** → 上一批还没回。等它回，不要重复派发。
 

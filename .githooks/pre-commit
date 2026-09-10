@@ -1,0 +1,23 @@
+#!/bin/sh
+# 工作台自身的回归防线：分发内容（内核 / 角色定义 / skills / hook 注册表）有改动时
+# 跑 selfcheck。门禁与守卫的失效是静默的 —— 规则表写错不报错，只会让流程悄悄失去
+# 约束力，所以这道检查不能靠人记得跑。
+#
+# 启用一次即可（本地配置，可撤销：git config --unset core.hooksPath）：
+#     git config core.hooksPath .githooks
+set -e
+
+changed=$(git diff --cached --name-only --diff-filter=ACM)
+if printf '%s\n' "$changed" | grep -qE '^(\.claude/hooks/|\.claude/agents/|\.claude/skills/|\.claude/settings\.json|\.agents/|\.codex/|agents/)'; then
+    echo "pre-commit：分发内容有改动，跑 selfcheck…"
+    log=$(mktemp)
+    if ! python3 .claude/hooks/wb.py selfcheck >"$log" 2>&1; then
+        echo "selfcheck 未通过，提交已拦下。输出："
+        tail -40 "$log"
+        rm -f "$log"
+        echo "（确认要跳过：git commit --no-verify —— 但先想想为什么它会红）"
+        exit 1
+    fi
+    rm -f "$log"
+    echo "pre-commit：selfcheck 通过"
+fi

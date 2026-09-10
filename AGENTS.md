@@ -130,6 +130,7 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 4. **子 agent 说做完了不等于做完了。** 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍，再 `task done`。异常中断的 agent 会在 `.workbench/artifacts/<flow>/develop/tasks/<任务号>-<角色名>.md` 留执行记录（已完成/已改/阻塞/下一步），接续时先读它，再决定重派还是续做。
 5. **develop 阶段并行派发。** `next --all --json` 拿整批就绪任务，放在同一条消息里多个 Agent 调用同时发出。串行派发会浪费掉契约先行带来的全部收益。每个 agent 先 `task start`、完成后 `task done` —— 产物归属合并与解冻窗口清理都挂在 `task done` 上。
 6. **不可简化的东西**：信任边界上的输入校验、防数据丢失的错误处理、安全措施、可访问性基础、用户明确要求的功能。其余按最小可用实现。
+7. **clarify 与 design 推进前问用户。** 门禁管「产物齐不齐」，管不了「用户认不认」：需求偏差在这里拦最便宜（产物一过门禁就冻结成契约，改它要走 unlock → bump → 下游返工），方案取舍选错的返工由全部开发阶段承担。用 `AskUserQuestion`，确认完 `wb.py log` 一条留痕；用户批量授权后续时按授权推进并在汇报里说明。
 
 ## 门禁命令
 

@@ -26,7 +26,7 @@
 
 ### 2.1 当前分层
 
-当前工作台由五层组成，定义见 [architecture.md](architecture.md)：
+当前工作台由五层组成，定义见 [architecture.md](../docs/architecture.md)：
 
 | 层 | 当前实现 | 宿主耦合 |
 | --- | --- | --- |
@@ -280,6 +280,6 @@ git diff --check
 - [OpenAI Docs: Subagents](https://learn.chatgpt.com/docs/agent-configuration/subagents)
 - [OpenAI Docs: Hooks](https://learn.chatgpt.com/docs/hooks)
 - [OpenAI Docs: Configuration Reference](https://developers.openai.com/codex/config-file/config-reference)
-- [本项目架构设计](architecture.md)
-- [本项目权限模型](permissions.md)
-- [本项目调度与 Loop](scheduling.md)
+- [本项目架构设计](../docs/architecture.md)
+- [本项目权限模型](../docs/permissions.md)
+- [本项目调度与 Loop](../docs/scheduling.md)

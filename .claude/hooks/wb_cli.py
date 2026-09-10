@@ -19,7 +19,7 @@ from pathlib import Path
 
 from wb_const import (
     ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, GATES, PHASES, PHASE_ARTIFACT_CONTRACTS, PHASE_CN,
-    REPO_HINTS, ROLES,
+    REPO_HINTS, ROLES, WB_VERSION,
 )
 from wb_bash import CONFIG_SCHEMA, catastrophic_command, config_key_allowed
 from wb_core import (
@@ -94,7 +94,15 @@ def cmd_status(args) -> None:
         return
     # 根路径必须显示：工作区里可以有多个仓库各带一份 .workbench/，
     # 只看项目名分不清当前操作的是哪一份。
-    print(f"项目：{st['project']}　根：{root}　flow：{read_current_flow(root)}")
+    print(f"项目：{st['project']}　根：{root}　flow：{read_current_flow(root)}　wb {WB_VERSION}")
+    # 角色锁只兜底主线程与非角色 agent（subagent 的角色按 hook 载荷的 agent_type 判定）。
+    # 没设时角色越权守卫对这两类调用者整层跳过，只剩冻结与门禁两道防线 ——
+    # 降级模式（harness 派不出角色 subagent，见 wb-flow）下这是常态，
+    # 不在这里说破，就没人知道守卫已经少了一道。
+    role_file = wb_dir(root) / "role"
+    if not (role_file.is_file() and role_file.read_text(encoding="utf-8").strip()):
+        print("⚠ 角色锁未设置：角色越权守卫对主线程与非角色 agent 不生效"
+              "（角色 subagent 按载荷判定，不受影响）")
     cur = st["phase"]
     line = []
     for p in st["phases"]:
@@ -909,8 +917,13 @@ def cmd_role(args) -> None:
             save_state(root, st)
             print("角色范围已刷成当前默认值。" +
                   ("检测到 repos/ 跨仓库布局，已按仓库前缀重算。" if layout else ""))
+        # 按角色分节：原来一行一个角色把范围挤在一起，下面紧跟着冻结清单与解冻窗口，
+        # 找单个角色要在混排里翻（flow main 的 retro 改进项 1）。
+        print("角色写入范围：")
         for r, globs in st["role_scopes"].items():
-            print(f"{r:<19} {', '.join(globs)}")
+            print(f"\n  {r}")
+            for g in globs:
+                print(f"    {g}")
         print_unclaimed(root, st["role_scopes"])
         print("\n冻结文件（任何角色都不能用工具直接写）：")
         for fr in read_frozen(root):

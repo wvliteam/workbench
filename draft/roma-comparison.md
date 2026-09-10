@@ -18,7 +18,7 @@
 | 唯一的流水线 | `env-init`（环境初始化），G0–G8 门禁 + `INIT-PLAN.json` 任务图 + evidence ledger | clarify → analyze → design → develop → verify → retro |
 | 门禁强制性 | 规则写在 SKILL.md 里靠模型遵守，校验脚本只做 schema 检查 | `phase advance` 退出码挡住阶段推进 |
 
-**互补大于重叠。** 我们有的它没有：契约哈希冻结、解冻申报窗口、`fnmatch` 角色范围、门禁即命令。重叠区只有权限守卫和任务状态机 —— 而重叠的那部分，它解掉了我们在 [permissions.md](permissions.md) 和 [architecture.md](architecture.md) 里明写「做不到」的三个问题。
+**互补大于重叠。** 我们有的它没有：契约哈希冻结、解冻申报窗口、`fnmatch` 角色范围、门禁即命令。重叠区只有权限守卫和任务状态机 —— 而重叠的那部分，它解掉了我们在 [permissions.md](../docs/permissions.md) 和 [architecture.md](../docs/architecture.md) 里明写「做不到」的三个问题。
 
 ## 一、shell 写入目标真解析 + `uncertain` 三态
 
@@ -65,9 +65,9 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 第三块是唯一需要保守处理的：`uncertain=True` 一律退回现有文本匹配，不新增判断（不放行，也不假装精确），拒绝话术里加一句「写入目标无法解析」。
 
-**搬的时候要动一处**：ROMA 的第 4 条把 `git checkout` / `git restore` 的参数算作写入目标，照搬会让 `git checkout -- 契约` 从放行变成拒绝。我们对它的放行是有意的取舍（还原旧版不改动内容，`contract verify` 校验的是内容哈希不是文件状态），所以搬进来时要从 `_GIT_WRITE` 里去掉 `checkout` / `restore` —— 或者接受行为变化并同步改 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)，两者选一，别默认照抄。
+**搬的时候要动一处**：ROMA 的第 4 条把 `git checkout` / `git restore` 的参数算作写入目标，照搬会让 `git checkout -- 契约` 从放行变成拒绝。我们对它的放行是有意的取舍（还原旧版不改动内容，`contract verify` 校验的是内容哈希不是文件状态），所以搬进来时要从 `_GIT_WRITE` 里去掉 `checkout` / `restore` —— 或者接受行为变化并同步改 [architecture.md](../docs/architecture.md#冻结防线覆盖不到的写入路径)，两者选一，别默认照抄。
 
-**要同步改的文档。** 三块都改动了已锁定的拒绝/放行语义，所以 [permissions.md](permissions.md) 的 `BASH_WRITE` 那节（误报形态）与越根检查那条已知边界、[architecture.md](architecture.md) 的「冻结防线覆盖不到的写入路径」、`CLAUDE.md` 的已知边界都要跟着改。
+**要同步改的文档。** 三块都改动了已锁定的拒绝/放行语义，所以 [permissions.md](../docs/permissions.md) 的 `BASH_WRITE` 那节（误报形态）与越根检查那条已知边界、[architecture.md](../docs/architecture.md) 的「冻结防线覆盖不到的写入路径」、`CLAUDE.md` 的已知边界都要跟着改。
 
 **代价。** ~126 行新代码 + 一批用例（ROMA 注释里那三条误报清单可以直接搬）。`_LAST_ARG` / `_ALL_ARGS` 这几张表会随 shell 用法漂移，得当成需要维护的清单，不是一次写完的常量。
 
@@ -93,7 +93,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 三、`__unknown__` 调用者 = 门禁失效告警
 
-**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底（`wb.py:1612`）。[architecture.md](architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
+**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底（`wb.py:1612`）。[architecture.md](../docs/architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
 
 **ROMA 的做法。** 三态而不是两态：
 
