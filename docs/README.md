@@ -34,6 +34,7 @@
 | [roma-comparison.md](../draft/roma-comparison.md) | 与 ROMA（另一套 agent workspace 运行时）的对比：十条可借鉴项、明确不抄的、落地顺序 |
 | [references-extraction.md](../draft/references-extraction.md) | ROMA `references/` 公共参考层的分析（2026-09-07）与落地记录 |
 | [wbsvr.md](../draft/wbsvr.md) | **历史设计，已移除**：曾讨论的契约托管服务方案，不是当前安装或运行手册 |
+| [handoff-wbsvr-removal.md](../draft/handoff-wbsvr-removal.md) | **历史交接记录（2026-09-04）**：wbsvr 移除当天的交接快照，未完成事项已全部由后续提交落地，不是待办清单 |
 | [open-issues-2026-09-10.md](../draft/open-issues-2026-09-10.md) | 待修复问题清单（2026-09-10）：汇总此前评估/审查文档、逐条核对当前代码后仍未修复的项，按优先级列出背景、证据、修复方案 —— 这一份是待办清单，其余多数不是 |
 
 ## 一页速览

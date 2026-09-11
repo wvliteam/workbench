@@ -61,5 +61,5 @@
 ## 关联
 
 - [roma-comparison.md](roma-comparison.md)：其余 ROMA 借鉴项的总账，本文可视为其第十一节候选。
-- `knowledge/development/skills-and-agents-are-manual-copies.md`：双端手工同步的判据，本方案是其缓解手段之一。
+- `knowledge/development/multi-end-assets-share-one-source.md`：多端资产的单源软链判据（原条目名 `skills-and-agents-are-manual-copies.md`，`d606944` 后修订更名），本方案是其缓解手段之一。
 - [AGENTS.md](../AGENTS.md)「多端适配」：references/ 与软链收敛是同一条多端路线的两个部件。

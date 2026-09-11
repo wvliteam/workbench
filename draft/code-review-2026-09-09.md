@@ -20,7 +20,7 @@
 
 ### 2. 角色可执行脚本绕过 `scripts/` `repos.json` `.vscode/` 只读守卫
 
-**文件**：`.claude/hooks/wb.py:3112` 附近（Bash 写目标解析）
+**文件**：拆分前的 `wb.py` Bash 写目标解析（现 `wb_guard.py` / `wb_bash.py`）
 
 `python3 scripts/repos_apply.py --root .` 没有 Bash 解析器能识别的写目标（不带 `-c` 的 python3 不算写命令，不触发 UNCERTAIN/BASH_WRITE），`_check_write_target` 根本不执行，命令被放行。
 
@@ -30,7 +30,7 @@
 
 ### 3. `repos.json` 文件名前缀匹配过宽过窄
 
-**文件**：`.claude/hooks/wb.py:2843`（GUARDED_PREFIXES 匹配逻辑）
+**文件**：拆分前的 `wb.py` GUARDED_PREFIXES 匹配逻辑（现 `wb_guard.py` 的守卫前缀收窄）
 
 GUARDED_PREFIXES 其余条目都是目录（带尾斜杠），`repos.json` 是裸文件名，却统一用 `rel.startswith(g)` 匹配。于是 `repos.json.bak`、`repos.json5`、目录 `repos.json/` 都被当清单处理；反过来配置 `repos.json5/**` scope 会被误放行并匹配兄弟路径。
 
@@ -38,7 +38,7 @@ GUARDED_PREFIXES 其余条目都是目录（带尾斜杠），`repos.json` 是�
 
 ### 4. `scripts/` `.vscode/` 硬编码为全局保留，误伤单项目适配场景
 
-**文件**：`.claude/hooks/wb.py:222`（GUARDED_PREFIXES 定义）
+**文件**：拆分前的 `wb.py` GUARDED_PREFIXES 定义（现 `wb_const.py:210` 的 `GUARDED_PREFIXES` 与 `WORKSPACE_GUARDED_PREFIXES`）
 
 `scripts/`、`.vscode/`、`repos.json` 对所有运行 wb.py 的工作区无条件保留，包括 README「适配到自己的项目」流程（把 `.claude/` 拷进普通项目根）创建的单项目工作区 —— 那里顶层 `scripts/` 只是项目自己的代码。
 
@@ -118,7 +118,7 @@ materialize 对任何有 `.git` 的路径返回 exists（exit 0），从不比�
 
 ### 13. selfcheck 软链断言是假的
 
-**文件**：`.claude/hooks/wb.py:4448`
+**文件**：拆分前的 `wb.py` selfcheck 软链断言（现 `wb_selfcheck.py`）
 
 断言跑在 tempdir，`.codex/hooks/wb.py` 不存在，`Path.resolve()` 从不真正跟软链，只测字面 `.codex/` 前缀路径 —— 生产路径（软链解析到 `.claude/hooks/wb.py`）从未被断言，也没断言软链存在且已跟踪。问题 1 的软链缺失时 selfcheck 照样「全部通过」，虚假信心。附带：代码注释「Write 的 file_path 不解析软链」也是错的，resolve_target 确实跟软链。
 

@@ -2,10 +2,10 @@
 
 ## 文档状态
 
-- 状态：**配置层与守卫内核均已落地**（2026-09-03 复核）
+- 状态：**配置层与守卫内核均已落地**（2026-09-03 复核；2026-09-11 修订：角色已扩到 8 个（knowledger）、skill 到 5 个（wb-init、wb-knowledge），计数与 `wb.py` 拆分后的引用一并更新。行号引用已失效的按函数名标注）
 - 范围：Codex CLI / IDE 的本地 custom agents
 - 不包含：OpenAI Agents SDK / API 运行时重构
-- 已落地：`.codex/agents/*.toml`（7 角色）、`.agents/skills/*`（3 个 skill）、`AGENTS.md`、`.codex/hooks.json`，相关文件已加入 Git 索引
+- 已落地：`.codex/agents/*.toml`（8 角色，软链指向根 `agents/`）、`.agents/skills/*`（5 个 skill）、`AGENTS.md`、`.codex/hooks.json`，相关文件已加入 Git 索引
 - 守卫内核已落地：`wb.py` 的 `WRITE_TOOL` / `SHELL_TOOL` 覆盖 Codex 工具名，`apply_patch` 目标解析复用了同一套根路径 / 冻结 / 角色范围检查，`SubagentStop` 经 `--format codex` 输出 `{"systemMessage": ...}` JSON。`selfcheck` 含 Codex 形态用例（`apply_patch`、`exec_command`/`shell`、`subagent-stop` JSON）。
 - 剩余非代码项：Codex 项目级 hook 只有在项目受信任并通过 `/hooks` 审核后才会加载。`hook` 信任与 `danger-full-access` 不在仓库代码范围内，落地见下方 M3。
 
@@ -31,21 +31,21 @@
 | 层 | 当前实现 | 宿主耦合 |
 | --- | --- | --- |
 | 编排层 | `.claude/skills/wb-flow`、`wb-loop`、`wb-contract` | 中 |
-| 执行层 | `.claude/agents/*.md` 的 7 个角色 | 高 |
+| 执行层 | `.claude/agents/*.md`（软链指向根 `agents/`）的 8 个角色 | 高 |
 | 内核层 | `.claude/hooks/wb.py` | 低 |
 | 状态层 | `.workbench/state.json`、契约、产物、锁和日志 | 低 |
 | 拦截层 | `.claude/settings.json` 注册的 4 个 hook | 高 |
 
-`wb.py` 内部的阶段、门禁、契约、任务依赖和并发状态处理是普通 Python/JSON/CLI 逻辑，见 [`wb.py:42-119`](../.claude/hooks/wb.py:42)、[`wb.py:450-584`](../.claude/hooks/wb.py:450)、[`wb.py:767-1115`](../.claude/hooks/wb.py:767)。这些部分不依赖 Claude Code 的 API。
+`wb.py` 内部的阶段、门禁、契约、任务依赖和并发状态处理是普通 Python/JSON/CLI 逻辑（拆分后在 `wb_core.py` / `wb_cli.py` / `wb_guard.py`，见 [architecture.md](../docs/architecture.md#内核的模块划分曾是单文件记录一次决策反转)）。这些部分不依赖 Claude Code 的 API。
 
 ### 2.2 Claude 绑定点
 
 1. Agent 定义使用 Markdown frontmatter，字段包括 `tools` 和 `model`，见 [`.claude/agents`](../.claude/agents)。
 2. Hook 通过 `.claude/settings.json` 注册，命令路径依赖 `$CLAUDE_PROJECT_DIR`，见 [`.claude/settings.json:36-82`](../.claude/settings.json:36)。
-3. 文件守卫处理 `Write`、`Edit`、`NotebookEdit`、`MultiEdit`，并从 Codex `apply_patch` 的 `tool_input.command` 解析所有目标路径，见 [`wb.py:1365-1510`](../.claude/hooks/wb.py:1365)。
-4. 改动流水账同时支持单文件工具和多文件 patch；Codex payload 会保留 `agent_id`，见 [`wb.py:1512-1540`](../.claude/hooks/wb.py:1512)。
-5. `SubagentStop` 通过 `hook --format codex` 输出合法 JSON，Claude 默认仍输出原文本，见 [`wb.py:1570-1621`](../.claude/hooks/wb.py:1570)。
-6. 自检覆盖 Claude 与 Codex 形态 payload，见 [`wb.py:1823-1870`](../.claude/hooks/wb.py:1823)。
+3. 文件守卫处理 `Write`、`Edit`、`NotebookEdit`、`MultiEdit`，并从 Codex `apply_patch` 的 `tool_input.command` 解析所有目标路径（`wb_guard.py` 的 `_check_write_target`）。
+4. 改动流水账同时支持单文件工具和多文件 patch；Codex payload 会保留 `agent_id`（`wb_guard.py` 的 `hook_post_tool`）。
+5. `SubagentStop` 通过 `hook --format codex` 输出合法 JSON，Claude 默认仍输出原文本（`wb_guard.py` 的 `hook_subagent_stop`）。
+6. 自检覆盖 Claude 与 Codex 形态 payload（`wb_selfcheck.py`）。
 7. 已新增 `AGENTS.md`、`.codex/agents/*.toml`、`.codex/hooks.json` 和 `.agents/skills/*`，保留 `CLAUDE.md` 与 `.claude/` 入口用于双宿主。
 
 ### 2.3 已验证的 Codex 能力
@@ -221,8 +221,8 @@ min(.workbench.max_parallel,
 ### M1：Codex 配置入口（已完成）
 
 - 增加 `AGENTS.md`，只放 Codex 必须持久遵循的工作台规则。
-- 增加 `.codex/agents/*.toml`，完成 7 个角色转换。
-- 增加 `.agents/skills/wb-flow`、`wb-loop`、`wb-contract`。
+- 增加 `.codex/agents/*.toml`，完成 8 个角色转换（现为指向根 `agents/` 的软链）。
+- 增加 `.agents/skills/wb-flow`、`wb-loop`、`wb-contract`（后又加 `wb-init`、`wb-knowledge`，共 5 个）。
 - 增加 `.codex/hooks.json`，先接入 `SessionStart` 和 `Bash`。
 
 ### M2：文件 patch 适配（已落地）

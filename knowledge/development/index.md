@@ -6,4 +6,4 @@
 
 ## Knowledge Map
 
-- [skills 与 agent 定义是手工同步的双份拷贝，改完必须 diff](skills-and-agents-are-manual-copies.md) —— `.agents/skills/` 与 `.claude/skills/`、`.claude/agents/*.md` 与 `.codex/agents/*.toml` 都是双份；漏同步不报错，只会静默漂移。
+- [多端资产是单源软链：skills 与角色定义都不需要双写](multi-end-assets-share-one-source.md) —— `.agents/skills` 软链到 `.claude/skills`，两端 agents 软链到根 `agents/`；改源即全端生效，先 `ls -la` 确认是不是软链再决定要不要 diff。

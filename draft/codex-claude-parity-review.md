@@ -28,7 +28,7 @@
 | `transcript_path` / `cwd` | 存在 |
 | `model` / `permission_mode` | 存在，本次分别为 `gpt-5.6-sol` / `bypassPermissions` |
 
-因此，当前版本的 Codex payload 可以进入 [`current_role()`](../.claude/hooks/wb.py#L2088) 的角色分支。旧版本或异常 payload 只有 `agent_id` 时，hook 现在拒绝写入并要求升级 CLI，所以仍应固定版本并做 schema 自检。
+因此，当前版本的 Codex payload 可以进入 `current_role()`（`wb_guard.py:250`）的角色分支。旧版本或异常 payload 只有 `agent_id` 时，hook 现在拒绝写入并要求升级 CLI，所以仍应固定版本并做 schema 自检。
 
 ## 第二轮：运行时与安全
 
@@ -36,7 +36,7 @@
 
 Claude 在 [`settings.json:23-33`](../.claude/settings.json#L23) 静态禁止读取 `.env`、证书、私钥和 `secrets/**`，并禁止直接编辑状态文件。Codex [`config.toml:1-11`](../.codex/config.toml#L1) 现已启用 `default_permissions = "workbench"`，继承 `:workspace` 并拒绝敏感路径；状态文件保护仍由 [`hooks.json:16-24`](../.codex/hooks.json#L16) 与共享 hook 负责。
 
-Codex 项目未信任、hook hash 变化或 hook 未加载时，动态限制仍不存在；这是宿主审核边界，不能由仓库内代码自报。已初始化工作台中 `wb.py` 自身异常现改为退出码 2，避免 fail-open（[`wb.py:2448-2458`](../.claude/hooks/wb.py#L2448)）。
+Codex 项目未信任、hook hash 变化或 hook 未加载时，动态限制仍不存在；这是宿主审核边界，不能由仓库内代码自报。已初始化工作台中 `wb.py` 自身异常现改为退出码 2，避免 fail-open（`wb_guard.py` 的 hook 异常处理，exit 2 if initialized else 0）。
 
 #### 官方权限文档后的结论：问题 1 可修复，但不是用 profile 替代 hook
 
@@ -93,7 +93,7 @@ extends = ":workspace"
 
 ### 2. Medium（已修复）：Codex 的 agent 身份已进入审计流水账
 
-实测确认 `agent_id` 存在；[`hook_post_tool()`](../.claude/hooks/wb.py#L2303) 现在会在 `artifacts.jsonl` 中保留 `agent_id`、`agent_type`、`session_id`、`turn_id`、`tool_use_id` 等可用字段（[`wb.py:2307-2314`](../.claude/hooks/wb.py#L2307)）。
+实测确认 `agent_id` 存在；`hook_post_tool()`（`wb_guard.py:809`）现在会在 `artifacts.jsonl` 中保留 `agent_id`、`agent_type`、`session_id`、`turn_id`、`tool_use_id` 等可用字段。
 
 同一角色多个并行任务的产物归属已由 `task start` 时的 `agent_id` 绑定解决；旧工作台没有绑定记录时仍回退到「角色 + 任务开始时间」。
 
@@ -105,7 +105,7 @@ extends = ":workspace"
 
 ### 4. Medium（已修复）：shell 静态写入目标已进入改动流水账
 
-两端的 `PostToolUse` 都匹配 shell 工具；[`hook_post_tool()`](../.claude/hooks/wb.py#L2316) 现在用 `resolve()` 解析重定向、`cp`、`mv`、`install` 等静态写入目标并追加到 `artifacts.jsonl`。动态不可解析命令由 `PreToolUse` 拒绝，避免无审计写入。
+两端的 `PostToolUse` 都匹配 shell 工具；`hook_post_tool()`（`wb_guard.py:809`）现在用 `resolve()` 解析重定向、`cp`、`mv`、`install` 等静态写入目标并追加到 `artifacts.jsonl`。动态不可解析命令由 `PreToolUse` 拒绝，避免无审计写入。
 
 ## 第三轮：交付与能力边界
 
