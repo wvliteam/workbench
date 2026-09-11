@@ -43,7 +43,7 @@
 | 已拆解任务 | `tasks_exist` | 任务数 > 0 | 设计阶段真的落到了可执行任务 |
 | 任务完成 | `tasks_done:<阶段>` 或 `tasks_done:*` | 该范围内任务全部 `done` | 活干完了 |
 | 无阻塞 | `no_blocked:<阶段>` 或 `no_blocked:*` | 该范围内无 `blocked` 任务 | 阻塞项被处理而非绕过 |
-| 命令门禁 | `cmd:<键>` | `gate_commands[键]` 退出码 0 | 测试/构建/lint 真的通过 |
+| 命令门禁 | `cmd:<键>` | `gate_commands[键]` 退出码 0 | 测试/构建/lint 真的通过（三态：未配置跳过 / 已豁免 / 通过） |
 | 经验已沉淀 | `knowledge_written` | 递归数 `knowledge/` 下的条目（排除 `README.md` 与类别 `index.md`）非空，或 `retro.md` 显式写「无可沉淀」 | 复盘学到的经验落进跨 flow 的知识库，而不是跟着 artifacts 归档 |
 | 改进项已跟踪 | `improvements_tracked` | `retro.md` 改进项表的每个数据行含 `T<ID>` / `已落地` / `不修：` 三者之一；无表格行时要求章节含「无改进项」 | 改进项真的落地，而不是写进散文就消失 |
 
@@ -85,6 +85,8 @@ if not isinstance(cmd, str) or not cmd.strip():
 **`shell=True` 意味着门禁命令是一条从不经过 Bash 守卫的 shell。** 它不撞 `PreToolUse` hook（不是工具调用）、不撞冻结清单（`config` 键不是契约）、不撞角色范围（subprocess 没有 `agent_type`）。谁能写 `gate_commands.*`，谁就有一段任意代码执行 —— 所以特权子命令层把 `config set` 收窄到**只有 qa 能设 `gate_commands.*`**，其余键任何角色都设不了（[permissions.md](permissions.md#wbpy-特权子命令只有-hook-拿得到调用者身份)）。
 
 qa 也不能设任意值。`cmd_config` 写入前、`run_check` 执行前都会用 `catastrophic_command()` 筛一遍命令值（删根删家目录、force push、`DROP`/`TRUNCATE`、下载远端脚本直接进 shell、直写块设备、格式化文件系统、fork bomb 那一套，与 Bash 分支共用同一张表）。写入时筛一遍防新增，执行时再筛一遍防**存量** —— 这层加上之前配进 `state.json` 的值不在当时任何检查里。筛掉的是灾难性模式，不是任意代码执行本身：qa 配一条 `npm test` 就是一条 `npm test`，这是流程要它干的事；这层的上限是「catastrophic 模式进不了门禁」，不是「qa 只能配已知命令」。后者做不了 —— 门禁命令天然是任意的（每个项目的测试命令都不同），把白名单写死在 `wb_const.py` 里等于让门禁只对已知技术栈的项目存在。
+
+**同一层还有第二道筛：`gate_command_references_outside()`。** 灾难模式挡不住「不是灾难但在项目根外」的引用 —— `bash /tmp/x.sh`、`sh ~/x.sh`、`cd /tmp && ./run.sh`、`pytest --cov=/tmp/x` 都是借门禁名义的任意代码执行（门禁命令不经 Bash 守卫，理由见上）。它扫剥壳后的文本、按段分词，长得像路径的 token（含 `key=value` 的值，`~` 与 `$HOME` 先展开）resolve 后落在项目根外即拒，再按字面兜底挡 `/tmp/`、`~/`、`$HOME`（内联代码里的路径会被 shlex 揉进更大的 token，token 解析看不到）；引用项目根内的路径（`python3 .claude/hooks/wb.py selfcheck`、`(cd repos/frontend && npm test)`）放行。与 `catastrophic_command()` 一样，写入与执行两处各筛一遍。
 
 **完整输出落盘 `gate-<键>.log`（跟着 state 的位置：main flow 在 `.workbench/`，其余在 `.workbench/flows/<flow>/`），detail 只带最后 5 行加日志路径。** 之前只带最后一行，而测试框架的最后一行通常是汇总行（`2 failed, 8 passed in 3.2s`）—— 哪两个用例失败、为什么失败全部丢失，诊断只能手动重跑一遍刚跑完的命令。
 
@@ -147,7 +149,7 @@ wb.py gate check --phase X   # 只校验不推进（会执行该阶段的 cmd:* 
 
 **跳过失败的测试不属于这类。** 测试红了强推 verify 门禁，等于把门禁这套机制作废。
 
-这是提示词约定而非代码约束，要做成硬约束见 [architecture.md](architecture.md#强推无硬确认)。
+这是提示词约定，代码层的硬确认（`WB_ALLOW_FORCE` 环境变量门）见 [architecture.md](architecture.md#强推的硬确认是环境变量门2026-09-10-落地)。
 
 ## 扩展
 

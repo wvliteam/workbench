@@ -17,8 +17,8 @@ from pathlib import Path
 
 from wb_const import (
     ARTIFACT_LOG, BASH_WRITE, DEFAULT_ROLE_SCOPES, DEVELOPER_ROLES, FROZEN_ALWAYS,
-    GUARDED_PREFIXES, PHASE_CN, READ_TOOL, ROLES, SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES,
-    WRITE_TOOL,
+    GUARDED_PREFIXES, NON_MAIN_THREAD_DENIED_TOOLS, PHASE_CN, READ_TOOL, ROLES,
+    SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES, WRITE_TOOL,
 )
 from wb_bash import (
     WARN_BASH, _split_pipeline, _step_cwd, _strip_wrappers, catastrophic_command,
@@ -758,11 +758,37 @@ def _cd_into_guarded(root: Path, cmd: str) -> bool:
         + r")(?:[/\s;|&]|$)", cmd))
 
 
+def _hook_ctx(data: dict) -> tuple[str, dict, Path]:
+    """从 hook 载荷里取 (tool_name, tool_input, cwd)，任何形态都容错。
+
+    matcher 改成 catch-all 后每个工具调用都过守卫，这两个字段的形态不再由
+    settings.json 的显式清单兜住。取值必须容错到底：`cmd_hook` 的异常兜底会
+    exit 2 阻断调用，而 catch-all 下那等于把整个会话的所有工具调用一起锁死 ——
+    一个畸形载荷换掉整层可用性。这里只做取值归一，判定仍由各分支自己做。
+    """
+    tool = str(data.get("tool_name") or "")
+    ti = data.get("tool_input")
+    return tool, (ti if isinstance(ti, dict) else {}), Path(str(data.get("cwd") or os.getcwd()))
+
+
 def hook_pre_tool(data: dict) -> None:
-    tool = data.get("tool_name", "")
-    ti = data.get("tool_input") or {}
-    cwd = Path(data.get("cwd") or os.getcwd())
+    if not isinstance(data, dict):
+        data = {}
+    tool, ti, cwd = _hook_ctx(data)
     root = find_root(cwd)
+
+    # --- 非主线程禁用工具 ---
+    # 这些工具把动作带出本会话的权限边界：排定的 prompt 以主线程身份执行、派生
+    # worker、跨会话传话、对外发布与远端写。判定在这里，动作却发生在守卫
+    # 看不见的地方（主线程身份 / 另一个会话 / 远端），拦不住第二次 —— 门只能设在
+    # 「调它」这一步。角色 subagent 的工具清单里没有它们，但 general-purpose worker
+    # 有，而 worker 正是降级模式下会被派活的身份。主线程是编排者，不受限。
+    if tool in NON_MAIN_THREAD_DENIED_TOOLS and (data.get("agent_id") or data.get("agent_type")):
+        hook_deny(
+            f"{tool} 会把动作带出本会话的权限边界（排定的 prompt 以主线程身份执行、"
+            f"派生 worker、跨会话传话、对外发布或远端写），subagent 不能调。"
+            f"要做什么报回编排者，由主线程执行。"
+        )
 
     # --- Skill 审核 ---
     # Skill 工具不属于 WRITE/SHELL/READ，本会落到末尾放行分支；这里先截。
@@ -772,7 +798,7 @@ def hook_pre_tool(data: dict) -> None:
     # spawn 出的 worker 顶 general-purpose 身份降级越权的路子也就无从触发。
     if tool == "Skill":
         if data.get("agent_id") or data.get("agent_type"):
-            name = (ti.get("skill") or "").strip()
+            name = str(ti.get("skill") or "").strip()
             allowed = load_allowed_skills(root)
             if "*" not in allowed and name not in allowed:
                 hook_deny(
@@ -972,9 +998,9 @@ def hook_post_tool(data: dict) -> None:
     互相覆盖的 `.workbench/role` —— 归属记录只在 develop 并行时才有价值，读单文件
     会让两个开发角色的改动全挂到最后一次 `role set` 的那个角色名下。
     """
-    ti = data.get("tool_input") or {}
-    tool = data.get("tool_name", "")
-    cwd = Path(data.get("cwd") or os.getcwd())
+    if not isinstance(data, dict):
+        data = {}
+    tool, ti, cwd = _hook_ctx(data)
     root = find_root(cwd)
     if not state_path(root).is_file():
         return
@@ -1128,6 +1154,8 @@ def cmd_hook(args) -> None:
         data = json.loads(raw or "{}")
     except json.JSONDecodeError:
         data = {}
+    if not isinstance(data, dict):
+        data = {}   # 合法 JSON 但非对象（数组 / 字符串 / 数字）：下游一律按 dict 取值
     try:
         {
             "pre-tool": lambda d: hook_pre_tool(d),

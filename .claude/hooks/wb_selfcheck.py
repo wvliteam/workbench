@@ -661,6 +661,60 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 2, "前端越权写迁移未被拦"
 
+        # --- 非角色工具：把动作带出本会话权限边界的那些 ---
+        # settings.json 的 matcher 原本是显式清单，没列进去的工具完全不过守卫（Monitor
+        # 就曾是整层绕过）。改成 catch-all 后每个工具调用都过守卫、由 hook 自己分发，
+        # 这几类就必须在这里挡：排定的 prompt 以主线程身份执行（CronCreate /
+        # ScheduleWakeup）、派生 worker（Workflow / Agent / Task，Task 是 Agent 的历史
+        # 名）、跨会话传话（SendMessage）、对外发布与远端写（Artifact / DesignSync）。
+        # 角色 subagent 的工具清单里没有它们，但 general-purpose worker 有 —— 而 worker
+        # 正是本工作台在降级模式下会被派活的身份。主线程是编排者，不受限。
+        for denied_tool in ("CronCreate", "ScheduleWakeup", "Workflow", "Agent", "Task",
+                            "SendMessage", "Artifact", "DesignSync"):
+            assert guard({"tool_name": denied_tool, "cwd": cw,
+                          "agent_type": "general-purpose", "agent_id": "gp-9",
+                          "tool_input": {"prompt": "x"}}) == 2, \
+                f"非主线程（general-purpose worker）调 {denied_tool} 未被拦"
+            assert guard({"tool_name": denied_tool, "cwd": cw, "agent_type": "qa",
+                          "agent_id": "qa-9", "tool_input": {}}) == 2, \
+                f"角色 subagent 调 {denied_tool} 未被拦"
+            assert guard({"tool_name": denied_tool, "cwd": cw,
+                          "tool_input": {"prompt": "x"}}) == 0, \
+                f"主线程调 {denied_tool} 被误拦（排定任务、派 worker、发布产物都是它的活）"
+
+        # --- catch-all 的未知工具兜底：放行，且绝不能崩 ---
+        # cmd_hook 的异常兜底 exit 2，而 catch-all 下那会把整个会话的所有工具调用
+        # 一起阻断 —— 一个畸形载荷换掉整层可用性。任何 tool_name + 任何 tool_input
+        # 形态都必须安全落到末尾的放行分支。
+        for unknown_tool in ("TodoWrite", "WebFetch", "ExitPlanMode", "UnknownFutureTool", ""):
+            for odd_input in ({}, {"url": "x"}, {"prompt": "y"}, {"ws": {"url": "w"}},
+                              {"command": None}, {"file_path": None}):
+                assert guard({"tool_name": unknown_tool, "cwd": cw,
+                              "tool_input": odd_input}) == 0, \
+                    f"未知工具 {unknown_tool!r} + {odd_input!r} 应放行且不崩"
+        # 畸形载荷本身（非 dict 的 data / tool_input / tool_name / cwd）同样不能崩
+        for bad_payload in ([], "not-a-dict", 0,
+                            {"tool_name": "Weird", "cwd": cw, "tool_input": "not-a-dict"},
+                            {"tool_name": "Weird", "cwd": cw, "tool_input": ["a"]},
+                            {"tool_name": None, "cwd": cw, "tool_input": {}},
+                            {"tool_name": "Weird", "cwd": None, "tool_input": {}}):
+            assert guard(bad_payload) == 0, f"畸形载荷让 hook 崩了：{bad_payload!r}"
+
+        # 回归：Skill 审核门此前是死代码（Skill 不在 matcher 里，守卫根本不加载），
+        # catch-all 后它才真正生效 —— 非主线程 + 不在白名单仍按原有话术拒。
+        quiet("config", "set", "allowed_skills", '["wb-flow"]')
+        _sib = io.StringIO()
+        with redirect_stderr(_sib):
+            _scode = guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
+                            "agent_id": "be-9", "tool_input": {"skill": "evil-skill"}})
+        assert _scode == 2 and "审核白名单" in _sib.getvalue(), \
+            f"catch-all 下 Skill 审核门失效或话术变了：{_sib.getvalue()}"
+        quiet("config", "set", "allowed_skills", "[]")
+        # skill 值畸形（非字符串）也不能崩：按缺名判，仍然拒绝
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "qa", "agent_id": "qa-9",
+                      "tool_input": {"skill": {"a": 1}}}) == 2, \
+            "Skill 载荷的 skill 字段畸形时应按缺名拒绝，不能异常"
+
         # Skill 审核：subagent 只能调白名单内的 skill，主线程是审核者不受限
         quiet("config", "set", "allowed_skills", '["wb-flow"]')
         assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
@@ -2191,6 +2245,6 @@ def cmd_selfcheck(args) -> None:
           "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / 写命令族 / "
           "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
           "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / role 原子写与清理 / "
-          "skills 双份同步")
+          "非角色工具 / catch-all 兜底 / skills 双份同步")
 
 

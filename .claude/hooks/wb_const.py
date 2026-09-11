@@ -237,3 +237,16 @@ SHELL_TOOL = re.compile(
     r"Bash|Monitor|shell|exec_command|unified_exec", re.I)
 READ_TOOL = re.compile(r"^(?:Read|read_file|file_read)$", re.I)
 
+# 非主线程一律不能调的工具：它们会把动作带出「本会话的权限边界」——
+# 排定的 prompt 以主线程身份执行（CronCreate / ScheduleWakeup）、派生 worker
+# （Workflow / Agent / Task，`Task` 是 `Agent` 的历史名，两个都列）、跨会话传话
+# （SendMessage，工具自述就警告过权限洗白）、对外发布与远端写
+# （Artifact / DesignSync）。这些动作发生在本次 hook 判定之后，守卫看不见、也拦不住
+# 第二次 —— 门只能设在「调它」这一步。角色 subagent 的工具清单里本来没有它们，但
+# general-purpose worker 有，而 worker 正是本工作台在降级模式下会被派活的身份。
+# 主线程是编排者，只有它能用。见 hook_pre_tool 的 NON_MAIN_THREAD_DENIED_TOOLS 分支。
+NON_MAIN_THREAD_DENIED_TOOLS = (
+    "CronCreate", "ScheduleWakeup", "Workflow", "Agent", "Task",
+    "SendMessage", "Artifact", "DesignSync",
+)
+

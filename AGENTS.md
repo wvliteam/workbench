@@ -146,13 +146,14 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 
 ## 权限守卫
 
-`PreToolUse` hook 拦以下几类：
+`PreToolUse` hook 的 matcher 是 catch-all（`.*`，见 `.claude/settings.json`），每次工具调用都过守卫 —— 逐个列工具名时没列进去的工具等于完全不设防。它拦以下几类：
 
 - 写出项目根之外
-- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash 的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
+- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash（含 `Monitor`，与 Bash 同一个 shell 环境跑 `tool_input.command`）的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
 - 角色越权写（`pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`）—— 产物目录按阶段隔离；`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值；`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（按知识类别分目录的知识库，专属 `knowledger` 角色）、`references/` 公共规范任何角色只读；仅 `references/workspace/<自己的角色>/` 可由对应角色修改，其他角色目录不可写
-- 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
-- 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()`
+- 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`init --root`（会在项目外甚至 `.claude/` 下建 `.workbench` 结构）、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
+- 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()` 与 `gate_command_references_outside()`（后者拒 `sh /tmp/x.sh`、`pytest --cov=/tmp/x` 这类项目根外的脚本与路径引用）
+- 非主线程调用会「把动作带出本会话权限边界」的工具（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）—— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，动作发生在守卫看不见的地方，拦不住第二次，所以门只能设在「调它」这一步。主线程是编排者，不受限
 - 未审核的 skill 调用 —— 角色 subagent 都带了 `Skill` 工具，但只能调 `allowed_skills` 白名单里的 skill。任何非主线程调用者（角色、`general-purpose`、`Explore`，凡带 `agent_type`/`agent_id`）都受这层约束；主线程（两者都无）是审核者，不限。默认空表 = 拒全部，`["*"]` = 全放行。白名单只有主线程能改（`config set` 对角色一律拦），所以「哪些 skill 能用」就是编排者的审核动作。被拦的 skill 报回主线程审核，别绕
 
 被拦时不要绕（不要改 settings、不要换等价命令）。写冻结文件时 Bash 的等价写法（`>` / `tee` / `sed -i`）也拦，换写法没用。要么走 `contract unlock` 申报，要么交给有权限的角色，要么说明理由让用户决定。契约不够用（缺字段、对不上现实）也不是绕过的理由：`task block` 留言，由 architect 走 unlock/bump 修契约。拒绝信息里已经按 owner 分岔给了该跑的命令与契约实名，照它说的做。
@@ -178,13 +179,14 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 - 解冻窗口按 flow 隔离在 `.workbench/flows/<flow>/unlock/`，一份契约一个文件，多份可以同时开着。同一份契约上不区分申报者 —— 两个 agent 同时改一份契约本身就该避免。`bump` / `lock` 只关自己那一份；`SubagentStop` 关全部但只在没有任务处于 doing 时才关，否则先结束的那个会收掉仍在跑的兄弟的窗口。**所以每个任务收尾都要 `task done`。**
 - 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
 - 改状态的命令走 `.workbench/flows/<flow>/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
-- 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`GUARDED_PREFIXES`（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/` `scripts/` `repos.json` `.vscode/`）下的路径只认显式以该前缀开头的模式，否则 `*.md` / `*.json` / `*.py` 会跨进产物与契约目录、守卫自己的权限引擎与 hook 注册表、知识库、公共规范、公共脚本与仓库清单、本机 IDE 配置，把阶段隔离、防线本身、沉淀专属性、规范只读性与初始化流程一起绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
-- Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结、越根和角色范围；`sed -i` 只把 `-i` 之后真实存在的文件当写入目标，脚本表达式（`s/a/b/`）与 BSD 的空后缀不算。`cd`/`pushd` 切进 `.workbench` 后写仍有兜底。动态不可解析命令对 subagent 拒绝，不把「Bash 没被拦」当成「这个写入是允许的」。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。`cp .workbench/contracts/api.yaml /tmp/bak` 的源路径不再误报，目标在 safe 目录时放行。
+- 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`GUARDED_PREFIXES`（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）与 `WORKSPACE_GUARDED_PREFIXES`（`scripts/` `repos.json` `.vscode/`，仅存在 `repos/` 的多仓库布局下生效）下的路径只认显式以该前缀开头的模式，否则 `*.md` / `*.json` / `*.py` 会跨进产物与契约目录、守卫自己的权限引擎与 hook 注册表、知识库、公共规范、公共脚本与仓库清单、本机 IDE 配置，把阶段隔离、防线本身、沉淀专属性、规范只读性与初始化流程一起绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
+- Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结、越根和角色范围；`resolve()` 按段维护累积 cwd（`cd`/`pushd` 更新、`popd` 退栈），每段的相对目标按该段 cwd 解析，先切目录再写的目标不再错位；`sed -i` 只把 `-i` 之后真实存在的文件当写入目标，脚本表达式（`s/a/b/`）与 BSD 的空后缀不算。切进任何受守目录（`GUARDED_PREFIXES` + `WORKSPACE_GUARDED_PREFIXES`）再写的整类写法由 `_cd_into_guarded()` 无条件拒绝（按命令原文判，`cd .claude && ls` 这类纯读不拦）。`~` 在解析前展开。动态不可解析命令对 subagent 拒绝，不把「Bash 没被拦」当成「这个写入是允许的」。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。`cp .workbench/contracts/api.yaml /tmp/bak` 的源路径不再误报，目标在 safe 目录时放行。
+- 非主线程执行脚本文件按位置收严（`_exec_script_targets` / `_check_script_exec`）：执行脚本 = 脚本内容代表的全部写入，正文不在命令行里解析不到，所以只有「项目根内且在该角色写入范围内」放行，`/tmp` 与项目根外一律拒；`repos_apply.py` / `repos_tui.py` 另有一条硬拒。写入目标或执行形态不在命令行里的构造（`python3 -` / `python3 < f` / `bash < f` / `bash <<EOF`、`find -delete`/`-exec`、`git apply`、只给补丁输入的 `patch`）走不确定分支、角色一律拒（`python3 - < f.py` 这类 `-` 加重定向的混合形态例外：`-` 之后的重定向文件由脚本位置检查接住 —— 文件在项目根内且在角色范围内放行，`/tmp` 与项目根外照拒）。灾难命令与敏感路径扫描改扫 `strip_heredocs()` 之后的文本 —— 正文里的 `git push --force` 只是回显，不再误拦。
 - 冻结检查带嵌套根反查（写入目标向上找 `.workbench/`）：`repos/` 下若出现自带的 `.workbench/`（如误操作 init 进仓库），写它的冻结契约或 `state.json` 照样拦，申报解冻要在那个仓库里跑 `contract unlock`。本工作台唯一布局下 `repos/` 里不该有 `.workbench/`，这层是防御冗余。
 - 特权子命令层的校验基于**解析出的 wb.py 参数**：heredoc body 不在其中、管道分段、`shlex` 分词后逐段核对。`--name` 用的是 flag 的字面值，`--name $C` 这类 shell 变量在 hook 里解析不了（不做变量展开），按「查不到 owner」拒绝 —— 报回编排者用实名重跑即可。主线程不受这层影响（没有 `agent_type`），这层的存在正是「状态只能经 wb.py 改」能成立的原因：没有它，wb.py 能改的一切任何角色都能改。
 - 门禁命令是 `shell=True` 的 subprocess，不经 Bash 守卫 —— 这是它作为门禁的前提（任意项目的任意测试命令）。已知上限：catastrophic 模式筛得掉，但 qa 配的非灾难命令就是会原样执行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
-- Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv` 精确模式下只取最后一个非 flag 参数为写入目标，源路径不误拦。
+- Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv`/`install` 精确模式下只取最后一个非 flag 参数为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`），源路径不误拦；`ln` 是例外 —— 末参数照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒，所以 `ln -s .claude/hooks/wb.py x.py` 这种「先建链再写」的串联写法拦得住。
 - 门禁 `run_check` 三态：exit code 0 且命中 `0 tests`/`No tests ran`/`-DskipTests`/`--passWithNoTests` 等零用例或跳过标记时返回 `unverified` 而非 PASS。`unverified` 在门禁汇总里等同 FAIL，但拒绝信息说明不同：「exit=0 但无独立证据表明测试通过」。
 
 设计取舍与每条边界的理由在 `docs/`，索引见 [docs/README.md](docs/README.md)。

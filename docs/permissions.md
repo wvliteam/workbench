@@ -1,6 +1,6 @@
 # 权限模型
 
-权限守卫是 `PreToolUse` hook，在每次 Write / Edit / NotebookEdit / MultiEdit / Bash 调用**之前**同步执行。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
+权限守卫是 `PreToolUse` hook，在**每一次**工具调用之前同步执行。matcher 是 catch-all（`.claude/settings.json` 里是 `.*`），不逐个列工具名 —— 早期显式清单的写法漏掉了清单外的工具，`Skill` 审核门与 `Monitor`（与 Bash 同一个 shell 环境跑 `tool_input.command`）因此都是死代码，直到 catch-all 才真正生效。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
 
 ## 为什么需要这一层
 
@@ -40,12 +40,13 @@ if rel in frozen or any(rel.startswith(f + "/") for f in frozen):   # unlock/ �
         hook_deny(...)
 ```
 
-冻结清单 = 状态文件（`FROZEN_ALWAYS`，含 `.workbench/flows/` 整棵）+ **所有已锁定的契约（全部 flow）**。状态文件不可写是整套机制的地基：
+冻结清单 = 状态文件（`FROZEN_ALWAYS` 六项：`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl`，含 `.workbench/flows/` 整棵）+ **所有已锁定的契约（全部 flow）**。状态文件不可写是整套机制的地基：
 
 - 能写 `state.json` → 能把 `gates` 全标成 `passed: true`，或改契约的 `sha` → 门禁与契约冻结一起作废。
 - 能写 `role` → 能给自己换个权限大的角色 → 角色隔离作废。
 - 能写 `frozen` → 能把自己想改的文件从清单里删掉 → 冻结作废。
 - 能追加 `artifacts.jsonl` → 能把别人的改动记到自己名下 → 产物归属作废。
+- 能追加 `audit.jsonl` → 能篡改全量审计记录 → 审计作废。
 - 能写 `unlock/<契约名>` → 能给自己签发申报 → 申报制度作废。所以守卫连冻结路径的**子路径**一起拦。
 
 **这一层按写入目标反查根（2026-09-06，当时为每仓库一份状态的布局而做；唯一布局下 `repos/` 里不该再有嵌套 `.workbench/`，这层反查保留为防误操作 init 的冗余）。** 误在某个仓库里跑过 init 时，目标会落在 `repos/<仓库>/.workbench/` 那份自带的状态里 —— 内层锁的契约与状态文件不在外层清单里，只查外层会静默放行，而失效方向是放行、主线程又没有角色检查兜底。所以 `_check_write_target` 从写入目标向上收集会话根之内的全部嵌套根（`nested_roots()`，不走到文件系统根 —— 否则会把用户 home 下不相干的工作区捡进来），逐根按**该根的相对路径**查冻结与解冻窗口；Bash 精确通道经 `all_targets` 循环自动走同一套。拒绝话术带内层工作台标识与实名契约名，否则撞上的人不知道该查哪份状态。角色范围层仍按会话根单根 —— 跨线不存在（外层会话写内层仓库的产品代码由外层角色范围判定）。
@@ -72,7 +73,7 @@ def unlocked_paths(root):
 | 性质 | 为什么 |
 | --- | --- |
 | 一份窗口只对一份契约生效，但多份可以并存 | 解冻 `user-api` 不会顺带放开 `design-doc`，范围最小；而 `bump` 一份产物契约会给每个消费方各建同步任务，它们并行申报是常态，不是边界情况。分片键是契约不是 agent —— 按 agent 分片会把「两个 agent 同时改一份契约」变成合法操作，正好放开唯一真该拦的那种（[architecture.md](architecture.md#解冻窗口按契约分片曾是单文件记录一次纠错)） |
-| 状态文件永不可解冻 | `unlocked_paths()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那五个查不到 |
+| 状态文件永不可解冻 | `unlocked_paths()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那六项查不到 |
 | 理由必填，且先于改动 | 事后补的理由都是给已发生的事找解释。`contract unlock` 不给 `--reason` 直接拒绝 |
 
 `contract bump` / `contract lock` 只关自己那一份，不会收掉兄弟 agent 的窗口。`SubagentStop` 关全部，但只在没有任务处于 doing 时才关，否则先结束的 subagent 会把仍在跑的兄弟的窗口一起收掉。串行下这条兜住「一个 subagent 申报的窗口敞着让下一个用」；并行下要靠 `bump` / `lock` 自己关。
@@ -102,6 +103,8 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 **另外三个前缀装的是守卫自己**：`.claude/hooks/wb.py` 是权限引擎，`.claude/settings.json` 是 hook 注册表，`.claude/agents/*.md` 是角色定义，`.codex/` `.agents/` 是 Codex 端的同一套。同样因为 `*` 跨 `/`，收窄之前 `*.py` 放行任意目录下的 `.py`、`*.json` 放行 `settings.json`、`*.md` 放行 agent 定义 —— 实测 `backend-developer` 能写 `.claude/hooks/wb.py`、`frontend-developer` 能写 `.claude/settings.json`。这些文件都不在任何哈希基线里，`contract verify` 也发现不了：**防线保护 state，却不保护防线自己。** 拒绝信息在这三个前缀上多打一句「要改它交回主线程，别给角色开范围」。主线程不受影响 —— 角色取不到时本层整段跳过，改工作台本体仍走主线程。
 
+**守卫本体也不许被登记成契约**（`contract add` 直接拒 `GUARD_BODY_PREFIXES` 下的路径）：登记 + `lock` 之后改它反而要先申报解冻，而解锁/冻结/哈希校验这条链自己就住在这些文件里 —— 等于把权限引擎的升级路径交给被它治理的对象。别的受守目录（`.workbench/contracts/` 是契约既定存放处，以及 `knowledge/`、`references/`）不受此限。
+
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
 **最后两个前缀是知识与规范资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 的公共操作规范（输出信封等）对角色只读，`references/workspace/<role>/` 则是角色私有知识，只允许对应角色修改。主线程可维护全部内容。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
@@ -119,6 +122,16 @@ wb.py config set role_scopes.backend-developer \
 ```
 
 **跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
+
+### 工具层边界：非主线程禁用工具与脚本执行
+
+前四层判的都是**写入目标**（在哪写、写什么）；下面三处判的是**工具与执行形态**，都是 catch-all 之后才真正生效的。
+
+**非主线程禁用工具**（`NON_MAIN_THREAD_DENIED_TOOLS`：`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）。判定在这里，动作却发生在守卫看不见的地方 —— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，第二次拦不住，所以门只能设在「调它」这一步。角色 subagent 的工具清单里没有它们，但 `general-purpose` worker 有，而 worker 正是降级模式下会被派活的身份。主线程是编排者，不受限。
+
+**执行脚本文件按位置收严**（`_exec_script_targets` / `_check_script_exec`）。执行一个脚本等于执行脚本内容代表的全部写入，而正文不在命令行里、守卫解析不到 —— 于是不收内容改收位置：**项目根内且在该角色写入范围内**才放行，`/tmp` 与项目根外一律拒（`/tmp/evil.sh`、`python3 < /tmp/x.py` 实测拒绝）。`repos_apply.py` / `repos_tui.py` 另有一条硬拒（`_guarded_script_exec`），它们的写入目标是 `scripts/`、`repos.json`、`.vscode/`，正是角色只读的那几个前缀。`python3 .claude/hooks/wb.py ...` 不走这条 —— 它是受控状态接口，子命令由下面的特权层把关。
+
+**`Skill` 审核门**：非主线程调用者只能调 `allowed_skills` 白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来，那条「spawn 出的 worker 顶 `general-purpose` 身份降级越权」的路子也就无从触发。catch-all 之前 `Skill` 不在 matcher 里，白名单是死代码；现在工作区要显式配一张表（本工作区当前是 `["wb-flow","wb-loop","wb-contract","wb-knowledge","wb-init"]`），空表 = 拒全部。
 
 ### 拒绝信息要可操作
 
@@ -138,7 +151,7 @@ wb.py config set role_scopes.backend-developer \
 | --- | --- | --- |
 | 这份契约的 owner，或主线程（载荷无 `agent_type`） | 完整的 `contract unlock --name <实名> --reason` 与 `contract bump` | —— |
 | 非 owner 的角色 | owner 是谁 + 报回编排者 + `task block <ID>` | 教它自己申报是错的：`bump` 会给每个消费方建返工任务，那是编排者的调度决定；而 `SubagentStop` 会在它结束时关掉悬挂窗口，留下一个改过但没定版的文件，下次 `contract verify` 报漂移 |
-| `FROZEN_ALWAYS` 里那五个（不是契约） | 「只能用 wb.py 子命令改」 | 给 `contract unlock` 会让读的人去申报一个不存在的契约名 |
+| `FROZEN_ALWAYS` 里那六项（不是契约） | 「只能用 wb.py 子命令改」 | 给 `contract unlock` 会让读的人去申报一个不存在的契约名 |
 
 这段判断放在守卫里而不是抄进三个 agent 定义：一处代码覆盖七个角色、主线程，以及以后新增的任何契约。
 
@@ -157,36 +170,36 @@ sed -i 's/int/str/' .workbench/contracts/api.json   # 契约漂移，且无人�
 所以 Bash 分支现在也查冻结清单，且有写入目标精确解析：
 
 ```python
-BASH_WRITE = re.compile(r">\s*[^\s]|>>\s*[^\s]|\btee\b|\bsed\b.*-i|\bchmod\b|\bchown\b|\brm\b|\bmv\b|\bcp\b")
-
 if BASH_WRITE.search(cmd) or all_targets:
     all_targets, outside_targets, uncertain = resolve(cmd, root)
     # 精确模式：只拦 frozen ∩ all_targets
     # uncertain 模式：退回旧行为（文本匹配 + 基名误报）
 ```
 
-三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv` 取最后一个非 flag 参数（目标），`sed -i` 只取 `-i` 之后真实存在的文件（操作数里的脚本 `s/a/b/`、BSD 版 sed 的独立空后缀 `-i ''` 都不是路径，早期按「非 flag 全算」会把脚本当写入目标 —— 存在不存在的路径不可能，按存在性过滤即可剥干净），`tee` 取全部参数。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
+`BASH_WRITE` 在 `wb_const.py`，正则原文以它为准，不复述 —— 抄一份就是造一份会漂移的副本。要点只有：重定向 / `tee` / `sed -i` / `perl -i` / `truncate` / `patch` / `dd` / `shred` / `python3 -c` / `node -e` / `ln -sf` 与 `cp` / `mv` / `install` 都算写入动作；命中它只是第一段，还要 `frozen_hits()` 在命令文本里找到冻结路径才拒，两段都不沾的构建与资源拷贝不进第二段。灾难命令与敏感路径扫描扫的是 `strip_heredocs()` 之后的文本 —— 不剥壳的话 heredoc 正文里的灾难字面量（比如文档里的 `git push --force`）会误拦整条命令，而真正经 stdin 执行脚本的形态（`bash <<EOF`）由 uncertain 单独拒。
+
+三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv`/`rsync`/`install` 取最后一个非 flag 参数（目标），带 `-t`/`--target-directory` 时末参数是源、目标改算 `DIR/<源文件名>`；`ln` 单独处理（末参数照常按写入目标判，其余参数是链接指向项，resolve 后落进受守前缀即拒，见下）；`sed -i` 只取 `-i` 之后真实存在的文件（操作数里的脚本 `s/a/b/`、BSD 版 sed 的独立空后缀 `-i ''` 都不是路径，早期按「非 flag 全算」会把脚本当写入目标 —— 存在不存在的路径不可能，按存在性过滤即可剥干净），`tee`/`rm`/`truncate`/`touch` 取全部非 flag 参数（`patch` 同族，但先排掉 `-i`/`--input` 的补丁输入），`~` 在解析前 `expanduser()`（不展开时 `~/evil.py` 会被当成根内相对路径、匹配裸 `*.py` 放行，真实落点是 `$HOME`）。**目录状态按段累积**：`cd`/`pushd` 更新、`popd` 退栈（`_step_cwd`），每段的相对写入目标按**该段 cwd** 解析 —— 先 `cd` 再写这条在解析层就已经算对，不再只靠兜底；`cd` 目标含变量或命令替换时标记 uncertain。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
 
 `resolve()` 返回三元组 `(all_targets, outside_targets, uncertain)`：
 - `all_targets`：所有写入目标的相对路径（用于冻结检查）
 - `outside_targets`：仅项目根外的目标（用于越根检查）
-- `uncertain`：碰到 `eval`/`xargs`/`$(...)` 等无法可靠解析的构造时为 True，此时退回旧行为
+- `uncertain`：碰到 `eval`/`xargs`/`awk`/`sh -c`/`$(...)`、解释器从 stdin 读脚本（`python3 -`、`python3 < f`、`bash < f`、`bash <<EOF` —— 脚本正文不在命令行里，写入目标无法解析）、以及目标不在命令行里的 `find -delete`/`-exec`/`-execdir`/`-ok` 与 `git apply` 时为 True，此时退回旧行为
 
 **`uncertain` 退回旧行为**：`BASH_WRITE` + `frozen_hits()` 文本匹配，外加一条只认 `/` 开头的重定向兜底正则做越根检查。误报面比精确模式宽（`cp`/`mv` 不分源和目标），但不漏拦。拒绝信息里会注明「写入目标无法解析，已一并拦截」。
 
 兜底正则里的目标与 safe 目录比对前先 `resolve()` —— 修一处实测误拦：macOS 的 `/tmp` 是 `/private/tmp` 的软链，safe 集合里存的是 resolve 过的路径，原始路径直接比对永远比不中，结果是「往 /tmp 写临时补丁脚本」这类正当操作被恒拦（命令尾部带 `python3 -c` 之类的不可解析构造时才会走到这条兜底）。相对路径的重定向不在兜底正则覆盖内，由 `outside_targets` 的精确检查拦 —— selfcheck 的项目根建在系统临时目录里时 `../evil.py` 解析进 safe 区放行是对的，真实根下它落在根外被拦，两个方向都有断言。
 
-先切目录再改（`cd .workbench/contracts && sed -i ... user-api.json`）靠一条兜底覆盖：命中 `BASH_WRITE`、没提到任何完整冻结路径、**且命令里有 `cd`/`pushd` 切进某个 `.workbench` 路径**时拒绝。hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），只能这么兜。
+先切目录再改（`cd .workbench/contracts && sed -i ... user-api.json`）靠两层覆盖。解析层是 `resolve()` 的逐段累积 cwd（见上）：目标按切过去的目录算对，走的是同一条冻结/角色检查 —— `cd repos/backend && sed -i s/a/b/ openapi.yaml` 实测拦得住。另一层是 `_cd_into_guarded()` 的整类兜底：命中 `BASH_WRITE`、**且命令里有 `cd`/`pushd` 切进任一受守目录**（`GUARDED_PREFIXES` + `WORKSPACE_GUARDED_PREFIXES`，不再只是 `.workbench/`）时拒绝；它不再要求「没提到任何完整冻结路径」—— cd 到冻结子目录时文本会命中 `.workbench/flows/` 这类目录条目，精确检查又比不中文件级目标，那个短路会让专门防 cd 的兜底自己失效。hook 拿不到命令执行时的 cwd（`tool_input.cwd` 是会话的 cwd，不含命令内部的 `cd`），所以两层都要。
 
-**这条的触发条件从「命令里出现 `.workbench`」收窄到「切进 `.workbench`」，是修两处误拦。** 宽版本会拦下 `echo '.workbench/' >> .git/info/exclude`（旧每仓库布局把 `.workbench/` 写进仓库 git 排除的第二步，现已废弃；`.workbench` 在这里是**内容**不是写入目标）与 architect 用 heredoc 新建一份还没登记的契约文件（`contract add` 要求文件已存在，所以「先写文件」这一步必须走得通，Write 工具那条路本来就通）。两个都是文档写明的正常操作，撞上「被拦时不许绕、不许换等价写法」那条约定后没有出路 —— 而 `cd` 是这类漏检的**唯一**成因：不切目录时完整相对路径就在命令文本里，`frozen_hits()` 直接抓到。
+**这条的触发条件从「命令里出现 `.workbench`」收窄到「切进受守目录」，是修两处误拦。** 宽版本会拦下 `echo '.workbench/' >> .git/info/exclude`（旧每仓库布局把 `.workbench/` 写进仓库 git 排除的第二步，现已废弃；`.workbench` 在这里是**内容**不是写入目标）与 architect 用 heredoc 新建一份还没登记的契约文件（`contract add` 要求文件已存在，所以「先写文件」这一步必须走得通，Write 工具那条路本来就通）。两个都是文档写明的正常操作，撞上「被拦时不许绕、不许换等价写法」那条约定后没有出路 —— 而 `cd` 是这类漏检的**唯一**成因：不切目录时完整相对路径就在命令文本里，`frozen_hits()` 直接抓到。
 
-早期版本还按 basename 匹配（`os.path.basename(rel) in cmd`），已删除。不是「误报方向偏保守」这条原则不成立，而是这几个词的误报率高到推翻了原则本身：`role` / `state.json` / `unlock` / `frozen` 在业务代码里太常见 —— `echo 'ALTER TABLE users ADD COLUMN role text' >> migrations/002.sql`、`echo '{}' > web/state.json` 全被拦。而且拒绝理由说的是「契约改动走 unlock 申报」，与真实原因无关：**误拦要算「显式」，前提是错误信息指向真实原因。** 兜底那条把误报面收进「切进 `.workbench/` 的写入型命令」，理由也能说准。
+早期版本还按 basename 匹配（`os.path.basename(rel) in cmd`），已删除。不是「误报方向偏保守」这条原则不成立，而是这几个词的误报率高到推翻了原则本身：`role` / `state.json` / `unlock` / `frozen` 在业务代码里太常见 —— `echo 'ALTER TABLE users ADD COLUMN role text' >> migrations/002.sql`、`echo '{}' > web/state.json` 全被拦。而且拒绝理由说的是「契约改动走 unlock 申报」，与真实原因无关：**误拦要算「显式」，前提是错误信息指向真实原因。** 兜底那条把误报面收进「切进受守目录的写入型命令」，理由也能说准。
 
 `wb.py` 自身不会被这条挡住：它的命令行里不出现 `>`、`tee`、`sed -i` 之类。`python3 -c` 在 `BASH_WRITE` 里但 `python3 .claude/hooks/wb.py` 不是 `-c`。
 
 这条挡不住外部编辑器 / `git checkout` / 用户手改，那是刻意的取舍，兜底是 `contract verify` 的哈希校验 —— 见 [architecture.md](architecture.md#冻结防线覆盖不到的写入路径)。
 
-`cp` / `mv` / `install` 的源和目标区分已由 `resolve()` 精确处理：`_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标。`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`uncertain` 模式下退回旧的文本匹配，误报面略宽但不漏拦。
+`cp` / `mv` / `install` 的源和目标区分已由 `resolve()` 精确处理：`_LAST_ARG` 类命令只取最后一个非 flag 参数作为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`）。`cp .workbench/contracts/api.yaml /tmp/bak` 的目标是 `/tmp/bak`（safe 目录，跳过），契约路径只出现在源位置，不会被误拦。`ln` 是 `_LAST_ARG` 的例外：末参数（链接名）照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒 —— `ln -s .claude/hooks/wb.py x.py && echo pwn > x.py` 这种同命令串联追不到链，只能拦 src 本身（`_collect_ln_sources`）。`uncertain` 模式下退回旧的文本匹配，误报面略宽但不漏拦。
 
 **safe 目录与项目根的关系**：`resolve()` 跳过 `/dev`、`/tmp` 等系统目录，但先检查路径是否在项目根内。当项目根本身位于 `/tmp/` 下时（如自检的临时目录），项目内部路径不会被 safe 目录过滤掉。
 
@@ -219,11 +232,12 @@ if wb_role in ROLES:
 | `role scopes --reset` | 重写全部角色的写入范围 |
 | `task skip` | 跳过的任务在 `tasks_done` 门禁里等同完成 |
 | `init --force` | 清空阶段、契约基线、门禁记录与冻结清单 |
+| `init --root` | 在指定路径（项目外、甚至 `.claude/` 下）创建 `.workbench` 状态结构 —— 写发生在 wb.py 进程内部，Bash 层看不见它的写入目标 |
 | `flow new` / `flow switch` / `flow remove` | 开线、切线、删线是编排者的调度决定 —— 切走会让后续状态命令落到另一条流水线，删的是整条流水线的状态与产物 |
 | `contract dispute --clear` | 解除争议熔断是编排者决策 |
 | `config set <除 gate_commands.* / gate_waivers.* 外的任何键>` | `role_scopes.*` 能直接给自己开范围，改的都是守卫自己的配置 |
 
-唯一例外：**qa 可以 `config set gate_commands.*` 与 `gate_waivers.*`**（补上或豁免门禁配置是它的既定流程 —— 判定「这个项目不需要某门禁」就是它的活）。即使如此，`cmd_config` 在写入前、`run_check` 在执行前都会用 `catastrophic_command()` 筛一遍值 —— 见 [gates.md](gates.md)。
+唯一例外：**qa 可以 `config set gate_commands.*` 与 `gate_waivers.*`**（补上或豁免门禁配置是它的既定流程 —— 判定「这个项目不需要某门禁」就是它的活）。即使如此，`cmd_config` 在写入前、`run_check` 在执行前都会用 `catastrophic_command()` 与 `gate_command_references_outside()` 各筛一遍值 —— 后者拒项目根外的脚本与路径引用（`bash /tmp/x.sh`、`cd /tmp`、`--cov=/tmp/x`），挡的是「借门禁名义的任意代码执行」这条提权链 —— 见 [gates.md](gates.md)。
 
 `contract unlock` / `bump` 加的是 owner 校验：`--name` 必须能在登记表里查到 owner，owner 不是自己也不放行。唯一放行的是 `architect`（`CONTRACT_STEWARD`）—— 接口契约由它定义，`.claude/agents/architect.md` 里写明的流程就是由它替 owner 走 unlock/bump（契约变更要给消费方建同步任务，那是架构决策，不是实现者的局部动作）。`--name` 查不到（比如 flag 值是个变量）也拒：核不了 owner 就不放行。
 
@@ -277,13 +291,17 @@ hook 自身出 bug 时，未初始化目录放行；已初始化工作台**拒�
 
 `SystemExit` 单独 re-raise，否则 `hook_deny()` 的退出码 2 会被这个 except 吞掉变成 0 —— 那会让所有拒绝静默失效。这是实现中最容易写错的一处。
 
+**catch-all 把这条兜底的影响面从「Bash 与 Write」放大到全部工具调用。** 早期显式清单下 hook 异常只阻断列进 matcher 的那几个工具；现在任何工具（含 `Read`、`Skill`、`Monitor`）撞上 hook 崩溃都是退出码 2。所以 `_hook_ctx()` 对载荷取值容错到底（`tool_input` 不是 dict、`cwd` 缺失都归一成安全默认），判定仍由各分支自己做 —— 一个畸形载荷换掉整个会话的所有工具调用，是比漏拦更坏的失效方向。
+
+热路径耗时是同一件事的另一面：一次 pre-tool 里每个写入目标都要重读 state / frozen / disputes / unlock，300 段命令是 6 读 + 3 次 JSON 解析每目标，2000 段能顶到 hook 的 15s timeout（端侧按非阻断处理则守卫整层失效）。所以解析出的目标循环外面开一次 `enable_memo(True)`，把这几份只读文件按 `(root, flow)` 缓存在**单次调用内**（`finally` 收尾关闭；`load_state(lock=True)` 这类读-改-写永不 memo），实测 300 段命令 0.566s → 0.152s。
+
 `state.json` 不存在或解析失败时，第三层直接 return（放行）。工作台未初始化的仓库不该被守卫影响。
 
 ## 其余三个 hook
 
 | 事件 | 匹配 | 作用 |
 | --- | --- | --- |
-| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit / apply_patch / Bash | 把静态可解析的改动路径、角色和可用 agent 身份字段追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
+| `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit / apply_patch / Bash / Monitor | 把静态可解析的改动路径、角色和可用 agent 身份字段追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
 | `SessionStart` | — | 输出当前阶段、任务进度、阻塞项、契约漂移、就绪任务，注入上下文 |
 | `SubagentStop` | — | 无任务处于 doing 时清除 `role` 与 `unlock`；有 doing 任务则保留并打印原因；记审计日志 |
 
@@ -292,6 +310,8 @@ hook 自身出 bug 时，未初始化目录放行；已初始化工作台**拒�
 `SubagentStop` 清 `role` 是必需的：不清的话，`pm` 跑完后主线程的写入会继续受 `pm` 的范围限制（只能写 `artifacts/*/clarify/`），整个会话瘫掉。清 `unlock` 同样必需，理由相反 —— 不清的话窗口一直敞着，下一个 subagent 白捡一个可写的契约。清窗口时关全部 flow 的同名窗口（此刻不知道 subagent 在哪条 flow 干活），打一行提示（哪份契约的窗口被关了），让忘了 bump 的情况可见。
 
 但它只在无 doing 任务时清，主要为的是解冻窗口 —— 并行下先结束的那个会把兄弟正在用的窗口一起收掉。角色这一半的风险随 `current_role()` 降了一级：角色 subagent 按自己的 `agent_type` 判定，兄弟的 `role` 文件被清也不会让它变成无限制；仍受影响的是主线程与非角色 agent。代价不变：串行下忘了 `task done`，角色锁会留到下一次 `role set`。
+
+**角色文件还有第二个清理点：`task done`。** `task start --role-lock` 设的锁由同一个任务还回去 —— 没有**同角色其它 doing 任务**时把 `role` 清掉（清前比对内容，别人的锁不动，兄弟任务还在跑也不清），不必等到 `SubagentStop`。角色文件本身也改成原子写（tmp + `os.replace`，`role set` 与 `task start` 同一条路径）：就地截断重写会留一瞬空文件，而读成空时 `if not role: return` 让角色范围检查整层跳过 —— 含改 `role` 提权。
 
 三者都不阻断流程 —— `PostToolUse` 与 `SubagentStop` 只写状态，`SessionStart` 只输出文本。
 
