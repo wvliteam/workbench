@@ -377,6 +377,25 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                     + frozen_advice(fro_root, [fro_rel], current_role(fro_root, data))
                 )
 
+    # 2.5. 硬链别名：目标已存在且是普通文件、链接数 > 1，说明它至少还有一个名字。
+    #      `Path.resolve()` 分不清硬链（同一 inode 的另一个目录项），路径层无解；
+    #      链接数分得清：`ln .workbench/flows/main/state.json innocent.md` 之后写
+    #      innocent.md，按 `*.md` 命中角色范围一路放行，内容直改 state.json ——
+    #      冻结防线与「状态只能经 wb.py 改」同时失效，且不留任何哈希痕迹。
+    #      目录（nlink 天然 > 1，含 . 与子目录）、不存在的新建目标、非常规文件都跳过。
+    #      代价是所有已有多链接文件一律不可写 —— 本仓库当前没有这类文件，属预期收严。
+    #      stat 失败（权限、竞态删除等文件系统问题）时跳过而不是拒绝：这里不该把
+    #      环境问题放大成全网阻断。
+    if target.is_file():
+        try:
+            if target.stat().st_nlink > 1:
+                hook_deny(
+                    f"{rel} 与另一个文件共享 inode（硬链），写它会连带改动那个文件 —— "
+                    "常见于借硬链改冻结文件绕过守卫。如确需写这个文件，请用它的真实路径。"
+                )
+        except OSError:
+            pass
+
     # 3. 角色写入范围
     role = current_role(rootr, data)
     if role == UNKNOWN_ROLE:

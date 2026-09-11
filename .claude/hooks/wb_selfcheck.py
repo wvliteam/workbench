@@ -612,6 +612,37 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "frontend-developer",
                       "tool_input": {"command": "ln -s templates/base.html components/x.html"}}) == 0, \
             "frontend 指向本仓库模板的正当软链被误拦"
+        # 硬链跨调用形态：`Path.resolve()` 不区分硬链 inode，别名按 `*.py` 命中角色
+        # 范围就放行，内容直改真实文件（含冻结的 state.json），且无哈希痕迹。路径层
+        # 无解，写入侧按 inode 判：已存在的普通文件 nlink > 1 即拒。这里用 os.link
+        # 直接造链（模拟别名已由别的进程/主线程建好），验的是写入侧那一道。
+        (tmp / "server").mkdir(exist_ok=True)
+        os.link(state_path(tmp), tmp / "server" / "alias.py")
+        alias_err = io.StringIO()
+        with redirect_stderr(alias_err):
+            alias_rc = guard({"tool_name": "Write", "cwd": cw,
+                              "agent_type": "backend-developer",
+                              "tool_input": {"file_path": "server/alias.py"}})
+        assert alias_rc == 2 and "共享 inode" in alias_err.getvalue(), \
+            f"写冻结 state.json 的硬链别名未被 inode 规则拦下：rc={alias_rc} " \
+            f"{alias_err.getvalue()[:160]}"
+        # 推论：硬链两端是同一个 inode、nlink 同为 2，写哪一端都拦 —— 写 state.json
+        # 本身另有冻结检查在前，断言的是它照样拒绝。
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {
+                          "file_path": os.path.relpath(state_path(tmp), os.getcwd())}}) == 2, \
+            "写硬链的另一端（冻结 state.json 本身）未被拒"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo pwn > server/alias.py"}}) == 2, \
+            "Bash 通道写硬链别名未被拒（否则 Write 拦得住、重定向拦不住）"
+        # 正例：nlink=1 的普通文件与尚不存在的新建目标照旧放行，不然规则会误伤正常开发。
+        (tmp / "server" / "plain.py").write_text("x = 1\n", encoding="utf-8")
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "server/plain.py"}}) == 0, \
+            "nlink=1 的普通文件被误拦"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "server/brand-new.py"}}) == 0, \
+            "不存在的新建目标被误拦"
 
         # --- R5：写命令族 / 参数解析缺口 ---
         # patch 的非 flag 参数就是被改的文件（补丁正文从重定向来，不在参数里）；

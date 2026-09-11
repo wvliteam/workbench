@@ -187,6 +187,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 - 门禁命令是 `shell=True` 的 subprocess，不经 Bash 守卫 —— 这是它作为门禁的前提（任意项目的任意测试命令）。已知上限：catastrophic 模式筛得掉，但 qa 配的非灾难命令就是会原样执行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
 - Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv`/`install` 精确模式下只取最后一个非 flag 参数为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`），源路径不误拦；`ln` 是例外 —— 末参数照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒，所以 `ln -s .claude/hooks/wb.py x.py` 这种「先建链再写」的串联写法拦得住。
+- 硬链不用解析侧解，用 inode 判：`ln .workbench/flows/main/state.json innocent.md` 之后写 `innocent.md`，`Path.resolve()` 分不清同一 inode 的另一个目录项，别名按 `*.md` 命中角色范围一路放行，内容直改 `state.json` —— 冻结防线与「状态只能经 wb.py 改」同时失效且不留哈希痕迹。`_check_write_target` 因此在冻结检查之后加一道：目标**已存在且是普通文件**且 `st_nlink > 1` 即拒（目录的 nlink 天然 > 1，新建目标与 FIFO/socket 等非常规文件跳过）。`stat()` 抛 OSError（权限、竞态删除等文件系统问题）时跳过而不拒绝 —— 环境问题不该升级成全网阻断。代价是所有已存在的多链接文件一律不可写（本仓库与 `.git` 内当前都没有这类文件，属预期收严）。
 - 门禁 `run_check` 三态：exit code 0 且命中 `0 tests`/`No tests ran`/`-DskipTests`/`--passWithNoTests` 等零用例或跳过标记时返回 `unverified` 而非 PASS。`unverified` 在门禁汇总里等同 FAIL，但拒绝信息说明不同：「exit=0 但无独立证据表明测试通过」。
 
 设计取舍与每条边界的理由在 `docs/`，索引见 [docs/README.md](docs/README.md)。
