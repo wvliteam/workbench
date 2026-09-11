@@ -1,42 +1,30 @@
-"""wb_guard — 权限守卫：PreToolUse / PostToolUse / SessionStart / SubagentStop。
+"""wb_guard — Workflow Guard：PreToolUse / PostToolUse / SessionStart / SubagentStop。
 
-wb.py 拆分模块之一。冻结检查、角色范围、特权子命令、灾难命令、skill 审核都在
-这里；状态经 wb_core 读写，命令解析经 wb_bash。不提供 CLI 入口 —— 由
+wb.py 拆分模块之一。状态、契约、任务快照、争议熔断和特权子命令检查都在这里；
+状态经 wb_core 读写，命令解析经 wb_bash。不提供 CLI 入口 —— 由
 wb_cli.cmd_hook（hook 子命令）与 selfcheck 调用。"""
 
 from __future__ import annotations
 
-import fnmatch
 import json
 import os
 import re
 import shlex
 import sys
-import tempfile
 from pathlib import Path
 
 from wb_const import (
-    ARTIFACT_LOG, BASH_WRITE, DEFAULT_ROLE_SCOPES, DEVELOPER_ROLES, FROZEN_ALWAYS,
-    GUARDED_PREFIXES, NON_MAIN_THREAD_DENIED_TOOLS, PHASE_CN, READ_TOOL, ROLES,
-    SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES, WRITE_TOOL,
+    ARTIFACT_LOG, BASH_WRITE, DEVELOPER_ROLES, FROZEN_ALWAYS, PHASE_CN, READ_TOOL,
+    ROLES, SHELL_TOOL, WRITE_TOOL,
 )
 from wb_bash import (
-    WARN_BASH, _split_pipeline, _step_cwd, _strip_wrappers, catastrophic_command,
-    resolve, strip_heredocs,
+    _split_pipeline, _strip_wrappers, resolve, strip_heredocs,
 )
 from wb_core import (
-    all_flows, close_unlock, contract_drift, die, enable_memo, find_contract, find_root,
-    load_state, log, now, pointer_flow, read_current_flow, read_disputes, read_frozen,
-    read_state_raw, read_unlocks, ready_tasks, save_state, set_flow_override, state_path,
-    task_contract_errors, wb_dir,
+    all_flows, close_unlock, contract_drift, die, find_contract, find_root, load_state,
+    log, now, pointer_flow, read_current_flow, read_disputes, read_frozen, read_unlocks,
+    ready_tasks, save_state, set_flow_override, state_path, task_contract_errors, wb_dir,
 )
-
-
-# 守卫本体：权限引擎、hook 注册表与角色定义。任何角色只读（收窄见 _guarded_prefix），
-# 也不许登记成契约 —— 登记 + lock 之后它进了冻结清单，改它反而要先 unlock，
-# 而解锁/冻结这条链本身就在这些文件里（治理面 DoS）。登记别的受守目录
-# （.workbench/contracts/ 是契约既定存放处、knowledge/、references/）不受此限。
-GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/")
 
 
 # --------------------------------------------------------------------------
@@ -45,14 +33,12 @@ GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/")
 
 def hook_deny(reason: str) -> "None":
     """PreToolUse：退出码 2 = 阻止调用，stderr 回灌给模型。"""
-    print(f"[工作台权限守卫] 拒绝：{reason}", file=sys.stderr)
+    print(f"[工作台 Workflow Guard] 拒绝：{reason}", file=sys.stderr)
     sys.exit(2)
 
 
 def resolve_target(cwd: Path, raw: str) -> Path:
-    # `~` 先展开：不展开时 `~/evil.py` 被当成 cwd 下的相对路径，匹配角色范围的
-    # 裸 `*.py` 放行，真实落点是 $HOME（含 ~/.claude/settings.json）。
-    p = Path(os.path.expanduser(str(raw)))
+    p = Path(raw)
     if not p.is_absolute():
         p = cwd / p
     try:
@@ -79,59 +65,14 @@ def nested_roots(target: Path, session_root: Path) -> list[Path]:
     return out
 
 
-def sensitive_read_target(cwd: Path, root: Path, raw: str) -> str | None:
-    """Return a sensitive repository-relative path, if ``raw`` names one."""
-    token = str(raw).strip().strip("'\"")
-    if token.startswith("-") and "=" in token:
-        token = token.split("=", 1)[1]
-    token = token.rstrip(",)")
-    if not token:
-        return None
-    try:
-        rel = os.path.relpath(resolve_target(cwd, token), root).replace(os.sep, "/")
-    except ValueError:
-        return None
-    parts = Path(rel).parts
-    if not parts:
-        return None
-    name = parts[-1]
-    if ((len(parts) == 1 and (name == ".env" or name.startswith(".env."))) or
-            name.endswith((".pem", ".key")) or name.startswith("id_rsa") or
-            parts[0] == "secrets"):
-        return rel
-    return None
-
-
-def sensitive_shell_reads(cwd: Path, root: Path, command: str) -> list[str]:
-    """Find statically named sensitive paths in a shell payload.
-
-    Shell is intentionally conservative here: an unquoted path is easy to
-    identify, while arbitrary command substitution cannot be safely inspected.
-    """
-    try:
-        tokens = shlex.split(command, posix=True)
-    except ValueError:
-        tokens = re.findall(r"[^\s;|&<>]+", command)
-    found = []
-    for token in tokens:
-        hit = sensitive_read_target(cwd, root, token)
-        if hit and hit not in found:
-            found.append(hit)
-    return found
-
-
 def _is_dispute_exempt_bash(cmd: str, root: Path) -> bool:
     """争议熔断下 Bash 命令是否放行。
 
     只放行两样：/tmp 下的操作、.workbench/artifacts/<flow>/develop/ 下自己的执行记录。
     粗判：命令里提到放行路径就放行。争议时全线停工是第一优先级。
     """
-    # 只涉及 /tmp 且不碰 .workbench/.claude。
-    # 路径边界用「行首或分隔符之后」，不能用 `\b`：`\b` 要求一侧是单词字符，
-    # 空格与 `/` 都是非单词字符，交界处不存在词边界 —— `cat /tmp/x` 永不匹配，
-    # 争议期想豁免的命令全被拦（实测）。分隔符集合含 shell 的引用与重定向字符。
-    if re.search(r"""(?:^|[\s;|&('"=<>])/tmp/\S""", cmd) \
-            and not re.search(r'\.(workbench|claude)', cmd):
+    # 只涉及 /tmp 且不碰 .workbench/.claude
+    if re.search(r'\b/tmp/\S', cmd) and not re.search(r'\.(workbench|claude)', cmd):
         return True
     # 写自己的执行记录（任意 flow）
     if re.search(r'\.workbench/artifacts/[^/]+/develop/', cmd):
@@ -189,7 +130,11 @@ def unlocked_paths(root: Path) -> set[str]:
         return set()
     by_path = {}
     for flow in all_flows(root):
-        for c in read_state_raw(root, flow).get("contracts", []):
+        try:
+            st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for c in st.get("contracts", []):
             path = c.get("path")
             name = c.get("name")
             if path and name:
@@ -206,7 +151,11 @@ def contracts_for(root: Path, rels: list[str]) -> list[dict]:
     """
     out, seen = [], set()
     for flow in all_flows(root):
-        for c in read_state_raw(root, flow).get("contracts", []):
+        try:
+            cur = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for c in cur.get("contracts", []):
             if c.get("path") in rels and c.get("name") not in seen:
                 seen.add(c.get("name"))
                 out.append(c)
@@ -238,12 +187,7 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
             f"改完 `wb.py contract bump --name {names}` 重新锁定并通知消费方。")
 
 
-UNKNOWN_ROLE = "__unknown__"
-
-# 内置非角色 subagent 类型白名单：这些 agent_type 是 harness 自带的通用工具身份
-# （不在 ROLES 里），不是伪造或未知调用者，退回读 role 文件兜底是安全的 —— 文件空
-# 时它们本来就该落在「无角色」范围而非被当成越权写手。凡不在此列的非角色 agent_type
-# 都判 UNKNOWN_ROLE 拒写，堵住 AGENTS.md:176 说的「子 worker 顶陌生身份越权」缺口。
+# 内置非角色 subagent 类型仍沿用工作台 role 文件，仅用于工作流熔断和日志归属。
 BUILTIN_AGENT_TYPES = ("Explore", "general-purpose", "Plan")
 
 # 契约管理员。接口契约由 architect 定义，但 `--owner` 填的是实现方
@@ -254,24 +198,14 @@ CONTRACT_STEWARD = "architect"
 
 
 def current_role(root: Path, data: dict) -> str:
-    """当前角色：subagent 优先取 hook 载荷里的 agent_type，主线程退回读 `.workbench/role`。
+    """返回工作流所需的角色标签，不承担通用权限判定。
 
     载荷里的 `agent_type` 就是 agent 定义 frontmatter 的 `name`，与 ROLES 同名 ——
     实测（Claude Code 2.1.252）subagent 的 PreToolUse / PostToolUse / SubagentStop
     都带 `agent_type` 与 `agent_id`，主线程两个都没有。所以并行 subagent 各自判定，
     不再抢 `.workbench/role` 那个单文件：谁写的由谁的载荷说，与启动顺序无关。
 
-    三态而非两态：
-    - 有 `agent_type` 且是角色名 → 用它
-    - 有 `agent_type` 且是内置白名单类型（Explore / general-purpose / Plan）→ 读文件兜底
-    - 其余情况——`agent_type` 是陌生值，或无 `agent_type` 但有 `agent_id` → UNKNOWN
-    - 两者都无 → 读 `.workbench/role`（真正的主线程兜底）
-
-    陌生 `agent_type`（既不是角色名也不在内置白名单）曾经和「Explore / general-purpose /
-    Plan」走同一条退回文件兜底分支：文件为空时 `_check_write_target` 的 `if not role: return`
-    直接放行，等于任何顶着陌生身份 spawn 出的子 worker 都能绕过角色范围写到 `.claude/`
-    守卫本体（AGENTS.md:176 记录的缺口）。现在陌生值单独判 UNKNOWN，与老版本不带字段的
-    `agent_id`-only 情况汇入同一个拒绝出口。
+    未知 agent_type 仅作为标签返回，不会触发通用权限拒绝。
     """
     at = (data.get("agent_type") or "").strip()
     if at in ROLES:
@@ -279,8 +213,8 @@ def current_role(root: Path, data: dict) -> str:
     if at in BUILTIN_AGENT_TYPES:
         f = wb_dir(root) / "role"
         return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
-    if at or data.get("agent_id"):
-        return UNKNOWN_ROLE
+    if at:
+        return at
     f = wb_dir(root) / "role"
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
@@ -310,34 +244,13 @@ def active_task_contract_errors(root: Path, rel: str) -> list[str]:
     return errors
 
 
-def _guarded_prefix(root: Path, rel: str) -> str:
-    """命中的守卫前缀；目录条目按前缀、文件条目精确匹配（repos.json 是文件不是前缀）。
-
-    workspace 层条目（scripts/ repos.json .vscode/）只在 workbench 布局（存在 repos/）
-    下保留 —— 单仓库适配场景里它们是项目自己的目录，见 WORKSPACE_GUARDED_PREFIXES。
-    """
-    prefixes = GUARDED_PREFIXES + (WORKSPACE_GUARDED_PREFIXES if (root / "repos").is_dir() else ())
-    for g in prefixes:
-        if g.endswith("/"):
-            if rel.startswith(g):
-                return g
-        elif rel == g or rel.startswith(g + "/"):
-            return g
-    return ""
-
-
 def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
-    """检查单个写入目标：越根 → 活动契约 → 争议 → 冻结 → 角色范围。"""
+    """检查单个写入目标：活动契约 → 争议 → 冻结。"""
     target = resolve_target(cwd, raw_path)
     rootr = root.resolve()
-
-    # 1. 不许写出项目根
-    if target != rootr and rootr not in target.parents:
-        hook_deny(f"写入越出项目根 {rootr}：{target}")
-
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
 
-    # 1.5. 活动任务的旧契约先阻止产品代码继续写入；执行记录仍可写。
+    # 活动任务的旧契约先阻止产品代码继续写入；执行记录仍可写。
     active_errors = active_task_contract_errors(rootr, rel)
     if active_errors:
         hook_deny(
@@ -346,14 +259,14 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
             + "。立即停止实现，先 task check，再 reopen 并重新绑定当前快照。"
         )
 
-    # 1.6. 争议熔断：developer 角色全线停工（执行记录除外）
+    # 争议熔断：developer 角色全线停工（执行记录除外）。
     disputes = read_disputes(rootr)
     if disputes:
         role = current_role(rootr, data)
         if role in DEVELOPER_ROLES and not _is_dispute_exempt_write(rel):
             _dispute_deny(disputes)
 
-    # 2. 冻结文件：状态、进度、契约、以及被登记为契约的方案文档。
+    # 冻结文件：状态、进度、契约、以及被登记为契约的方案文档。
     #    会话根之外还有嵌套工作台（布局 A：repos/<仓库>/.workbench/）——那个仓库
     #    锁的契约与状态文件只在内层清单里，外层视角必须反查目标所在的根。
     frozen_roots = [(rootr, rel)] + [
@@ -377,57 +290,6 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                     + frozen_advice(fro_root, [fro_rel], current_role(fro_root, data))
                 )
 
-    # 3. 角色写入范围
-    role = current_role(rootr, data)
-    if role == UNKNOWN_ROLE:
-        hook_deny(
-            f"无法验证调用者身份，拒绝写入 {rel}：载荷有 agent_id 但没有可识别的 agent_type。"
-            "升级 Codex/Claude CLI 后重试；主线程应不携带 agent_id。"
-        )
-    # references/workspace/<role>/ 是角色私有知识：只有对应角色可修改。
-    # 公共 references/ 仍由下方范围规则保持角色只读，主线程可维护全部 references/。
-    private_match = re.match(r"references/workspace/([^/]+)/", rel)
-    if private_match and role and private_match.group(1) != role:
-        hook_deny(
-            f"角色 {role} 无权写角色 {private_match.group(1)} 的私有知识 {rel}。"
-            "只能修改 references/workspace/<自己的角色>/。"
-        )
-    if private_match and role == private_match.group(1):
-        return
-    if not role or not state_path(rootr).is_file():
-        return
-    scopes = read_state_raw(rootr, read_current_flow(rootr)).get("role_scopes") or {}
-    # 范围缺失回落到默认值；显式的空清单是「什么都不能写」，不是「不限制」。
-    # 反过来读会让 `config set role_scopes.<角色> '[]'` 变成一键解除范围的开关 ——
-    # 空值当放行时，越权路径连 GUARDED_PREFIXES 过滤都走不到。
-    globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))
-    if not isinstance(globs, list):
-        globs = []
-    guarded = _guarded_prefix(rootr, rel)
-    if guarded:
-        if guarded.endswith("/"):
-            globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
-        else:
-            globs = [g for g in globs if g == guarded or g.startswith(guarded + "/")] or ["（无）"]
-    if not any(fnmatch.fnmatch(rel, g) for g in globs):
-        extra = ""
-        if guarded == "knowledge/":
-            extra = ("（knowledge/ 是跨 flow 的长期知识库，只有 knowledger 角色可写。"
-                     "沉淀或查找用 wb-knowledge skill，或交回主线程派 knowledger 角色。）")
-        elif guarded == "references/":
-            extra = ("（references/ 是公共操作规范，任何角色只读。要改规范交回主线程。）")
-        elif guarded in GUARD_BODY_PREFIXES:
-            extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
-                     f"要改它交回主线程，别给角色开范围。）")
-        elif guarded and guarded != ".workbench/":
-            extra = (f"（{guarded} 是工作区级公共资源（公共脚本、清单或本机 IDE 配置），"
-                     f"由主线程维护、角色只读。要改它交回主线程。）")
-        hook_deny(
-            f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs) or '（无）'}。{extra}"
-            f"确需跨界请交给对应角色，或 wb.py config set role_scopes.{role} '<JSON 数组>'"
-        )
-
-
 # 角色 subagent 一律不能跑的 wb.py 子命令：改的是守卫自己的规则、门禁结论或状态
 # 基线，全部属于编排者决策。`(子命令, action)` -> 理由。
 PRIVILEGED_WB = {
@@ -439,136 +301,6 @@ PRIVILEGED_WB = {
     ("flow", "switch"): "切 flow 会让后续状态命令落到另一条流水线",
     ("flow", "remove"): "删除的是整条流水线的状态与产物",
 }
-
-
-GUARDED_SCRIPTS = frozenset({"repos_apply.py", "repos_tui.py"})
-_SCRIPT_INTERPRETERS = frozenset({"python3", "python", "py", "bash", "sh", "zsh"})
-
-
-def _guarded_script_exec(cmd: str) -> bool:
-    """命令里是否执行了受守卫的公共脚本（角色执行 = 绕过只读收窄）。
-
-    只认「脚本被当成程序执行」：脚本名作为命令首 token，或解释器后紧跟脚本路径
-    （python3 scripts/repos_apply.py）。grep / cat / 读日志等把脚本名当参数的
-    用法不算执行，不误拦。
-    """
-    for seg in _split_pipeline(strip_heredocs(cmd)):
-        try:
-            tokens = shlex.split(seg)
-        except ValueError:
-            continue
-        if not tokens:
-            continue
-        if Path(tokens[0]).name in GUARDED_SCRIPTS:
-            return True
-        for i, t in enumerate(tokens[:-1]):
-            if Path(t).name in _SCRIPT_INTERPRETERS and Path(tokens[i + 1]).name in GUARDED_SCRIPTS:
-                return True
-    return False
-
-
-# R2：执行脚本文件按位置收严。执行脚本 = 脚本内容代表的全部写入；脚本正文不在
-# 命令行里，守卫解析不到，就按位置收严：项目根内且在该角色范围内 → 放行，/tmp、
-# 项目根外、受守目录 → 拒。`wb.py` 是经 privileged_wb_calls 单独把关的状态接口，
-# 执行它不算「任意脚本」。source / . 是 shell 内置的「读文件执行」，同样按解释器算。
-_SCRIPT_RUNNERS = frozenset({
-    "bash", "sh", "zsh", "dash", "ksh", "fish",
-    "python3", "python", "py", "perl", "ruby", "php", "node", "deno", "bun", "lua",
-    "source", ".",
-})
-_SCRIPT_EXT = re.compile(r"\.(?:sh|py|js|rb|pl|php)$")
-
-
-def _exec_script_targets(cmd: str, base: Path) -> list[tuple[str, Path]]:
-    """命令里被当成程序执行的脚本文件路径，返回 (原始文本, 该段 cwd)。
-
-    cd/pushd 之后的相对脚本路径要按段 cwd 拼，不能按会话 cwd 拼 —— 与 resolve()
-    的逐段 cwd 维护同一坐标系。两种形态：a) 命令首 token 就是脚本路径
-    （`/tmp/evil.sh` / `./deploy.sh`，剥掉 env/time 等包装前缀后判定）；b) 解释器
-    后紧跟的非 flag 参数是脚本（`bash /tmp/evil.sh` / `node src/server.js`）。
-    `npm test` / `pytest` / `go test ./...` 首 token 不在解释器表也不是路径，不算；
-    `python3 -m pytest` 的 `-m` 后是模块名、`bash -c` / `node -e` 后是代码，都跳过。
-    """
-    out = []
-    base_r = base.resolve()
-    state = {"seg_cwd": base_r, "oldpwd": None, "push_stack": [base_r], "uncertain": False}
-    for seg in _split_pipeline(strip_heredocs(cmd)):
-        try:
-            tokens = shlex.split(seg)
-        except ValueError:
-            continue
-        stripped = _strip_wrappers(tokens)
-        if not stripped:
-            continue
-        cmd_name = Path(stripped[0]).name
-        if cmd_name in ("cd", "pushd", "popd"):
-            _step_cwd(cmd_name, stripped[1:], state)
-            continue
-        first = stripped[0]
-        is_runner = first in _SCRIPT_RUNNERS or Path(first).name in _SCRIPT_RUNNERS
-        if not is_runner and not first.startswith("-") and (
-                "/" in first or _SCRIPT_EXT.search(first)):
-            out.append((first, state["seg_cwd"]))
-        if is_runner:
-            for t in stripped[1:]:
-                if t in ("-m", "-c", "-e"):
-                    break  # -m 后是模块名、-c/-e 后是代码，不是脚本路径
-                if t in ("<", ">", "<<", ">>", "2>", "2>>"):
-                    continue  # 重定向操作符本身不是脚本；`bash < file` 的执行对象是 file
-                if t.startswith("-"):
-                    continue
-                out.append((t, state["seg_cwd"]))
-                break
-    return out
-
-
-def _role_scope_allows(root: Path, role: str, rel: str) -> bool:
-    """路径 rel 是否在角色 role 的写入范围内（与 _check_write_target 同一套规则）。"""
-    try:
-        st = json.loads(state_path(root).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return False
-    globs = (st.get("role_scopes") or {}).get(role, DEFAULT_ROLE_SCOPES.get(role, []))
-    if not isinstance(globs, list):
-        globs = []
-    guarded = _guarded_prefix(root, rel)
-    if guarded:
-        if guarded.endswith("/"):
-            globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
-        else:
-            globs = [g for g in globs if g == guarded or g.startswith(guarded + "/")] or ["（无）"]
-    return any(fnmatch.fnmatch(rel, g) for g in globs)
-
-
-def _check_script_exec(base: Path, root: Path, raw: str, data: dict) -> None:
-    """执行脚本文件按位置收严：项目根内且在该角色范围内 → 放行，否则拒绝。
-
-    执行脚本 = 脚本内容代表的全部写入；脚本正文不在命令行里，守卫解析不到，就按
-    位置收严。`wb.py` 为名的是受控状态接口（子命令由 privileged_wb_calls 把关），
-    不走这条。
-    """
-    tgt = resolve_target(base, raw)
-    rootr = root.resolve()
-    if Path(raw).name == "wb.py":
-        return
-    if tgt == rootr or rootr in tgt.parents:
-        rel = os.path.relpath(tgt, rootr).replace(os.sep, "/")
-        role = current_role(rootr, data)
-        if role == UNKNOWN_ROLE:
-            hook_deny(f"无法验证调用者身份，拒绝执行脚本 {raw}：载荷有 agent_id "
-                      "但没有可识别的 agent_type。")
-        if not role:
-            return  # 与 _check_write_target 的空 role 语义一致：内置无角色放行
-        if _role_scope_allows(rootr, role, rel):
-            return
-        hook_deny(
-            f"角色 {role} 无权执行脚本 {raw}（{rel}）：执行脚本 = 脚本内容代表的"
-            f"全部写入，{rel} 不在该角色写入范围内。公共脚本与守卫本体由主线程执行。"
-        )
-    hook_deny(
-        f"拒绝执行脚本 {raw}（{tgt}）：执行脚本 = 脚本内容代表的全部写入，位置在"
-        f"项目根 {rootr} 之外，subagent 不能执行项目根外的脚本。"
-    )
 
 
 def _wb_invocations(cmd: str) -> list[list[str]]:
@@ -643,13 +375,6 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
         elif sub_cmd == "init" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `init --force`：它清空阶段、契约基线、"
                        f"门禁记录与冻结清单。{hint}")
-        elif sub_cmd == "init" and "--root" in flags:
-            # --root 让 init 在任意路径下建 .workbench 结构，Bash 层看不见它的写入
-            # 目标（写发生在 wb.py 进程内部）—— 项目外、`../outside`、甚至 .claude/
-            # 下都能落地，伪造工作台结构并干扰后续 find_root。不带 --root 的 init
-            # 只写会话根内，不动这条。
-            out.append(f"角色 {role} 不能跑 `init --root`：它会在指定路径（项目外、"
-                       f"甚至 .claude/ 下）创建 .workbench 状态结构。{hint}")
         elif sub_cmd == "phase" and action == "advance" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `phase advance --force`：强推门禁前要先问"
                        f"用户（CLAUDE.md 硬规则 3）。{hint}")
@@ -723,131 +448,21 @@ def _is_task_start(cmd: str, task_id: str) -> bool:
     return False
 
 
-def load_allowed_skills(root: Path) -> list[str]:
-    """审核过、允许 subagent 调用的 skill 名单（`*` = 全部放行）。
-
-    `config set` 在 privileged_wb_calls 里对角色一律拦，所以这个键只有主线程
-    能写 —— 「哪些 skill 能用」是编排者的审核决定。缺键/空表 = 一个都不放行：
-    subagent 拿到 Skill 工具但默认调不动，要用先审核。
-    """
-    sp = state_path(root)
-    if not sp.is_file():
-        return []
-    try:
-        v = json.loads(sp.read_text(encoding="utf-8")).get("allowed_skills")
-    except (OSError, json.JSONDecodeError):
-        return []
-    return v if isinstance(v, list) else []
-
-
-def _cd_into_guarded(root: Path, cmd: str) -> bool:
-    """cd / pushd 的目标是否落在受守目录里（GUARDED_PREFIXES + WORKSPACE_GUARDED_PREFIXES）。
-
-    兜底不依赖 frozen_hits 的短路：cd 到冻结子目录（如 .workbench/flows/）时文本
-    命中目录条目、精确检查又比不中文件级目标，短路会让专门防 cd 的兜底自己失效。
-    只防写命令 —— 调用方在 BASH_WRITE 分支里调，`cd .claude && ls` 这类纯读放行。
-    workspace 层条目（scripts/ repos.json .vscode/）只在 workbench 布局（有 repos/）
-    下保留，与 _guarded_prefix 的生效条件一致。
-    """
-    prefixes = list(GUARDED_PREFIXES) + (
-        list(WORKSPACE_GUARDED_PREFIXES) if (root / "repos").is_dir() else [])
-    names = [p.rstrip("/") for p in prefixes]
-    return bool(re.search(
-        r"\b(?:cd|pushd)\s+(?:[^\s;|&]*/)?(?<![\w.])("
-        + "|".join(re.escape(n) for n in names)
-        + r")(?:[/\s;|&]|$)", cmd))
-
-
-def _hook_ctx(data: dict) -> tuple[str, dict, Path]:
-    """从 hook 载荷里取 (tool_name, tool_input, cwd)，任何形态都容错。
-
-    matcher 改成 catch-all 后每个工具调用都过守卫，这两个字段的形态不再由
-    settings.json 的显式清单兜住。取值必须容错到底：`cmd_hook` 的异常兜底会
-    exit 2 阻断调用，而 catch-all 下那等于把整个会话的所有工具调用一起锁死 ——
-    一个畸形载荷换掉整层可用性。这里只做取值归一，判定仍由各分支自己做。
-    """
-    tool = str(data.get("tool_name") or "")
-    ti = data.get("tool_input")
-    return tool, (ti if isinstance(ti, dict) else {}), Path(str(data.get("cwd") or os.getcwd()))
-
-
 def hook_pre_tool(data: dict) -> None:
-    if not isinstance(data, dict):
-        data = {}
-    tool, ti, cwd = _hook_ctx(data)
+    tool = data.get("tool_name", "")
+    ti = data.get("tool_input") or {}
+    cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
-
-    # --- 非主线程禁用工具 ---
-    # 这些工具把动作带出本会话的权限边界：排定的 prompt 以主线程身份执行、派生
-    # worker、跨会话传话、对外发布与远端写。判定在这里，动作却发生在守卫
-    # 看不见的地方（主线程身份 / 另一个会话 / 远端），拦不住第二次 —— 门只能设在
-    # 「调它」这一步。角色 subagent 的工具清单里没有它们，但 general-purpose worker
-    # 有，而 worker 正是降级模式下会被派活的身份。主线程是编排者，不受限。
-    if tool in NON_MAIN_THREAD_DENIED_TOOLS and (data.get("agent_id") or data.get("agent_type")):
-        hook_deny(
-            f"{tool} 会把动作带出本会话的权限边界（排定的 prompt 以主线程身份执行、"
-            f"派生 worker、跨会话传话、对外发布或远端写），subagent 不能调。"
-            f"要做什么报回编排者，由主线程执行。"
-        )
-
-    # --- Skill 审核 ---
-    # Skill 工具不属于 WRITE/SHELL/READ，本会落到末尾放行分支；这里先截。
-    # 非主线程调用者（有 agent_id 或 agent_type —— 角色、general-purpose、Explore、
-    # 老版本 UNKNOWN 全算）只能调审核过的 skill；主线程（两者都无）是审核者，不限。
-    # 门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来，那条
-    # spawn 出的 worker 顶 general-purpose 身份降级越权的路子也就无从触发。
-    if tool == "Skill":
-        if data.get("agent_id") or data.get("agent_type"):
-            name = str(ti.get("skill") or "").strip()
-            allowed = load_allowed_skills(root)
-            if "*" not in allowed and name not in allowed:
-                hook_deny(
-                    f"skill `{name or '(缺名)'}` 不在工作台审核白名单内，subagent 不能调。"
-                    f"已审核：{', '.join(allowed) or '（空）'}。批准由主线程跑 "
-                    f"`wb.py config set allowed_skills '[\"{name}\"]'`（整表覆盖，"
-                    f"已有的一起写上；config set 只有主线程能跑）。`[\"*\"]`=全放行，"
-                    f"仅在已审阅所有已装 skill 时用。")
-        return
 
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
         rootr = root.resolve()
-        # R2 过拦修复：catastrophic / sensitive 扫剥壳后的命令。heredoc 正文不是命令
-        # 的一部分（`cat <<EOF ... EOF` 只是回显），正文里的灾难字面量（如文档里的
-        # `git push --force`）不该误拦整条命令。真正经 stdin 执行的形态
-        # （bash <<EOF / python3 -）由 _UNCERTAIN_PATTERNS / _STDIN_EXEC 单独拒。
-        scan_cmd = strip_heredocs(cmd)
-        sensitive = sensitive_shell_reads(cwd, rootr, scan_cmd)
-        if sensitive:
-            hook_deny("禁止读取敏感路径：" + ", ".join(sensitive))
-        why = catastrophic_command(scan_cmd)
-        if why:
-            hook_deny(f"{why}。命令：{cmd[:160]}")
 
         # --- wb.py 特权子命令：只有这里拿得到调用者身份 ---
         wb_role = current_role(rootr, data)
         if wb_role in ROLES:
             for reason in privileged_wb_calls(cmd, rootr, wb_role):
                 hook_deny(reason)
-
-        # --- 受守卫脚本的执行绕过 ---
-        # python3 scripts/repos_apply.py 没有 Bash 能解析的写目标（不带 -c 的 python3
-        # 不是写命令），脚本内部却写 .vscode/、.workbench/*.code-workspace、repos.json
-        # 与 repos/* 软链 —— 角色执行脚本就把「公共脚本与清单角色只读」整个绕开。
-        # 脚本没有角色用得上的合法形态，非主线程一律拒绝。
-        if (data.get("agent_id") or data.get("agent_type")) and _guarded_script_exec(cmd):
-            hook_deny(
-                "repos_apply.py / repos_tui.py 的写入不被 Bash 守卫解析，subagent 执行"
-                "它们会绕过 scripts/、repos.json、.vscode/ 的只读收窄。"
-                "初始化清单与 IDE 配置交回主线程跑。"
-            )
-
-        # --- 脚本文件执行按位置收严（R2）---
-        # 执行脚本 = 脚本内容代表的全部写入，内容不在命令行里无法解析，就按位置
-        # 收严：项目根内且在该角色范围内放行；/tmp、项目根外、受守目录拒绝。
-        if data.get("agent_id") or data.get("agent_type"):
-            for raw_script, seg_cwd in _exec_script_targets(cmd, cwd):
-                _check_script_exec(seg_cwd, root, raw_script, data)
 
         # --- 争议熔断 ---
         # 任何争议哨兵存在时，developer 角色全线停工。
@@ -876,7 +491,7 @@ def hook_pre_tool(data: dict) -> None:
                     break
 
         # 解析写入目标：能精确判就精确判，解析不了退回粗检查。
-        all_targets, outside_targets, uncertain = resolve(cmd, root)
+        all_targets, _, uncertain = resolve(cmd, root)
 
         # --- 冻结检查 ---
         # heredoc body 已被 strip_heredocs 剥掉，frozen_hits 不再命中 body 里的路径。
@@ -907,66 +522,23 @@ def hook_pre_tool(data: dict) -> None:
                     f"（这会绕过守卫与哈希校验）。{hint}"
                     f"{frozen_advice(root, hits, current_role(root, data))}命令：{cmd[:120]}"
                 )
-            # 先切目录再写的兜底：不设 mentioned 短路 —— cd 到冻结子目录时文本命中
-            # `.workbench/flows/` 这类目录条目，精确检查又比不中文件级目标，短路会让
-            # 专门防 cd 的兜底自己失效（B3 实证）。覆盖全部受守目录，含 workspace 层。
-            if _cd_into_guarded(root, cleaned_cmd):
+            # 先切目录再写的兜底：uncertain 时仍生效
+            if not mentioned and re.search(
+                    r"\b(?:cd|pushd)\s+[^\s;|&]*\.workbench\b", cleaned_cmd):
                 hook_deny(
-                    "先 cd 进受守目录（.workbench/ .claude/ .codex/ .agents/ knowledge/ "
-                    "references/ scripts/ repos.json .vscode/）再写文件这条路不通：切了目录"
-                    "守卫就看不到完整相对路径，所以整类写法一并拒绝，换 sed/tee/重定向"
-                    "都一样。状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
+                    "先 cd 进 .workbench/ 再写文件这条路不通：切了目录守卫就看不到完整"
+                    "相对路径，所以整类写法一并拒绝，换 sed/tee/重定向都一样。"
+                    "状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
                     "`wb.py contract unlock --name <契约名> --reason '<为什么要改>'` 申报"
                     "（契约名用 `wb.py contract list` 查）；写还没登记的新文件用相对"
                     f"仓库根的完整路径，别 cd。命令：{cmd[:120]}"
                 )
 
-        # --- 越根写入 ---
-        # 用 resolve() 的 outside_targets 做精确检查。
-        # uncertain 时保留旧的 > 正则作兜底。
-        if outside_targets:
-            for rel_tgt in outside_targets:
-                tgt = (rootr / rel_tgt).resolve()
-                if tgt != rootr and rootr not in tgt.parents:
-                    hook_deny(f"写入越出项目根 {rootr}：{tgt}")
-        if uncertain:
-            safe_dirs = {Path("/dev").resolve(), Path("/tmp").resolve(),
-                         Path(tempfile.gettempdir()).resolve()}
-            for m in re.finditer(r">>?\s*['\"]?(/[^\s'\";|&>]+)", cmd):
-                # tgt 要 resolve 之后才和 safe_dirs 同一坐标系 —— macOS 上 /tmp 是
-                # /private/tmp 的软链，safe_dirs 里存的是 resolve 过的路径，原文
-                # 直接比对永远比不中，/tmp/xx 的兜底检查变成恒拦。
-                tgt = Path(m.group(1)).resolve()
-                if tgt == rootr or rootr in tgt.parents:
-                    continue  # 项目内部路径，不管是不是 safe 目录都不拦
-                if any(s == tgt or s in tgt.parents for s in safe_dirs):
-                    continue
-                hook_deny(f"重定向写入越出项目根 {rootr}：{tgt}")
-        # 已解析的 shell 目标也必须经过角色范围检查；否则 Bash 会成为
-        # Write/Edit 之外的角色越权通道。无法解析的写入目标不允许由 subagent 猜测放行。
-        role = current_role(root, data)
-        if uncertain and role in ROLES:
-            hook_deny("无法可靠解析 shell 写入目标，无法验证角色范围；请改用明确的文件工具或完整路径命令")
-        # 只读文件（state.json / frozen / disputes / unlock）只在这里 memo 一次：
-        # 每个写入目标都要重读一遍，300 段命令是 6 读 + 3 次 JSON 解析每目标，
-        # 2000 段能超过 hook 的 15s timeout（端侧按非阻断处理则守卫整层失效）。
-        # 作用域只包住这个循环（hook 一次调用一个进程），异常/拒绝路径经 finally 收尾。
-        enable_memo(True)
-        try:
-            for rel_tgt in sorted(all_targets):
-                _check_write_target(rootr, root, rel_tgt, data)
-        finally:
-            enable_memo(False)
-        for pat, why in WARN_BASH:
-            if re.search(pat, cmd, re.IGNORECASE):
-                print(f"[工作台提示] {why}。确认这是你要的操作。")
+        for rel_tgt in sorted(all_targets):
+            _check_write_target(rootr, root, rel_tgt, data)
         return
 
     if READ_TOOL.search(tool):
-        raw = ti.get("file_path") or ti.get("path")
-        hit = sensitive_read_target(cwd, root.resolve(), raw) if raw else None
-        if hit:
-            hook_deny(f"禁止读取敏感路径：{hit}")
         return
 
     # apply_patch：Codex 的写入工具，目标藏在 *** Add/Update/Delete File: 标记里
@@ -998,9 +570,9 @@ def hook_post_tool(data: dict) -> None:
     互相覆盖的 `.workbench/role` —— 归属记录只在 develop 并行时才有价值，读单文件
     会让两个开发角色的改动全挂到最后一次 `role set` 的那个角色名下。
     """
-    if not isinstance(data, dict):
-        data = {}
-    tool, ti, cwd = _hook_ctx(data)
+    ti = data.get("tool_input") or {}
+    tool = data.get("tool_name", "")
+    cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
     if not state_path(root).is_file():
         return
@@ -1020,7 +592,7 @@ def hook_post_tool(data: dict) -> None:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
     # Bash/Codex shell 的文件变更也进入流水账。只能记录静态解析出的目标，
-    # 无法解析的动态写入由 pre-tool 的 uncertain 守卫拒绝。
+    # 只记录静态解析出的写入目标。
     if SHELL_TOOL.search(tool):
         cmd = ti.get("command", "") or ""
         targets, _, _ = resolve(cmd, root)
@@ -1101,9 +673,8 @@ def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
     """子 agent 结束：解除角色锁与解冻窗口，避免下一个 agent 继承上一个的权限。
 
     只在没有别的任务仍处于 doing 时才解除。并行派发下先结束的那个 subagent
-    会把仍在运行的兄弟的角色锁与解冻窗口一并清掉，后者随后进入无限制状态
-    （角色范围检查在 role 文件缺失时直接跳过）—— 这个清除动作在串行下是缓解，
-    在并行下方向是反的。Codex 的 SubagentStop 要求 JSON 输出，`fmt="codex"` 时
+    会把仍在运行的兄弟的角色锁与解冻窗口一并清掉。Codex 的 SubagentStop 要求 JSON
+    输出，`fmt="codex"` 时
     把清理提示包装成 `{"systemMessage": ...}`；Claude 保持原文本。
     """
     root = find_root(Path(data.get("cwd") or os.getcwd()))
@@ -1154,8 +725,6 @@ def cmd_hook(args) -> None:
         data = json.loads(raw or "{}")
     except json.JSONDecodeError:
         data = {}
-    if not isinstance(data, dict):
-        data = {}   # 合法 JSON 但非对象（数组 / 字符串 / 数字）：下游一律按 dict 取值
     try:
         {
             "pre-tool": lambda d: hook_pre_tool(d),
@@ -1169,8 +738,7 @@ def cmd_hook(args) -> None:
         raise
     except Exception as e:
         print(f"[工作台 hook 异常] {type(e).__name__}: {e}", file=sys.stderr)
-        # 未初始化目录不应被 hook 影响；已初始化工作台宁可阻断并暴露故障，
-        # 也不能在守卫异常时静默放行敏感写入。
+            # 未初始化目录不应被 hook 影响；已初始化工作台暴露 hook 故障。
         try:
             root = find_root(Path(data.get("cwd") or os.getcwd()))
             if state_path(root).is_file():
@@ -1178,5 +746,3 @@ def cmd_hook(args) -> None:
         except Exception:
             pass
         sys.exit(0)
-
-

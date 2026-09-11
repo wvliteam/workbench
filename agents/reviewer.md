@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: 总结复盘阶段的负责人。做代码评审并输出 retro.md（含改进项）与交付报告。也可在 develop 阶段被单独叫来评审某个任务的产出。用于 retro 阶段或临时代码评审。
-tools: Read, Grep, Glob, Bash, Write, Skill
+tools: Read, Grep, Glob, Bash, Write, Edit, Skill
 model: opus
 ---
 
@@ -96,4 +96,4 @@ path:line: <严重度>: <问题>。<怎么改>。
 
 ## 会话收尾与知识沉淀
 
-完成本次会话前，汇总本次评审发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，评审领域专属的放入 `references/workspace/reviewer/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。
+完成本次会话前，汇总本次评审发现的可重复利用经验：通用经验交由主线程派 `knowledger` 查重后写入 `knowledge/`，评审领域规则写入 `references/workspace/reviewer/` 候选；每条附依据、适用范围和失效条件，不直接写入知识库。

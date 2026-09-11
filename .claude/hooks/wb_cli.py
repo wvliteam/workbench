@@ -21,11 +21,9 @@ from wb_const import (
     ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, GATES, PHASES, PHASE_ARTIFACT_CONTRACTS, PHASE_CN,
     REPO_HINTS, ROLES, WB_VERSION,
 )
-from wb_bash import (CONFIG_SCHEMA, catastrophic_command, config_key_allowed,
-                     gate_command_references_outside)
+from wb_bash import CONFIG_SCHEMA, catastrophic_command, config_key_allowed
 from wb_core import (
-    DEFAULT_FLOW, _FLOW_NAME, all_flows, artifact_path, atomic_write_text,
-    close_dispute, close_unlock,
+    DEFAULT_FLOW, _FLOW_NAME, all_flows, artifact_path, close_dispute, close_unlock,
     contract_binding, contract_drift, contract_ref_name, contract_revision, default_state,
     die, dotted_get, dotted_set, find_contract, find_root, find_task, flow_dir,
     flow_override, gate_check, inherit_flow_config, knowledge_entries, lease_expired,
@@ -34,8 +32,9 @@ from wb_core import (
     release_state_lock, repo_layout_scopes, save_state, set_current_flow,
     set_flow_override, sha256_file, state_path, task_binding_for_name, task_check_errors,
     task_contract_names, task_dependency_errors, unclaimed_repos, wb_dir,
+    normalize_write_scopes, select_task_batch,
 )
-from wb_guard import GUARD_BODY_PREFIXES, cmd_hook
+from wb_guard import cmd_hook
 
 
 def cmd_init(args) -> None:
@@ -435,6 +434,9 @@ def cmd_task(args) -> None:
             "contracts": contract_refs,
             "artifacts": [], "notes": "", "created": now(), "updated": now(),
         }
+        write_scopes = normalize_write_scopes(args.write_scopes)
+        if write_scopes:
+            t["write_scopes"] = write_scopes
         st["tasks"].append(t)
         log(st, "task_add", id=tid, role=args.role, phase=phase, title=args.title)
         save_state(root, st)
@@ -478,7 +480,7 @@ def cmd_task(args) -> None:
         t["lease_until"] = time.strftime(
             "%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() + lease))
         if args.role_lock:
-            atomic_write_text(wb_dir(root) / "role", t["role"])
+            (wb_dir(root) / "role").write_text(t["role"], encoding="utf-8")
     elif args.action == "done":
         if t.get("status") != "doing":
             die(f"任务 {t['id']} 当前为 {t.get('status')}，只能完成 doing 任务")
@@ -486,22 +488,6 @@ def cmd_task(args) -> None:
         if errors:
             die(f"任务 {t['id']} done 被拒：" + "; ".join(errors))
         t["status"] = "done"
-        # start --role-lock 设的锁要在这里还回去。role 文件是全局的，只兜底主线程与
-        # builtin 身份（general-purpose/Explore/Plan，角色 subagent 按载荷 agent_type
-        # 判定，与它无关）—— 不清的话 doing 期间一直生效：并行下 B 任务的
-        # general-purpose agent 顶着 A 任务角色的范围写入。清之前比对内容，并行的
-        # A done 时 role 文件可能已是别的角色的锁，清掉就把对方的锁拆了（不等即不动）。
-        role_file = wb_dir(root) / "role"
-        try:
-            stale_role = role_file.read_text(encoding="utf-8").strip()
-        except OSError:
-            stale_role = ""
-        # 内容比对分不开「同一角色的两个任务」：兄弟任务还在 doing 时不能清，否则仍在
-        # 跑的那个就此失去锁（与 SubagentStop「有 doing 任务不清」同一条规则）。
-        sibling_doing = any(x["id"] != t["id"] and x.get("status") == "doing"
-                            and x.get("role") == stale_role for x in st["tasks"])
-        if stale_role and stale_role == t["role"] and not sibling_doing:
-            role_file.unlink(missing_ok=True)
         if args.note:
             t["notes"] = args.note
         _restore_stale(root, st, t["id"])
@@ -571,16 +557,22 @@ def cmd_next(args) -> None:
                   + (f" 失效：{', '.join(t['id'] for t in stale)} — 上游被推翻，需 reopen 后重跑." if stale else "")
                   + (" 该阶段可以跑门禁了。" if not doing and not blocked and not stale else ""))
         sys.exit(0 if not (doing or blocked or stale) else 3)
+    deferred = []
     batch = rt if args.all else rt[:1]
     if args.all:
-        batch = rt[: st["max_parallel"]]
+        batch, deferred = select_task_batch(rt, st["max_parallel"])
     if args.json:
-        print(json.dumps({"tasks": batch}, ensure_ascii=False, indent=2))
+        payload = {"tasks": batch}
+        if deferred:
+            payload["deferred_write_scope_conflicts"] = deferred
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
     for t in batch:
         names = [contract_ref_name(ref) for ref in t.get("contracts", [])]
         cs = f"  契约:{','.join(name for name in names if name)}" if names else ""
         print(f"{t['id']}\t{t['role']}\t{t['title']}{cs}")
+    for item in deferred:
+        print(f"延后 {item['id']}：write_scopes 与 {item['with']} 重叠")
 
 
 def cmd_contract(args) -> None:
@@ -597,12 +589,6 @@ def cmd_contract(args) -> None:
             # 越根的契约会同时锁死两头：Bash 提到它就被拦，Write 又先撞越根检查，
             # 契约进入无法维护的状态。
             die(f"契约必须在项目根内：{args.path} 解析为 {rel}")
-        # 守卫本体不能登记成契约：登记 + lock 之后它进了冻结清单，改它要先
-        # unlock —— 而解锁/冻结/哈希校验这条链自己就住在这些文件里，等于把
-        # 权限引擎自己的升级路径交给「先申报再改」。可 unlock 恢复，属可恢复的
-        # 拒绝面；`.workbench/contracts/` 是契约的既定存放位置，不受此限。
-        if rel.startswith(GUARD_BODY_PREFIXES):
-            die(f"守卫本体不能登记为契约，它会冻结权限引擎自己的升级路径：{rel}")
         name = args.name or Path(rel).stem
         # 契约名会被当成解冻窗口的文件名（`.workbench/unlock/<名>`），所以它是
         # 一个信任边界上的输入：`--name ../../x` 能让 unlock 写到项目根外。
@@ -924,7 +910,7 @@ def cmd_role(args) -> None:
     elif args.action == "set":
         if args.name not in ROLES:
             die(f"未知角色 {args.name}，可选：{', '.join(ROLES)}")
-        atomic_write_text(f, args.name)
+        f.write_text(args.name, encoding="utf-8")
         print(f"当前角色：{args.name}（写入范围已收紧）")
     elif args.action == "clear":
         f.unlink(missing_ok=True)
@@ -1048,10 +1034,6 @@ def cmd_config(args) -> None:
         why = catastrophic_command(val)
         if why:
             die(f"拒绝写入门禁命令：{why}。门禁命令会以 shell 直接执行，不经 Bash 守卫。")
-        why = gate_command_references_outside(val, root)
-        if why:
-            die(f"拒绝写入门禁命令：{why}。门禁命令会以 shell 直接执行，"
-                f"不能引用项目根外脚本或路径。")
     dotted_set(st, args.key, val)
     log(st, "config_set", key=args.key)
     save_state(root, st)
@@ -1171,6 +1153,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--phase")
     p.add_argument("--deps", help="逗号分隔的前置任务 ID")
     p.add_argument("--contracts", help="逗号分隔的契约名")
+    p.add_argument("--write-scopes", help="逗号分隔的写入路径/目录前缀；目录可用末尾 /**")
     p.add_argument("--note")
     p.add_argument("--reason")
     p.add_argument("--status")
@@ -1268,5 +1251,4 @@ def main(argv: list[str] | None = None) -> None:
         args.func(args)
     finally:
         release_state_lock()
-
 

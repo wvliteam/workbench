@@ -23,12 +23,23 @@ python3 .claude/hooks/wb.py init --name <项目名>
 python3 .claude/hooks/wb.py status
 ```
 
+### 需求线隔离
+
+新请求进入完整流程前，主 Agent 先判断它是当前 flow 的需求变更/续作，还是独立 Work Item：
+
+- **复用当前 flow**：仅限当前需求范围内的补充、纠正、返工或收尾。
+- **复用空白初始 flow**：仅限刚执行 `init` 后，当前 flow 尚无阶段产物、契约、任务、阶段推进历史或其他需求过程材料。
+- **新建 flow**：当前 flow 已承载其他需求的产物、契约、任务或阶段历史时，独立新需求必须由主 Agent 执行 `python3 .claude/hooks/wb.py flow new <语义化名称>`；不得覆盖、替换或混放到现有 flow。
+- **Conversation closure**：默认不创建流程材料；确需保留时使用独立 Work Item 或命名 flow，不得写入无关的活动 flow。
+
+判断依据至少包括 `status`、当前 flow 阶段目录、契约列表和任务列表；只要任一处已有其他需求痕迹，该 flow 就不是空白。
+
 ## 阶段与角色对应
 
 | 阶段 | 角色 | 产物 |
 | --- | --- | --- |
 | clarify 需求澄清 | `pm` | `artifacts/<flow>/clarify/requirements.md` |
-| analyze 现状分析 | `analyst` | `artifacts/<flow>/analyze/current-state.md` |
+| analyze 现状分析 | `analyst` | `artifacts/<flow>/analyze/current-state.md`；多域另有 `analyze/parts/manifest.json` 与各 scope part |
 | design 方案设计 | `architect` | `artifacts/<flow>/design/design.md` + 登记并锁定 `design-doc` + 接口契约 + 任务图 |
 | develop 开发实现 | `frontend-developer` / `backend-developer` | 代码 + 自带校验 |
 | verify 测试验证 | `qa` | `artifacts/<flow>/verify/test-report.md` |
@@ -63,9 +74,16 @@ python3 .claude/hooks/wb.py log "用户确认 clarify：验收标准 5 条、非
 
 ## 派发
 
-### 前四个阶段：单角色顺序执行
+### clarify / analyze / design
 
-clarify / analyze / design 各派一个 subagent，串行。前一个的产物是后一个的输入，并行没有意义。
+clarify 与 design 各派一个 subagent，顺序执行。analyze 按影响面选择最轻模式：
+
+- **单域模式**：单仓或只有一个不可独立拆分的分析域时，派一个 analyst 直接写 `analyze/current-state.md`，不创建 `parts/`。
+- **多域模式**：涉及至少两个可独立取证的仓库或分析域时，主 Agent 先创建 `analyze/parts/manifest.json`。清单 `version=1`、至少两个 scope；每项含唯一的 `slug`、非空 `boundary` 和严格等于 `parts/<slug>.md` 的 `path`。`slug` 只用小写 ASCII 字母、数字和连字符。
+
+多域模式为每个 scope 建 `phase=analyze`、`role=analyst` 的独立任务，用 `next --all --json` 按共享 `max_parallel` 分批取就绪任务；同一批并发派发。prompt 必须携带 scope、boundary、唯一绝对输出路径和冻结 requirements 快照，并明确 analyst 只写自己的 part，禁止写 manifest、`current-state.md` 或其他 part。
+
+每批返回后，主 Agent 检查异常记录、回读对应 part 并独立复核，再 `task done`。只有 manifest 中所有 part 均存在、已完整回读且无阻塞/冲突后，主 Agent 才串行汇总唯一 `analyze/current-state.md`；汇总时去重、保留冲突和未知项，并增加 `## 专项来源` 表，逐项写出 slug、boundary 与精确 part 路径。多域门禁以 manifest 存在为开关，额外校验清单、part 非空及 canonical 对每个 slug/path 的独立引用；无 manifest 时保持历史兼容。
 
 派发 analyze / design 之前先查知识库：`grep -ril "<关键词>" knowledge/`（或派 `knowledger` 角色），命中的条目**连同依据与失效条件**写进派发 prompt —— 上个需求踩过的坑不必再踩一次。知识库为空时跳过这步。
 
@@ -81,7 +99,24 @@ architect 报回契约草稿后、`contract lock` **之前**，涉及前后端�
 python3 .claude/hooks/wb.py next --all --json
 ```
 
-返回依赖已满足的一批任务（受 `max_parallel` 限制，默认 3）。**把这一批放在同一条消息里用多个 Agent 调用同时派出去** —— 前后端只要各自绑定的契约快照一致，就不依赖对方实现完成。
+返回依赖已满足的一批任务（受 `max_parallel` 限制，默认 3）。拆任务时，能明确边界的任务用
+`--write-scopes "目录/**,文件"` 声明唯一写入范围；共享文件（路由注册、公共类型、锁文件、
+迁移入口、生成文件）单独建串行集成任务，并让它依赖所有上游实现任务：
+
+```
+python3 .claude/hooks/wb.py task add --title "实现用户服务" \
+  --role backend-developer --phase develop --write-scopes "server/users/**"
+python3 .claude/hooks/wb.py task add --title "接入用户页面" \
+  --role frontend-developer --phase develop --write-scopes "web/users/**"
+python3 .claude/hooks/wb.py task add --title "注册路由并联调" \
+  --role backend-developer --phase develop --deps T1,T2 \
+  --write-scopes "server/routes.go,web/api.ts"
+```
+
+**把一批放在同一条消息里用多个 Agent 调用同时派出去** —— 前后端只要各自绑定的契约快照一致，
+就不依赖对方实现完成。`next --all` 会跳过同批中写入范围有祖先/子路径关系的任务，继续挑选
+后面的不冲突任务，并在 JSON 中返回 `deferred_write_scope_conflicts`；未声明范围的历史任务保持
+旧行为，不参与冲突判定。
 
 每个 subagent 的 prompt 里明确给出：任务 ID、标题、要读的契约文件路径、任务绑定的完整 `{name,version,revision,sha}` 快照、验收标准里相关的那几条、以及要求运行 `task check <ID>` 的时机。
 
@@ -109,7 +144,9 @@ subagent 只在计划内停止、契约熔断 / stale、范围外发现这三类
 
 ### 并发上限
 
-`config set max_parallel 5` 可调。往上调之前确认这些任务写入的目录不重叠 —— 同一批里两个 agent 改同一个文件会互相覆盖。
+`config set max_parallel 5` 可调。往上调之前确认这些任务写入的目录不重叠；优先用
+`write_scopes` 让调度器自动跳过祖先/子路径冲突。范围判断只认显式相对路径前缀，不推断 agent
+实际会改哪些文件；无法提前拆边界的任务不要并行。
 
 ### 派不出角色 subagent 时（降级模式）
 

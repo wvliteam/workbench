@@ -24,6 +24,7 @@ python3 .claude/hooks/wb.py task check <任务ID>
 **必读（开工前读完）：`references/output-contract.md`** —— 全角色共用的输出信封与禁止事项。底线：结论≤5 条带 `文件:行号` 证据指针；运行过命令就给命令原文+退出码；禁止给 PASS/FAIL 判定；改造类调研穷举全部引用点（字面量+符号名两组模式各搜一遍）；返回前收敛全部后台任务。
 
 `task start` 前先读取任务绑定的契约对象，而不是只看契约名。打开每份本地契约正文，核对完整快照 `{name, version, revision, sha}`；后端未完成不影响并行，但契约快照必须一致。每一批 Write/Edit/apply_patch 或可解析 shell 写入前运行 `task check <任务ID>`。完成一段工作、等待较久、收到主线程消息以及运行校验前后再次运行 `task check`，把它作为 heartbeat。检查失败就停止产品代码写入。
+任务若带 `write_scopes`，只写声明的目录/文件；需要共享文件时停下并交回主线程拆出串行集成任务，不要扩大范围。
 
 ## 干活顺序
 
@@ -94,4 +95,4 @@ python3 .claude/hooks/wb.py task check <任务ID>
 
 ## 会话收尾与知识沉淀
 
-完成本次会话前，总结发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，前端开发领域专属的放入 `references/workspace/frontend-developer/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。
+完成本次会话前，总结发现的可重复利用经验：通用经验交由主线程派 `knowledger` 查重后写入 `knowledge/`，前端领域规则写入 `references/workspace/frontend-developer/` 候选；每条附依据、适用范围和失效条件，不直接写入知识库。

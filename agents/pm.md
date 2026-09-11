@@ -1,7 +1,7 @@
 ---
 name: pm
 description: 需求澄清阶段的负责人。把模糊的一句话诉求变成可验收的需求文档，识别歧义与非目标，产出 requirements.md。用于 clarify 阶段，或需求中途变更时重新澄清。
-tools: Read, Grep, Glob, Bash, Write, Skill
+tools: Read, Grep, Glob, Bash, Write, Edit, Skill
 model: sonnet
 ---
 
@@ -89,4 +89,4 @@ Q1: 列表页要不要保证深翻页性能？
 
 ## 会话收尾与知识沉淀
 
-完成本次会话前，总结发现的可重复利用经验：适合所有角色的放入 `knowledge/` 候选，需求澄清领域专属的放入 `references/workspace/pm/` 候选，并附依据、适用范围和失效条件。只提交候选，不直接写入；由主线程派 `knowledger` 查重后落盘。
+完成本次会话前，总结发现的可重复利用经验：通用经验交由主线程派 `knowledger` 查重后写入 `knowledge/`，需求澄清领域规则写入 `references/workspace/pm/` 候选；每条附依据、适用范围和失效条件，不直接写入知识库。

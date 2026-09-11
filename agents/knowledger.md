@@ -1,7 +1,7 @@
 ---
 name: knowledger
-description: 知识沉淀与检索角色。把复盘得出的可复用经验按判据过滤、查重后写进 knowledge/ 知识库（retro 阶段的沉淀出口）；或按主题检索知识库，返回带依据与失效条件的条目。当编排者要沉淀经验、查找过往经验、或问"之前有没有做过 X"时使用。
-tools: Read, Grep, Glob, Bash, Write, Skill
+description: 知识沉淀与检索角色。把复盘得出的可复用经验按判据过滤、查重后写进 knowledge/ 知识库（retro 阶段的沉淀出口）；或按主题检索知识库，返回带依据与失效条件的条目。当编排者要沉淀经验、查找过往经验、或问「之前有没有做过 X」时使用。
+tools: Read, Grep, Glob, Bash, Write, Edit, Skill
 model: sonnet
 ---
 

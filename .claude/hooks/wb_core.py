@@ -917,6 +917,56 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         ok = needle in p.read_text(encoding="utf-8", errors="replace")
         return ok, label, "已覆盖" if ok else "缺少该章节"
 
+    if kind == "analyze_parts_complete":
+        manifest = artifact_path(root, phase, "parts/manifest.json")
+        label = "analyze 多专项完整"
+        if not manifest.is_file():
+            return True, label, "无 manifest，沿用单域模式"
+        try:
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as e:
+            return False, label, f"manifest 无效：{e}"
+        if not isinstance(data, dict) or data.get("version") != 1:
+            return False, label, "manifest.version 必须为 1"
+        scopes = data.get("scopes")
+        if not isinstance(scopes, list) or len(scopes) < 2:
+            return False, label, "manifest.scopes 至少包含两个专项"
+        canonical = artifact_path(root, phase, "current-state.md")
+        canonical_text = canonical.read_text(encoding="utf-8", errors="replace") if canonical.is_file() else ""
+        seen: set[str] = set()
+        errors = []
+        for index, scope in enumerate(scopes, 1):
+            if not isinstance(scope, dict):
+                errors.append(f"scopes[{index}] 必须是对象")
+                continue
+            slug, boundary, path = scope.get("slug"), scope.get("boundary"), scope.get("path")
+            if not isinstance(slug, str) or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", slug):
+                errors.append(f"scopes[{index}].slug 无效")
+                continue
+            if slug in seen:
+                errors.append(f"slug 重复：{slug}")
+            seen.add(slug)
+            if not isinstance(boundary, str) or not boundary.strip():
+                errors.append(f"{slug}.boundary 不能为空")
+            expected = f"parts/{slug}.md"
+            if path != expected:
+                errors.append(f"{slug}.path 必须严格为 {expected}")
+                continue
+            part = artifact_path(root, phase, path)
+            if not part.is_file() or part.stat().st_size == 0:
+                errors.append(f"专项缺失或为空：{path}")
+            has_path = path in canonical_text
+            without_path = canonical_text.replace(path, "")
+            has_slug = bool(re.search(rf"(?<![a-z0-9-]){re.escape(slug)}(?![a-z0-9-])", without_path))
+            if not has_slug or not has_path:
+                missing = []
+                if not has_slug:
+                    missing.append("slug")
+                if not has_path:
+                    missing.append("path")
+                errors.append(f"current-state.md 未独立引用 {slug} 的 {'/'.join(missing)}")
+        return (not errors), label, "全部专项完整并已引用" if not errors else "; ".join(errors)
+
     if kind == "contracts_locked":
         # 只数真正的接口契约。阶段产物自动登记的那些（kind="artifact"）不算 ——
         # 否则 clarify / analyze 过完门禁后契约列表永远非空，这条断言就再也逼不出
@@ -1141,6 +1191,55 @@ def ready_tasks(st: dict, phase: str | None = None, role: str | None = None) -> 
     return out
 
 
+def normalize_write_scopes(raw: str | None) -> list[str]:
+    """解析任务写入范围；只接受相对路径和可选的末尾 /**。"""
+    if not raw:
+        return []
+    out = []
+    for item in raw.split(","):
+        scope = item.strip().replace("\\", "/")
+        parts = scope.split("/")
+        if (not scope or scope.startswith("/") or any(p in ("", ".", "..") for p in parts)
+                or ("*" in scope and not scope.endswith("/**"))
+                or scope.count("*") > 2):
+            die(f"非法 write scope：{item!r}（需要相对路径，可选末尾 /**）")
+        if scope.endswith("/**"):
+            scope = scope[:-3]
+        if not scope or scope in out:
+            continue
+        out.append(scope)
+    return out
+
+
+def write_scopes_overlap(left: list[str], right: list[str]) -> bool:
+    """按显式路径前缀判断冲突；未声明范围由调用方视为未知并放行。"""
+    for a in left:
+        for b in right:
+            if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                return True
+    return False
+
+
+def select_task_batch(tasks: list[dict], limit: int) -> tuple[list[dict], list[dict]]:
+    """从就绪任务中选不重叠的一批，返回 (批次, 被范围冲突延后的任务)。"""
+    batch = []
+    deferred = []
+    for task in tasks:
+        if len(batch) >= limit:
+            break
+        scopes = task.get("write_scopes") or []
+        conflict = next(
+            (other["id"] for other in batch
+             if scopes and write_scopes_overlap(scopes, other.get("write_scopes") or [])),
+            None,
+        )
+        if conflict:
+            deferred.append({"id": task["id"], "with": conflict})
+            continue
+        batch.append(task)
+    return batch, deferred
+
+
 # --------------------------------------------------------------------------
 # CLI 命令实现
 # --------------------------------------------------------------------------
@@ -1231,5 +1330,3 @@ def inherit_flow_config(root: Path, st: dict, flow: str) -> str:
         if key in donor:
             st[key] = json.loads(json.dumps(donor[key]))
     return DEFAULT_FLOW
-
-

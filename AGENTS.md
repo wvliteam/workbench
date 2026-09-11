@@ -24,9 +24,9 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 
 **走（默认）**：新功能、跨前后端的改动、有接口变化、需求本身不清楚、要动多个文件。用 `/wb-flow`。
 
-**不走（例外，才需要理由）**：改一两个文件、修个明显的 bug、回答问题、纯文档。直接做，做完说一句「这个改动没走完整流程，因为改动面小/无接口变化」。
+**不走（例外，才需要理由）**：改一两个文件、修个明显的 bug、回答问题、纯文档。简单且明确的需求，例如单纯需求分析、单纯代码阅读或小范围代码改动，可以跳过不需要的阶段，或直接派遣一个指定的 agent 角色执行；直接处理后说明未走完整流程的原因。
 
-把六阶段套在一行改动上是纯开销。小改动不必套完整六阶段，但仍须遵守冻结文件和危险命令守卫。
+把六阶段套在一行改动上是纯开销。小改动不必套完整六阶段，但仍须遵守与当前职责相关的冻结文件、契约和状态保护。
 
 ## 多仓库工作区
 
@@ -84,14 +84,16 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
 
 一份 `.workbench/` 可以同时跑多条流水线，每条一个 flow（需求线）：state、锁、门禁记录、产物目录都按 flow 隔离在 `.workbench/flows/<flow>/` 与 `.workbench/artifacts/<flow>/`。
 
+`main` 仅用于工作台初始化和基础配置，不承载具体用户指派的任务。每次接收任务时，先检查是否存在属于同一需求、可以继续复用的 flow：当前 flow 只承接该需求的补充、纠正、返工或收尾；有可复用的其他 flow 则切换到它；没有可复用 flow 时，由主线程执行 `wb.py flow new <语义化名称>` 创建新 flow。独立需求不得混入已有非空 flow。Conversation closure 默认不写流程材料；确需保留时用独立 Work Item 或命名 flow。
+
 ```bash
 python3 .claude/hooks/wb.py flow new feature-b   # 开一条新流水线并切换过去
 python3 .claude/hooks/wb.py flow list           # 全部 flow 与各自阶段
-python3 .claude/hooks/wb.py flow switch main   # 切回
+python3 .claude/hooks/wb.py flow switch main   # 切回初始化 flow
 python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切走）
 ```
 
-- `init --flow <名>` 可以直接初始化指定 flow；默认 `main`。
+- `init --flow <名>` 可以直接初始化指定 flow；默认 `main`，但 `main` 只作为初始 flow 使用。
 - **新 flow 从 main 继承工作区级配置**（`role_scopes` / `gate_commands` / `gate_timeout` / `max_parallel`）：这些描述的是「这个工作区怎么干活」，不继承的话每条 flow 都要重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉。任务、契约、阶段不继承 —— 那是每条需求线自己的进度。
 - CLI 命令按 `.workbench/current-flow` 指针定位；`status` 的根行会显示当前 flow。指针是全部会话共享的一份文件：**两个终端并行推两条 flow 时，CLI 各自 `export WB_FLOW=<名>` 钉死**（只影响 wb.py 命令，hook 与守卫不受它影响）。不钉的话，状态命令会被对方切走的指针带到别的流水线上 —— 并发编排多条 flow 没有别的机制保护，要么各自钉 WB_FLOW，要么串行交错。
 - **守卫不看指针，看全部 flow 的并集**：A flow 锁定的契约在 B flow 视角下照样冻结；A flow 的契约争议会让所有 flow 的 developer 一起停工（争议本来就是全线停工信号）。
@@ -114,7 +116,7 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 | 阶段 | 角色 subagent | 必须产出 |
 | --- | --- | --- |
 | clarify | `pm` | `.workbench/artifacts/<flow>/clarify/requirements.md`（含「验收标准」「非目标」） |
-| analyze | `analyst` | `<flow>/analyze/current-state.md`（含「风险」） |
+| analyze | `analyst` | `<flow>/analyze/current-state.md`（含「风险」）；多域模式另有 `analyze/parts/manifest.json` 与每域独立 part |
 | design | `architect` | `<flow>/design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
 | develop | `frontend-developer` `backend-developer` | 代码 + `<flow>/develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
 | verify | `qa` | `<flow>/verify/test-report.md` |
@@ -122,13 +124,15 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 
 编排者不亲自干活，派 subagent。派发时给足上下文：需求原话、上游产物路径、要读的契约文件、相关的验收标准条目。
 
+例外：已进入 flow 的单仓、单文件或已定位的小范围明确修改，可由主 Agent 直接执行。主 Agent 仍须执行 `task start --owner root`，完成验证后执行 `task done --note`，不得绕过任务状态与门禁。
+
 ## 硬规则
 
 1. **状态只能经 wb.py 改。** 直接写 `.workbench/state.json`、`role`、`frozen`、`unlock` 会被守卫拦，Write/Edit 与 shell 重定向、`sed -i` 都拦。门禁与进度必须不可绕过，否则记录没有意义。
 2. **契约、方案文档与过了门禁的阶段产物锁定后就是只读的。** 包括对 owner 和主线程。要改先申报：`contract unlock --name <名> --reason '<为什么>'`，改完 `contract bump`。理由必须在改之前写 —— 事后补的理由都是给已发生的事找解释。`design.md` 由 architect 登记为 `design-doc`；`requirements.md` / `current-state.md` / `test-report.md` / `retro.md` 由 `phase advance` 在门禁**真**通过时自动登记为 `artifact-<名>`（强推不冻结）。回头改上游需求走 `--name artifact-requirements`，改文件那一步派 `pm`。
 3. **门禁不通过不推进。** 需要 `phase advance --force` 时先问用户。唯一例外：FAIL 项本身不适用（纯文档改动没有构建命令）。跳过失败的测试不算例外。`phase set` 只用于回退，`--reason` 必填，向前跳会给被跨过的阶段留下「门禁未运行」的记录。
 4. **子 agent 说做完了不等于做完了。** 至少确认它声称改的文件存在、它声称跑过的命令你也跑一遍，再 `task done`。异常中断的 agent 会在 `.workbench/artifacts/<flow>/develop/tasks/<任务号>-<角色名>.md` 留执行记录（已完成/已改/阻塞/下一步），接续时先读它，再决定重派还是续做。
-5. **develop 阶段并行派发。** `next --all --json` 拿整批就绪任务，放在同一条消息里多个 Agent 调用同时发出。串行派发会浪费掉契约先行带来的全部收益。每个 agent 先 `task start`、完成后 `task done` —— 产物归属合并与解冻窗口清理都挂在 `task done` 上。
+5. **develop 阶段并行派发。** `next --all --json` 拿整批就绪任务，放在同一条消息里多个 Agent 调用同时发出。能明确边界的开发任务用 `task add --write-scopes "目录/**,文件"` 声明写入范围；共享文件（路由注册、公共类型、锁文件、迁移入口、生成文件）单独建串行集成任务并依赖上游。`next --all` 会跳过同批中有祖先/子路径关系的范围冲突，返回 `deferred_write_scope_conflicts`，未声明范围的历史任务保持兼容。每个 agent 先 `task start`、完成后 `task done` —— 产物归属合并与解冻窗口清理都挂在 `task done` 上。analyze 涉及至少两个独立域时同样按共享 `max_parallel` 为每个 manifest scope 并发派 analyst；各自只写唯一 part，主线程回读后串行汇总 canonical。
 6. **不可简化的东西**：信任边界上的输入校验、防数据丢失的错误处理、安全措施、可访问性基础、用户明确要求的功能。其余按最小可用实现。
 7. **clarify 与 design 推进前问用户。** 门禁管「产物齐不齐」，管不了「用户认不认」：需求偏差在这里拦最便宜（产物一过门禁就冻结成契约，改它要走 unlock → bump → 下游返工），方案取舍选错的返工由全部开发阶段承担。用 `AskUserQuestion`，确认完 `wb.py log` 一条留痕；用户批量授权后续时按授权推进并在汇报里说明。
 
@@ -168,7 +172,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 ## 多端适配
 
 - 本文件是唯一正文，其他入口文件名（如 `CLAUDE.md`）软链到它 —— 改协作约定只改 `AGENTS.md`，接入新端加软链即可。历史上两文件曾是各自维护的摘要，各端拿到的规则深度不一致，已收敛。
-- 角色定义唯一维护在根目录 `agents/`（每个角色一份 `.md` 与 `.toml`）；`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb_const.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色只改 `agents/` 后检查两端软链与 TOML 解析。
+- 角色定义唯一维护在根目录 `agents/*.toml`；运行 `python3 scripts/generate_agents.py` 生成 Claude/Comate 使用的 `agents/*.md`。`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb_const.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色先改 TOML，再运行生成脚本和 `--check` 校验。
 - hook 挂在各端自己的注册表里（如 `.claude/settings.json`、`.codex/hooks.json`），部分端要求项目受信任、hook 通过审核后才真正运行。不要把端上的完全放行模式（如 `danger-full-access`）当作角色权限控制 —— 守卫本身就是 hook，hook 不加载就什么都不是。
 - 端注入的环境变量（如 `$CLAUDE_PROJECT_DIR`）只在该端存在，脚本不要依赖它跨端可用；通用钉根用 `WB_ROOT`，或直接相对/绝对路径。
 
@@ -187,6 +191,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 - 门禁命令是 `shell=True` 的 subprocess，不经 Bash 守卫 —— 这是它作为门禁的前提（任意项目的任意测试命令）。已知上限：catastrophic 模式筛得掉，但 qa 配的非灾难命令就是会原样执行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
 - Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv`/`install` 精确模式下只取最后一个非 flag 参数为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`），源路径不误拦；`ln` 是例外 —— 末参数照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒，所以 `ln -s .claude/hooks/wb.py x.py` 这种「先建链再写」的串联写法拦得住。
+- 硬链不用解析侧解，用 inode 判：`ln .workbench/flows/main/state.json innocent.md` 之后写 `innocent.md`，`Path.resolve()` 分不清同一 inode 的另一个目录项，别名按 `*.md` 命中角色范围一路放行，内容直改 `state.json` —— 冻结防线与「状态只能经 wb.py 改」同时失效且不留哈希痕迹。`_check_write_target` 因此在冻结检查之后加一道：目标**已存在且是普通文件**且 `st_nlink > 1` 即拒（目录的 nlink 天然 > 1，新建目标与 FIFO/socket 等非常规文件跳过）。`stat()` 抛 OSError（权限、竞态删除等文件系统问题）时跳过而不拒绝 —— 环境问题不该升级成全网阻断。代价是所有已存在的多链接文件一律不可写（本仓库与 `.git` 内当前都没有这类文件，属预期收严）。
 - 门禁 `run_check` 三态：exit code 0 且命中 `0 tests`/`No tests ran`/`-DskipTests`/`--passWithNoTests` 等零用例或跳过标记时返回 `unverified` 而非 PASS。`unverified` 在门禁汇总里等同 FAIL，但拒绝信息说明不同：「exit=0 但无独立证据表明测试通过」。
 
 设计取舍与每条边界的理由在 `docs/`，索引见 [docs/README.md](docs/README.md)。
