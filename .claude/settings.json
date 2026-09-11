@@ -36,7 +36,7 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash|Read",
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash|Read|Monitor",
         "hooks": [
           {
             "type": "command",
@@ -48,7 +48,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash",
+        "matcher": "Write|Edit|NotebookEdit|MultiEdit|Bash|Monitor",
         "hooks": [
           {
             "type": "command",

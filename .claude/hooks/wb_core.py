@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover
 from wb_const import (
     DEFAULT_ROLE_SCOPES, FROZEN_ALWAYS, GATES, PHASES, PHASE_CN, REPO_HINTS, STATE_SCHEMA,
 )
-from wb_bash import MAX_LOG, catastrophic_command
+from wb_bash import MAX_LOG, catastrophic_command, gate_command_references_outside
 
 
 # --------------------------------------------------------------------------
@@ -94,14 +94,14 @@ def flow_override() -> str | None:
 
 def pointer_flow(root: Path) -> str:
     """指针定位的 flow。指针缺失/非法回 main —— 指针是便捷定位，不是安全边界。"""
-    raw = ""
-    try:
-        raw = (wb_dir(root) / FLOW_PTR).read_text(encoding="utf-8").strip()
-    except OSError:
-        return DEFAULT_FLOW
-    if _FLOW_NAME.fullmatch(raw):
-        return raw
-    return DEFAULT_FLOW
+    def load() -> str:
+        try:
+            raw = (wb_dir(root) / FLOW_PTR).read_text(encoding="utf-8").strip()
+        except OSError:
+            return DEFAULT_FLOW
+        return raw if _FLOW_NAME.fullmatch(raw) else DEFAULT_FLOW
+
+    return _memo(("flow_ptr", os.fspath(root)), load)
 
 
 def read_current_flow(root: Path) -> str:
@@ -176,6 +176,49 @@ def default_state(name: str) -> dict:
 _STATE_LOCK = None  # 持锁的文件对象。load_state(lock=True) 开，save_state / main 收尾关
 
 
+# --------------------------------------------------------------------------
+# hook 进程内的只读 memo
+# --------------------------------------------------------------------------
+# hook 每次工具调用起一个新进程，而一次 pre-tool 判定里每个写入目标都要重读一遍
+# state.json / frozen / disputes / unlock（300 段命令实测 6 次读 + 3 次 JSON 解析
+# 每目标，2000 段跑到 55s，超过 settings.json 的 15s hook timeout —— 端侧若按非
+# 阻断处理，守卫整层失效）。这些文件在一次工具调用内理论不变；变了也是 TOCTOU
+# 语义，单次 memo 反而更自洽：守卫看到的是同一份快照。
+# 只在 wb_guard 的热路径上经 enable_memo 显式开启并成对关闭 —— wb.py CLI 命令
+# （读-改-写）不受影响，写状态后的读必须看到新值。
+_MEMO: dict = {}
+_MEMO_ON = False
+
+
+def enable_memo(on: bool = True) -> None:
+    """开/关 memo 作用域。开的时候先清空：一次工具调用一份快照。
+
+    不清空的话条目会跨调用留在进程里 —— hook 是一进程一调用，看着没事，但
+    selfcheck 这种同进程连续调用 hook_pre_tool 的宿主会拿到上一次的快照，
+    刚落盘的 dispute / unlock 窗口读不到（实测被 selfcheck 的申报窗口断言抓到）。
+    """
+    global _MEMO_ON
+    if on:
+        _MEMO.clear()
+    _MEMO_ON = on
+
+
+def _memo(key, produce):
+    """按 key 缓存 produce() 的结果；memo 未开启时直接求值。
+
+    缓存的是对象本身，不是副本 —— 作用域内的调用方拿到的可能是同一个 dict/list，
+    所以 memo 生效期间只读（hook 热路径正是纯读）。要改状态请用 lock=True 的
+    load_state（永不 memo）。
+    """
+    if not _MEMO_ON:
+        return produce()
+    try:
+        return _MEMO[key]
+    except KeyError:
+        value = _MEMO[key] = produce()
+        return value
+
+
 def acquire_state_lock(root: Path, timeout: float = 20.0) -> None:
     """对当前 flow 的 state.lock 上排他锁。已持锁时直接返回，不重入自阻塞。
 
@@ -233,6 +276,13 @@ def load_state(root: Path, lock: bool = False) -> dict:
             f"python3 .claude/hooks/wb.py init --name <项目名>（状态文件应在：{p.relative_to(root)}）")
     if lock:
         acquire_state_lock(root)
+        return _load_state_uncached(p, flow)
+    # lock=False 的读在 hook 热路径上（每个写入目标一次）可 memo；lock=True 是
+    # 读-改-写临界区，必须读最新，永不 memo。
+    return _memo(("state", os.fspath(p)), lambda: _load_state_uncached(p, flow))
+
+
+def _load_state_uncached(p: Path, flow: str) -> dict:
     try:
         st = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -307,22 +357,50 @@ def frozen_paths(st: dict) -> list[str]:
     return out
 
 
+def atomic_write_text(p: Path, text: str) -> None:
+    """原子替换文本文件（tmp + rename）。
+
+    必须原子。`write_text` 是「truncate 再 write」两步，中间那一瞬文件存在但为空，
+    而守卫只判文件在不在、role 只判内容真不真 —— 实测 4 写 6 读并行，12000 次读里
+    5588 次读到空清单，那一刻 Write/Edit 与 Bash 两条防线对 state.json 与全部已锁
+    契约同时放行；`role` 读成空时 `_check_write_target` 的 `if not role: return`
+    让角色范围检查整层跳过（含改 role 提权）。触发不需要谁去绕：一次 task done 与
+    一次工具调用重叠就够。
+
+    临时名带 pid：共用一个名字时，两个进程同时写会把彼此的字节交织进去，再各自
+    replace 就写出半截内容。pid 写成功但 replace 前崩掉只留一个 .tmp 垃圾，无害。
+    """
+    tmp = p.parent / f"{p.name}.{os.getpid()}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(p)
+
+
 def write_frozen(root: Path, st: dict, flow: str | None = None) -> None:
     """把冻结清单落成纯文本，供 hook 低成本读取。
-
-    必须原子替换。`write_text` 是「truncate 再 write」两步，中间那一瞬文件存在但为空，
-    而守卫只判文件在不在 —— 实测 4 写 6 读并行，12000 次读里 5588 次读到空清单，
-    那一刻 Write/Edit 与 Bash 两条防线对 state.json、role 与全部已锁契约同时放行
-    （含改 role 提权）。触发不需要谁去绕：一次 task done 与一次工具调用重叠就够。
 
     缓存跟着状态走：flow 布局落在 flows/<flow>/frozen，老布局留在 .workbench/。
     """
     if flow is None:
         flow = st.get("_flow") or read_current_flow(root)
     f = state_path(root, flow).parent / "frozen"
-    tmp = f.parent / f"{f.name}.{os.getpid()}.tmp"
-    tmp.write_text("\n".join(frozen_paths(st)) + "\n", encoding="utf-8")
-    tmp.replace(f)
+    atomic_write_text(f, "\n".join(frozen_paths(st)) + "\n")
+
+
+def read_state_raw(root: Path, flow: str) -> dict:
+    """某个 flow 的 state.json 原始内容：不补字段、不迁移、读不了给 {}。
+
+    守卫的只读反查（read_frozen 兜底、unlocked_paths 的契约路径表、contracts_for、
+    角色范围）都走这里 —— 都在 pre-tool 的每目标循环里，hook 进程内按
+    (root, flow) memo（见 _MEMO）。
+    """
+    def load() -> dict:
+        try:
+            st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return st if isinstance(st, dict) else {}
+
+    return _memo(("state_raw", os.fspath(root), flow), load)
 
 
 def read_frozen(root: Path) -> list[str]:
@@ -336,6 +414,10 @@ def read_frozen(root: Path) -> list[str]:
     已经原子化，这条是纵深防御 —— 它不认成因，任何原因写出的空文件都接得住，
     而失效方向是误拒而非放行。
     """
+    return _memo(("frozen", os.fspath(root)), lambda: _read_frozen(root))
+
+
+def _read_frozen(root: Path) -> list[str]:
     out: list[str] = []
     for flow in all_flows(root):
         f = state_path(root, flow).parent / "frozen"
@@ -350,11 +432,7 @@ def read_frozen(root: Path) -> list[str]:
             out.extend(got)
             continue
         # 缓存缺失/为空：从该 flow 的 state.json 现算
-        try:
-            st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            st = {}
-        out.extend(frozen_paths(st))
+        out.extend(frozen_paths(read_state_raw(root, flow)))
     # 去重保序
     seen: set[str] = set()
     return [p for p in out if not (p in seen or seen.add(p))]
@@ -370,6 +448,11 @@ def read_unlock_records(root: Path) -> dict[str, dict]:
     跨 flow 同名契约的窗口同名文件冲突时（`unlock/<名>` 只按契约名，不按 flow），
     任一 flow 有窗口就算开 —— 拒绝放行的方向，不会把 A flow 的窗口当 B flow 的用。
     """
+    return _memo(("unlock_records", os.fspath(root)),
+                 lambda: _read_unlock_records(root))
+
+
+def _read_unlock_records(root: Path) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for flow in all_flows(root):
         d = state_path(root, flow).parent / "unlock"
@@ -439,6 +522,10 @@ def read_disputes(root: Path) -> dict[str, str]:
     争议在工作区级生效：A flow 的契约争议，别的 flow 的 developer 一起停工 ——
     这是「全线停工」的本来语义。
     """
+    return _memo(("disputes", os.fspath(root)), lambda: _read_disputes(root))
+
+
+def _read_disputes(root: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     for flow in all_flows(root):
         d = state_path(root, flow).parent / "disputes"
@@ -948,6 +1035,12 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         if why:
             return False, label, (f"拒绝执行（{why}）：`{cmd}`；"
                                   f"先 config set gate_commands.{rest} 换成安全命令")
+        # R4：同一条老 state 通道 —— 引用项目根外脚本/路径的命令（qa 借门禁名义
+        # 任意执行代码的链条）执行前再筛一遍，记 FAIL 不执行。
+        why = gate_command_references_outside(cmd, root)
+        if why:
+            return False, label, (f"拒绝执行（{why}）：`{cmd}`；先 config set "
+                                  f"gate_commands.{rest} 换成不引用项目根外脚本/路径的命令")
         # 完整输出必须落盘。门禁刚跑过一遍，若只留汇总行，诊断就得再跑一遍。
         logf = state_path(root).parent / f"gate-{rest}.log"
         rel_log = os.path.relpath(logf, root)

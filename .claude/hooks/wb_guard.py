@@ -21,14 +21,22 @@ from wb_const import (
     WRITE_TOOL,
 )
 from wb_bash import (
-    WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command, resolve,
-    strip_heredocs,
+    WARN_BASH, _split_pipeline, _step_cwd, _strip_wrappers, catastrophic_command,
+    resolve, strip_heredocs,
 )
 from wb_core import (
-    all_flows, close_unlock, contract_drift, die, find_contract, find_root, load_state,
-    log, now, pointer_flow, read_current_flow, read_disputes, read_frozen, read_unlocks,
-    ready_tasks, save_state, set_flow_override, state_path, task_contract_errors, wb_dir,
+    all_flows, close_unlock, contract_drift, die, enable_memo, find_contract, find_root,
+    load_state, log, now, pointer_flow, read_current_flow, read_disputes, read_frozen,
+    read_state_raw, read_unlocks, ready_tasks, save_state, set_flow_override, state_path,
+    task_contract_errors, wb_dir,
 )
+
+
+# 守卫本体：权限引擎、hook 注册表与角色定义。任何角色只读（收窄见 _guarded_prefix），
+# 也不许登记成契约 —— 登记 + lock 之后它进了冻结清单，改它反而要先 unlock，
+# 而解锁/冻结这条链本身就在这些文件里（治理面 DoS）。登记别的受守目录
+# （.workbench/contracts/ 是契约既定存放处、knowledge/、references/）不受此限。
+GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/")
 
 
 # --------------------------------------------------------------------------
@@ -42,7 +50,9 @@ def hook_deny(reason: str) -> "None":
 
 
 def resolve_target(cwd: Path, raw: str) -> Path:
-    p = Path(raw)
+    # `~` 先展开：不展开时 `~/evil.py` 被当成 cwd 下的相对路径，匹配角色范围的
+    # 裸 `*.py` 放行，真实落点是 $HOME（含 ~/.claude/settings.json）。
+    p = Path(os.path.expanduser(str(raw)))
     if not p.is_absolute():
         p = cwd / p
     try:
@@ -116,8 +126,12 @@ def _is_dispute_exempt_bash(cmd: str, root: Path) -> bool:
     只放行两样：/tmp 下的操作、.workbench/artifacts/<flow>/develop/ 下自己的执行记录。
     粗判：命令里提到放行路径就放行。争议时全线停工是第一优先级。
     """
-    # 只涉及 /tmp 且不碰 .workbench/.claude
-    if re.search(r'\b/tmp/\S', cmd) and not re.search(r'\.(workbench|claude)', cmd):
+    # 只涉及 /tmp 且不碰 .workbench/.claude。
+    # 路径边界用「行首或分隔符之后」，不能用 `\b`：`\b` 要求一侧是单词字符，
+    # 空格与 `/` 都是非单词字符，交界处不存在词边界 —— `cat /tmp/x` 永不匹配，
+    # 争议期想豁免的命令全被拦（实测）。分隔符集合含 shell 的引用与重定向字符。
+    if re.search(r"""(?:^|[\s;|&('"=<>])/tmp/\S""", cmd) \
+            and not re.search(r'\.(workbench|claude)', cmd):
         return True
     # 写自己的执行记录（任意 flow）
     if re.search(r'\.workbench/artifacts/[^/]+/develop/', cmd):
@@ -175,11 +189,7 @@ def unlocked_paths(root: Path) -> set[str]:
         return set()
     by_path = {}
     for flow in all_flows(root):
-        try:
-            st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for c in st.get("contracts", []):
+        for c in read_state_raw(root, flow).get("contracts", []):
             path = c.get("path")
             name = c.get("name")
             if path and name:
@@ -196,11 +206,7 @@ def contracts_for(root: Path, rels: list[str]) -> list[dict]:
     """
     out, seen = [], set()
     for flow in all_flows(root):
-        try:
-            cur = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        for c in cur.get("contracts", []):
+        for c in read_state_raw(root, flow).get("contracts", []):
             if c.get("path") in rels and c.get("name") not in seen:
                 seen.add(c.get("name"))
                 out.append(c)
@@ -390,11 +396,7 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
         return
     if not role or not state_path(rootr).is_file():
         return
-    try:
-        st = json.loads(state_path(rootr).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return
-    scopes = st.get("role_scopes") or {}
+    scopes = read_state_raw(rootr, read_current_flow(rootr)).get("role_scopes") or {}
     # 范围缺失回落到默认值；显式的空清单是「什么都不能写」，不是「不限制」。
     # 反过来读会让 `config set role_scopes.<角色> '[]'` 变成一键解除范围的开关 ——
     # 空值当放行时，越权路径连 GUARDED_PREFIXES 过滤都走不到。
@@ -414,7 +416,7 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                      "沉淀或查找用 wb-knowledge skill，或交回主线程派 knowledger 角色。）")
         elif guarded == "references/":
             extra = ("（references/ 是公共操作规范，任何角色只读。要改规范交回主线程。）")
-        elif guarded in (".claude/", ".codex/", ".agents/"):
+        elif guarded in GUARD_BODY_PREFIXES:
             extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
                      f"要改它交回主线程，别给角色开范围。）")
         elif guarded and guarded != ".workbench/":
@@ -463,6 +465,110 @@ def _guarded_script_exec(cmd: str) -> bool:
             if Path(t).name in _SCRIPT_INTERPRETERS and Path(tokens[i + 1]).name in GUARDED_SCRIPTS:
                 return True
     return False
+
+
+# R2：执行脚本文件按位置收严。执行脚本 = 脚本内容代表的全部写入；脚本正文不在
+# 命令行里，守卫解析不到，就按位置收严：项目根内且在该角色范围内 → 放行，/tmp、
+# 项目根外、受守目录 → 拒。`wb.py` 是经 privileged_wb_calls 单独把关的状态接口，
+# 执行它不算「任意脚本」。source / . 是 shell 内置的「读文件执行」，同样按解释器算。
+_SCRIPT_RUNNERS = frozenset({
+    "bash", "sh", "zsh", "dash", "ksh", "fish",
+    "python3", "python", "py", "perl", "ruby", "php", "node", "deno", "bun", "lua",
+    "source", ".",
+})
+_SCRIPT_EXT = re.compile(r"\.(?:sh|py|js|rb|pl|php)$")
+
+
+def _exec_script_targets(cmd: str, base: Path) -> list[tuple[str, Path]]:
+    """命令里被当成程序执行的脚本文件路径，返回 (原始文本, 该段 cwd)。
+
+    cd/pushd 之后的相对脚本路径要按段 cwd 拼，不能按会话 cwd 拼 —— 与 resolve()
+    的逐段 cwd 维护同一坐标系。两种形态：a) 命令首 token 就是脚本路径
+    （`/tmp/evil.sh` / `./deploy.sh`，剥掉 env/time 等包装前缀后判定）；b) 解释器
+    后紧跟的非 flag 参数是脚本（`bash /tmp/evil.sh` / `node src/server.js`）。
+    `npm test` / `pytest` / `go test ./...` 首 token 不在解释器表也不是路径，不算；
+    `python3 -m pytest` 的 `-m` 后是模块名、`bash -c` / `node -e` 后是代码，都跳过。
+    """
+    out = []
+    base_r = base.resolve()
+    state = {"seg_cwd": base_r, "oldpwd": None, "push_stack": [base_r], "uncertain": False}
+    for seg in _split_pipeline(strip_heredocs(cmd)):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        stripped = _strip_wrappers(tokens)
+        if not stripped:
+            continue
+        cmd_name = Path(stripped[0]).name
+        if cmd_name in ("cd", "pushd", "popd"):
+            _step_cwd(cmd_name, stripped[1:], state)
+            continue
+        first = stripped[0]
+        is_runner = first in _SCRIPT_RUNNERS or Path(first).name in _SCRIPT_RUNNERS
+        if not is_runner and not first.startswith("-") and (
+                "/" in first or _SCRIPT_EXT.search(first)):
+            out.append((first, state["seg_cwd"]))
+        if is_runner:
+            for t in stripped[1:]:
+                if t in ("-m", "-c", "-e"):
+                    break  # -m 后是模块名、-c/-e 后是代码，不是脚本路径
+                if t in ("<", ">", "<<", ">>", "2>", "2>>"):
+                    continue  # 重定向操作符本身不是脚本；`bash < file` 的执行对象是 file
+                if t.startswith("-"):
+                    continue
+                out.append((t, state["seg_cwd"]))
+                break
+    return out
+
+
+def _role_scope_allows(root: Path, role: str, rel: str) -> bool:
+    """路径 rel 是否在角色 role 的写入范围内（与 _check_write_target 同一套规则）。"""
+    try:
+        st = json.loads(state_path(root).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    globs = (st.get("role_scopes") or {}).get(role, DEFAULT_ROLE_SCOPES.get(role, []))
+    if not isinstance(globs, list):
+        globs = []
+    guarded = _guarded_prefix(root, rel)
+    if guarded:
+        if guarded.endswith("/"):
+            globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
+        else:
+            globs = [g for g in globs if g == guarded or g.startswith(guarded + "/")] or ["（无）"]
+    return any(fnmatch.fnmatch(rel, g) for g in globs)
+
+
+def _check_script_exec(base: Path, root: Path, raw: str, data: dict) -> None:
+    """执行脚本文件按位置收严：项目根内且在该角色范围内 → 放行，否则拒绝。
+
+    执行脚本 = 脚本内容代表的全部写入；脚本正文不在命令行里，守卫解析不到，就按
+    位置收严。`wb.py` 为名的是受控状态接口（子命令由 privileged_wb_calls 把关），
+    不走这条。
+    """
+    tgt = resolve_target(base, raw)
+    rootr = root.resolve()
+    if Path(raw).name == "wb.py":
+        return
+    if tgt == rootr or rootr in tgt.parents:
+        rel = os.path.relpath(tgt, rootr).replace(os.sep, "/")
+        role = current_role(rootr, data)
+        if role == UNKNOWN_ROLE:
+            hook_deny(f"无法验证调用者身份，拒绝执行脚本 {raw}：载荷有 agent_id "
+                      "但没有可识别的 agent_type。")
+        if not role:
+            return  # 与 _check_write_target 的空 role 语义一致：内置无角色放行
+        if _role_scope_allows(rootr, role, rel):
+            return
+        hook_deny(
+            f"角色 {role} 无权执行脚本 {raw}（{rel}）：执行脚本 = 脚本内容代表的"
+            f"全部写入，{rel} 不在该角色写入范围内。公共脚本与守卫本体由主线程执行。"
+        )
+    hook_deny(
+        f"拒绝执行脚本 {raw}（{tgt}）：执行脚本 = 脚本内容代表的全部写入，位置在"
+        f"项目根 {rootr} 之外，subagent 不能执行项目根外的脚本。"
+    )
 
 
 def _wb_invocations(cmd: str) -> list[list[str]]:
@@ -537,6 +643,13 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
         elif sub_cmd == "init" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `init --force`：它清空阶段、契约基线、"
                        f"门禁记录与冻结清单。{hint}")
+        elif sub_cmd == "init" and "--root" in flags:
+            # --root 让 init 在任意路径下建 .workbench 结构，Bash 层看不见它的写入
+            # 目标（写发生在 wb.py 进程内部）—— 项目外、`../outside`、甚至 .claude/
+            # 下都能落地，伪造工作台结构并干扰后续 find_root。不带 --root 的 init
+            # 只写会话根内，不动这条。
+            out.append(f"角色 {role} 不能跑 `init --root`：它会在指定路径（项目外、"
+                       f"甚至 .claude/ 下）创建 .workbench 状态结构。{hint}")
         elif sub_cmd == "phase" and action == "advance" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `phase advance --force`：强推门禁前要先问"
                        f"用户（CLAUDE.md 硬规则 3）。{hint}")
@@ -627,6 +740,24 @@ def load_allowed_skills(root: Path) -> list[str]:
     return v if isinstance(v, list) else []
 
 
+def _cd_into_guarded(root: Path, cmd: str) -> bool:
+    """cd / pushd 的目标是否落在受守目录里（GUARDED_PREFIXES + WORKSPACE_GUARDED_PREFIXES）。
+
+    兜底不依赖 frozen_hits 的短路：cd 到冻结子目录（如 .workbench/flows/）时文本
+    命中目录条目、精确检查又比不中文件级目标，短路会让专门防 cd 的兜底自己失效。
+    只防写命令 —— 调用方在 BASH_WRITE 分支里调，`cd .claude && ls` 这类纯读放行。
+    workspace 层条目（scripts/ repos.json .vscode/）只在 workbench 布局（有 repos/）
+    下保留，与 _guarded_prefix 的生效条件一致。
+    """
+    prefixes = list(GUARDED_PREFIXES) + (
+        list(WORKSPACE_GUARDED_PREFIXES) if (root / "repos").is_dir() else [])
+    names = [p.rstrip("/") for p in prefixes]
+    return bool(re.search(
+        r"\b(?:cd|pushd)\s+(?:[^\s;|&]*/)?(?<![\w.])("
+        + "|".join(re.escape(n) for n in names)
+        + r")(?:[/\s;|&]|$)", cmd))
+
+
 def hook_pre_tool(data: dict) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input") or {}
@@ -655,10 +786,15 @@ def hook_pre_tool(data: dict) -> None:
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
         rootr = root.resolve()
-        sensitive = sensitive_shell_reads(cwd, rootr, cmd)
+        # R2 过拦修复：catastrophic / sensitive 扫剥壳后的命令。heredoc 正文不是命令
+        # 的一部分（`cat <<EOF ... EOF` 只是回显），正文里的灾难字面量（如文档里的
+        # `git push --force`）不该误拦整条命令。真正经 stdin 执行的形态
+        # （bash <<EOF / python3 -）由 _UNCERTAIN_PATTERNS / _STDIN_EXEC 单独拒。
+        scan_cmd = strip_heredocs(cmd)
+        sensitive = sensitive_shell_reads(cwd, rootr, scan_cmd)
         if sensitive:
             hook_deny("禁止读取敏感路径：" + ", ".join(sensitive))
-        why = catastrophic_command(cmd)
+        why = catastrophic_command(scan_cmd)
         if why:
             hook_deny(f"{why}。命令：{cmd[:160]}")
 
@@ -679,6 +815,13 @@ def hook_pre_tool(data: dict) -> None:
                 "它们会绕过 scripts/、repos.json、.vscode/ 的只读收窄。"
                 "初始化清单与 IDE 配置交回主线程跑。"
             )
+
+        # --- 脚本文件执行按位置收严（R2）---
+        # 执行脚本 = 脚本内容代表的全部写入，内容不在命令行里无法解析，就按位置
+        # 收严：项目根内且在该角色范围内放行；/tmp、项目根外、受守目录拒绝。
+        if data.get("agent_id") or data.get("agent_type"):
+            for raw_script, seg_cwd in _exec_script_targets(cmd, cwd):
+                _check_script_exec(seg_cwd, root, raw_script, data)
 
         # --- 争议熔断 ---
         # 任何争议哨兵存在时，developer 角色全线停工。
@@ -738,13 +881,15 @@ def hook_pre_tool(data: dict) -> None:
                     f"（这会绕过守卫与哈希校验）。{hint}"
                     f"{frozen_advice(root, hits, current_role(root, data))}命令：{cmd[:120]}"
                 )
-            # 先切目录再写的兜底：uncertain 时仍生效
-            if not mentioned and re.search(
-                    r"\b(?:cd|pushd)\s+[^\s;|&]*\.workbench\b", cleaned_cmd):
+            # 先切目录再写的兜底：不设 mentioned 短路 —— cd 到冻结子目录时文本命中
+            # `.workbench/flows/` 这类目录条目，精确检查又比不中文件级目标，短路会让
+            # 专门防 cd 的兜底自己失效（B3 实证）。覆盖全部受守目录，含 workspace 层。
+            if _cd_into_guarded(root, cleaned_cmd):
                 hook_deny(
-                    "先 cd 进 .workbench/ 再写文件这条路不通：切了目录守卫就看不到完整"
-                    "相对路径，所以整类写法一并拒绝，换 sed/tee/重定向都一样。"
-                    "状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
+                    "先 cd 进受守目录（.workbench/ .claude/ .codex/ .agents/ knowledge/ "
+                    "references/ scripts/ repos.json .vscode/）再写文件这条路不通：切了目录"
+                    "守卫就看不到完整相对路径，所以整类写法一并拒绝，换 sed/tee/重定向"
+                    "都一样。状态与进度只能用 wb.py 子命令改；改已锁定的契约先 "
                     "`wb.py contract unlock --name <契约名> --reason '<为什么要改>'` 申报"
                     "（契约名用 `wb.py contract list` 查）；写还没登记的新文件用相对"
                     f"仓库根的完整路径，别 cd。命令：{cmd[:120]}"
@@ -776,8 +921,16 @@ def hook_pre_tool(data: dict) -> None:
         role = current_role(root, data)
         if uncertain and role in ROLES:
             hook_deny("无法可靠解析 shell 写入目标，无法验证角色范围；请改用明确的文件工具或完整路径命令")
-        for rel_tgt in sorted(all_targets):
-            _check_write_target(rootr, root, rel_tgt, data)
+        # 只读文件（state.json / frozen / disputes / unlock）只在这里 memo 一次：
+        # 每个写入目标都要重读一遍，300 段命令是 6 读 + 3 次 JSON 解析每目标，
+        # 2000 段能超过 hook 的 15s timeout（端侧按非阻断处理则守卫整层失效）。
+        # 作用域只包住这个循环（hook 一次调用一个进程），异常/拒绝路径经 finally 收尾。
+        enable_memo(True)
+        try:
+            for rel_tgt in sorted(all_targets):
+                _check_write_target(rootr, root, rel_tgt, data)
+        finally:
+            enable_memo(False)
         for pat, why in WARN_BASH:
             if re.search(pat, cmd, re.IGNORECASE):
                 print(f"[工作台提示] {why}。确认这是你要的操作。")

@@ -22,6 +22,9 @@ except ImportError:  # pragma: no cover
 
 from wb_const import ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, STATE_SCHEMA, WB_VERSION
 from wb_bash import MAX_LOG, resolve
+# 模块级引用（不是 from ... import）：断言要看的 _MEMO_ON 是会被改的全局量，
+# from 导入只会拿到 import 那一刻的 False。
+import wb_core
 from wb_core import (
     INHERIT_KEYS, acquire_state_lock, artifact_path, close_unlock, find_contract,
     find_task, frozen_paths, gate_check, lease_expired, load_state, log, now,
@@ -333,6 +336,23 @@ def cmd_selfcheck(args) -> None:
         code, out = quiet("contract", "add", "../outside.json")
         assert code == 1 and "项目根" in out, \
             "越根契约必须拒绝：登记后 Bash 提它就被拦、Write 又先撞越根检查，契约无法维护"
+        # 守卫本体（权限引擎 / hook 注册表 / 角色定义）不能登记成契约：登记 + lock
+        # 之后改它要先 unlock，而解锁/冻结/哈希校验这条链自己就住在这些文件里 ——
+        # 等于把权限引擎自己的升级路径交给「先申报再改」（可恢复的治理面 DoS）。
+        for _body in (".claude/hooks/wb.py", ".codex/hooks/wb.py", ".agents/skills/x.md"):
+            code, out = quiet("contract", "add", _body)
+            assert code == 1 and "守卫本体" in out, \
+                f"守卫本体不能登记为契约（会冻结权限引擎自己的升级路径）：{_body} -> {out}"
+        # 反向：契约的既定存放位置（.workbench/contracts/，AGENTS.md 明写）不受此限，
+        # 别的受守目录（repos/**、knowledge/、references/）也不是守卫本体升级面。
+        (wb_dir(tmp) / "contracts").mkdir(parents=True, exist_ok=True)
+        (wb_dir(tmp) / "contracts" / "x.yaml").write_text("{}\n", encoding="utf-8")
+        code, out = quiet("contract", "add", ".workbench/contracts/x.yaml")
+        assert code == 0, f"契约的既定存放位置应可登记：{out}"
+        # 撤掉这份探针契约：它没锁定，留着会让后面的 design 门禁（契约已锁定）变红。
+        st_x = load_state(tmp, lock=True)
+        st_x["contracts"] = [c for c in st_x["contracts"] if c["name"] != "x"]
+        save_state(tmp, st_x)
 
         # 争议熔断：落哨兵 -> developer 写入被拦 -> bump 自动解除 -> --clear 手动解除
         code, out = quiet("contract", "dispute", "--name", "user-api",
@@ -423,6 +443,35 @@ def cmd_selfcheck(args) -> None:
         quiet("config", "set", "gate_timeout", "1800")
         quiet("config", "set", "gate_commands.test", "exit 0")
 
+        # R4：门禁命令越根引用校验 —— qa 的 config set 写入与 run_check 执行前各一道。
+        # 引用项目根外脚本/路径的门禁命令 = 借门禁名义的任意代码执行（不经 Bash 守卫），
+        # 写入时直接拒；老 state 里的存量由 run_check 执行前复筛，记 FAIL 不执行。
+        for val, allowed in [
+            ("sh /tmp/evil.sh", False),
+            ("bash ~/evil.sh", False),
+            ("python3 /tmp/evil.py", False),
+            ("npm test && sh /tmp/evil.sh", False),
+            ("pytest", True),
+            ("python3 .claude/hooks/wb.py selfcheck", True),
+            ("(cd repos/frontend && npm test) && (cd repos/backend && pytest)", True),
+        ]:
+            code, out = quiet("config", "set", "gate_commands.test", val)
+            assert (code == 0) == allowed, \
+                f"R4 config set {val!r} 期望{'放行' if allowed else '拒绝'}，实际 rc={code}：{out}"
+            if not allowed:
+                assert "拒绝写入门禁命令" in out, out
+        # 执行前复筛：绕过写入校验直接塞进 state（模拟老 state 里的存量），
+        # run_check 必须记 FAIL 且不执行 —— 脚本会打印 GATE_PWN，出现即说明跑了。
+        evil_script = Path(tempfile.mkdtemp(prefix="wb-lab-evil-")) / "evil.sh"
+        evil_script.write_text("echo GATE_PWN\n", encoding="utf-8")
+        st4 = load_state(tmp, lock=True)
+        st4["gate_commands"]["test"] = f"sh {evil_script}"
+        save_state(tmp, st4)
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert not ok and "拒绝执行" in detail and "GATE_PWN" not in detail, \
+            f"R4 run_check 复筛未拦或执行了外部脚本：{detail}"
+        quiet("config", "set", "gate_commands.test", "exit 0")
+
         # 权限守卫
         def guard(payload) -> int:
             try:
@@ -432,6 +481,33 @@ def cmd_selfcheck(args) -> None:
             return 0
 
         cw = str(tmp)
+        # 热路径的只读 memo（state.json / frozen / disputes / unlock）一次调用一份
+        # 快照：调用结束必须收尾（否则同进程后续的 load_state 一直读旧快照，CLI 的
+        # 读-改-写基于旧状态写回），下一次调用必须重新取（否则刚落盘的 dispute /
+        # unlock 窗口看不见）。selfcheck 就是同进程连续调用 hook_pre_tool 的宿主。
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo x > server/warm.py"}}) == 0
+        assert not wb_core._MEMO_ON, \
+            "hook_pre_tool 返回后 memo 仍在生效：同进程的读会拿到旧快照"
+        quiet("contract", "dispute", "--name", "user-api", "--reason", "memo 新鲜度")
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo x > server/fresh.py"}}) == 2, \
+            "第二次调用没读到刚落盘的 dispute 哨兵：memo 把上一次的快照带进来了"
+        quiet("contract", "dispute", "--clear")
+        # 争议熔断的 /tmp 豁免：命令里提到 /tmp 就放行（熔断停工与只碰 /tmp 的操作
+        # 无关）。正则曾写成 `\b/tmp/\S` —— `\b` 落在空格与 `/` 之间（两侧都是非单词
+        # 字符，交界处没有词边界）永不匹配，豁免整层失效、只碰 /tmp 的命令全被拦。
+        quiet("contract", "dispute", "--name", "user-api", "--reason", "熔断豁免检查")
+        for _exempt_cmd in ("cat /tmp/x.txt", "rm -rf /tmp/x"):
+            assert guard({"tool_name": "Bash", "cwd": cw,
+                          "agent_type": "backend-developer",
+                          "tool_input": {"command": _exempt_cmd}}) == 0, \
+                f"争议熔断下只碰 /tmp 的命令被误拦：{_exempt_cmd}"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo x > server/y.py"}}) == 2, \
+            "争议熔断未拦住产品代码写入（豁免正则不能放宽到全线）"
+        quiet("contract", "dispute", "--clear")
+        assert not read_disputes(tmp), "熔断豁免检查后应清干净争议哨兵"
         # 单仓库布局（无 repos/）：scripts/ .vscode/ 是项目自己的目录，workspace 层
         # 守卫前缀不生效（README「适配到自己的项目」的场景）。
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
@@ -486,6 +562,93 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"command": "rm -rf build/"}}) == 0, "正常 rm 被误杀"
         assert guard({"tool_name": "Bash", "cwd": cw,
                       "tool_input": {"command": "npm test"}}) == 0
+
+        # --- R2：脚本执行器不复筛内容 ---
+        # 解释器从 stdin/重定向读脚本的形态：脚本正文不在命令行里，写入目标无法解析，
+        # 对角色直接拒绝（uncertain）。`bash <<EOF` 的正文连 <<EOF 一起被剥壳，按段
+        # 看不到，由剥壳前的原文检查兜住（bash -s <<EOF 从 stdin 执行正文）。
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "python3 - <<EOF\nopen(\"x\",\"w\")\nEOF"}}) == 2, \
+            "python3 - 从 stdin 读脚本未被拒"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "bash -s <<EOF\nrm -rf /\nEOF"}}) == 2, \
+            "bash <<EOF 从 stdin 执行 heredoc 未被拒"
+        # 执行脚本文件 = 脚本内容代表的全部写入：/tmp 或项目根外的脚本对 subagent 拒绝。
+        for evil in ("bash /tmp/evil.sh", "sh /tmp/evil.sh", "source /tmp/evil.sh",
+                     ". /tmp/evil.sh"):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": evil}}) == 2, \
+                f"{evil} 执行项目根外脚本未被拒"
+        # 项目根内且在该角色范围内的脚本放行
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "node src/server.js"}}) == 0, \
+            "backend 执行自己范围内的 node 脚本被误拦"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "python3 src/tool.py"}}) == 0, \
+            "backend 执行自己范围内的 python 脚本被误拦"
+        # 过拦修复：heredoc 正文里的灾难字面量（文档示例）不该误拦整条 cat 回显
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "cat <<EOF\ngit push " + "--force\nEOF"}}) == 0, \
+            "heredoc 正文里的 git push --force 字面量误拦了 cat 回显"
+
+        # --- R3：链接文件（软链 + 硬链）---
+        # ln 的链接指向项（source）指向守卫本体/状态本身就是要拦的攻击面：同命令串联
+        # `ln -s wb.py x.py && echo pwn > x.py` 在解析期 x.py 尚不存在，追不到链，唯一
+        # 解析侧拦截点就是 source 落进守卫前缀。跨调用形态（先 ln 后写）由 Path.resolve()
+        # 追链已拦，不用单独列。
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "ln -s .claude/hooks/wb.py x.py"}}) == 2, \
+            "ln -s 软链指向守卫本体未被拒"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "ln -s .claude/hooks/wb.py x.py && echo pwn > x.py"}}) == 2, \
+            "ln -s 同命令串联写守卫本体未被拒"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "ln .workbench/flows/main/state.json innocent.md"}}) == 2, \
+            "ln 硬链指向冻结状态未被拒"
+        # 正例：指向共享目录/本仓库其他文件的正当软链不误拦
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "ln -s ../shared/lib.rs src/local.rs"}}) == 0, \
+            "backend 指向共享目录的正当软链被误拦"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "frontend-developer",
+                      "tool_input": {"command": "ln -s templates/base.html components/x.html"}}) == 0, \
+            "frontend 指向本仓库模板的正当软链被误拦"
+
+        # --- R5：写命令族 / 参数解析缺口 ---
+        # patch 的非 flag 参数就是被改的文件（补丁正文从重定向来，不在参数里）；
+        # `cp -t DIR src` 的末参数是源不是目标，写入目标是 DIR/<源文件名>；
+        # `find -delete` / `-exec` 与 `git apply` 的目标（匹配结果 / diff 正文）静态
+        # 解析不到，按 uncertain 拒；`~` 不展开时 `~/evil.py` 被当成项目内相对路径
+        # 匹配裸 `*.py`，展开后落 $HOME 由越根检查接住。
+        for bad in (
+            "patch .claude/hooks/wb.py < /tmp/p.diff",
+            "patch < /tmp/p.diff",
+            "patch -i /tmp/p.diff",
+            "cp -t .claude/hooks /tmp/x.py",
+            "cp --target-directory=.claude/hooks /tmp/x.py",
+            "cp -t.claude/hooks /tmp/x.py",
+            "mv -t .claude/hooks /tmp/x.py",
+            "install -t .claude/hooks /tmp/x.py",
+            "find . -name 'state.json' -delete",
+            "find . -name '*.py' -exec rm {} \\;",
+            "git apply /tmp/p.diff",
+            "echo x > ~/evil.py",
+        ):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": bad}}) == 2, \
+                f"R5 写命令族/参数解析缺口未闭合：{bad}"
+        # Write/Edit 工具通道同样要展开 ~，否则 `~/.claude/settings.json` 被当成
+        # 项目内的相对路径、按裸 `*.json` 放行
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "~/.claude/settings.json"}}) == 2, \
+            "Write 工具的 ~ 未展开，写 HOME 下的全局配置被放行"
+        # 正例：in-scope 的 patch / `cp -t` 目标与只读 find 不误拦
+        for ok_cmd in ("patch src/a.py < /tmp/p.diff",
+                       "patch -p1 src/a.py < /tmp/p.diff",
+                       "cp -t src /tmp/x.py",
+                       "find . -name '*.py' -print"):
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                          "tool_input": {"command": ok_cmd}}) == 0, \
+                f"R5 正常命令被误拦：{ok_cmd}"
 
         quiet("role", "set", "pm")
         assert guard({"tool_name": "Write", "cwd": cw,
@@ -1155,6 +1318,50 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"command": "echo hi > /tmp/x.txt"}}) == 0, \
             "Codex exec_command 正常命令被误杀"
 
+        # --- SHELL_TOOL 覆盖 Monitor ---
+        # Monitor 与 Bash 在同一个 shell 环境跑 tool_input.command。它不在
+        # settings.json 的 matcher 里时是整层绕过（guard 根本不加载），加进 matcher
+        # 后必须和 Bash 判得一样：多行脚本、heredoc 都走同一条
+        # strip_heredocs/_split_pipeline/resolve 路径；ws 模式没有 command，取到
+        # 空串后整条 no-op（不能崩，也不能误拦）。
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo x > .claude/hooks/wb.py",
+                                     "description": "d", "timeout_ms": 1000,
+                                     "persistent": False}}) == 2, \
+            "Monitor 写守卫本体未被拦"
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo x > /etc/evil"}}) == 2, \
+            "Monitor 越根写入未被拦"
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "echo hi"}}) == 0, \
+            "Monitor 正常命令被误杀"
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "ls"}}) == 0, \
+            "Monitor 只读命令被误杀"
+        # ws 模式载荷：{"ws": {...}}，无 command 字段
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"ws": {"url": "wss://example.com/stream",
+                                            "protocols": ["v1"]}}}) == 0, \
+            "Monitor ws 模式（无 command）被误拦或崩溃"
+        # 多行脚本：_split_pipeline 按换行切段后逐段解析，与 Bash 同一条路径
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "while true; do\n"
+                                                "  echo x > .workbench/state.json\n"
+                                                "  sleep 5\ndone",
+                                     "persistent": True}}) == 2, \
+            "Monitor 多行脚本里的冻结写入未被拦"
+        assert guard({"tool_name": "Monitor", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "while true; do\n  echo tick\n"
+                                                "  sleep 5\ndone"}}) == 0, \
+            "Monitor 多行只读循环被误杀"
+        # 主线程（无 agent_type/agent_id）按既有主线程规则：不限角色范围，冻结照拦
+        assert guard({"tool_name": "Monitor", "cwd": cw,
+                      "tool_input": {"command": "echo hi"}}) == 0, \
+            "主线程 Monitor 正常命令被误拦"
+        assert guard({"tool_name": "Monitor", "cwd": cw,
+                      "tool_input": {"command": "echo x > .workbench/state.json"}}) == 2, \
+            "主线程 Monitor 写冻结文件未被拦"
+
         # Codex 没有 Claude settings.json 的 Read deny 时，守卫仍要挡住敏感文件。
         assert guard({"tool_name": "Read", "cwd": cw,
                       "tool_input": {"file_path": ".env"}}) == 2, \
@@ -1364,6 +1571,11 @@ def cmd_selfcheck(args) -> None:
             ("frontend-developer",
              "python3 .claude/hooks/wb.py config set gate_commands.test 'npm test'"),
             ("qa", "python3 .claude/hooks/wb.py init --force --name x"),
+            # --root 让 init 在任意路径（项目外、`.claude/` 下）建状态结构，
+            # 写发生在 wb.py 进程内部，Bash 层看不到目标
+            ("qa", "python3 .claude/hooks/wb.py init --name x --root /tmp/fake-root"),
+            ("backend-developer",
+             "python3 .claude/hooks/wb.py init --name x --root=/tmp/fake-root"),
             ("architect", "python3 .claude/hooks/wb.py phase advance --force"),
             ("pm", "python3 .claude/hooks/wb.py phase set retro --reason x"),
             ("reviewer", "python3 .claude/hooks/wb.py role set backend-developer"),
@@ -1383,6 +1595,8 @@ def cmd_selfcheck(args) -> None:
             ("backend-developer", "python3 .claude/hooks/wb.py task done T1"),
             ("frontend-developer", "python3 .claude/hooks/wb.py status"),
             ("architect", "python3 .claude/hooks/wb.py contract list"),
+            # 不带 --root 的 init 只写会话根内，不在特权层拦（改动面留给主线程）
+            ("qa", "python3 .claude/hooks/wb.py init --name x"),
         ):
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
                           "tool_input": {"command": ok_wb}}) == 0, \
@@ -1784,6 +1998,28 @@ def cmd_selfcheck(args) -> None:
             "嵌套检查影响了外层自己的冻结判定"
         shutil.rmtree(tmp / "repos")
 
+        # cd 坐标系（R1）：cd / pushd 后的写入目标按新 cwd 解析 —— 守卫本体、状态、
+        # 知识库与项目根外全部闭合。其中 cd 进受守目录的整类写法由兜底直接拒，
+        # 不依赖角色范围 glob（B1/B2/B3/B11）；cd .. 越根由 resolve 的越根检查兜住
+        # （B14，lab 下父目录恰在 /tmp 时安全豁免不放行）。
+        for agent, cmd, why in [
+            ("backend-developer", "cd .claude/hooks && echo x > wb.py", "cd 进 .claude 写守卫引擎"),
+            ("frontend-developer", "cd .claude && cp /tmp/x settings.json", "cd 进 .claude 写 hook 注册表"),
+            ("backend-developer", "cd .workbench/flows/main && echo x > state.json", "cd 进状态目录写 state.json"),
+            ("reviewer", "cd knowledge && echo x > entry.md", "cd 进知识库写穿 knowledger 专属库"),
+            ("backend-developer", "cd .. && echo x > evil.md", "cd .. 越出项目根"),
+            ("backend-developer", "pushd .claude/hooks && echo x > wb.py && popd", "pushd 进守卫本体"),
+            ("backend-developer", "cd .claude && cd .. && echo x > state.json", "cd 往返后坐标系不能退回错误位置"),
+        ]:
+            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": agent,
+                          "agent_id": "cd-1",
+                          "tool_input": {"command": cmd}}) == 2, f"cd 坐标系未闭合：{why}"
+        # 正例：cd 进项目内目录写本项目文件不能误拦
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "agent_id": "cd-2",
+                      "tool_input": {"command": "cd src && echo x > src/foo.py"}}) == 0, \
+            "cd 进 src 写本项目文件被误拦"
+
         # 任务租约 / owner / attempts（#2）、自依赖拒绝（#4）、门禁豁免三态（#5）。
         # 用全新 tempdir 隔离 —— 上面的夹具可能已配 gate_commands.test，会让 run_check
         # 真去跑命令而不是走「未配置」分支，污染 #5 判定。
@@ -1891,14 +2127,70 @@ def cmd_selfcheck(args) -> None:
         code, out = quiet("status")
         assert "角色锁未设置" not in out, f"#10 已设角色锁就不该再提示：{out}"
         role_file.unlink(missing_ok=True)
+
+        # #11：role 文件是全局的，只兜底主线程与 builtin 身份（general-purpose /
+        # Explore / Plan）—— 角色 subagent 按载荷 agent_type 判定，与它无关。
+        # 两处必须成立：写要原子（非原子的 write_text 在 truncate 与 write 之间让守卫
+        # 读到空 role，`if not role: return` 让角色范围检查整层跳过），start --role-lock
+        # 设的锁要在 done 时还回去（不清则 doing 期间的锁在 done 后仍对 builtin 生效，
+        # 并行下 B 任务的 general-purpose agent 顶着 A 任务角色的范围写入）。
+        def role_content() -> str:
+            return role_file.read_text(encoding="utf-8") if role_file.is_file() else "(无)"
+
+        quiet("task", "add", "R1", "--title", "role锁", "--role", "qa", "--phase", "develop")
+        code, out = quiet("task", "start", "R1", "--role-lock")
+        assert code == 0, f"#11 start --role-lock 失败：{out}"
+        assert role_content() == "qa", f"#11 role 文件应为任务角色，实际 {role_content()!r}"
+        code, out = quiet("task", "done", "R1")
+        assert code == 0, f"#11 done 失败：{out}"
+        assert not role_file.exists(), f"#11 done 未清自己设的 role 锁：{role_content()!r}"
+
+        # 并行安全甲：锁已换成别的角色的（B 任务 start --role-lock 之后），A 任务 done
+        # 不能顺手把 B 的锁拆了 —— 内容不等即不动。
+        quiet("task", "add", "R2", "--title", "role锁A", "--role", "qa", "--phase", "develop")
+        quiet("task", "add", "R3", "--title", "role锁B",
+              "--role", "frontend-developer", "--phase", "develop")
+        quiet("task", "start", "R2", "--role-lock")
+        assert role_content() == "qa", f"#11 前置：R2 的锁应生效，实际 {role_content()!r}"
+        quiet("task", "start", "R3", "--role-lock")
+        assert role_content() == "frontend-developer", \
+            f"#11 前置：R3 的锁应覆盖，实际 {role_content()!r}"
+        quiet("task", "done", "R2")
+        assert role_content() == "frontend-developer", \
+            f"#11 R2 done 清掉了 R3 的锁（并行下会拆掉仍在 doing 的兄弟任务的锁）：{role_content()!r}"
+
+        # 并行安全乙：同角色的两个任务，内容比对分不开它们 —— A done 时 B 还在 doing，
+        # 锁必须留着，否则仍在跑的 B 从这一刻起对 builtin 身份失去约束。
+        quiet("task", "add", "R4", "--title", "role锁C",
+              "--role", "frontend-developer", "--phase", "develop")
+        quiet("task", "start", "R4", "--role-lock")
+        quiet("task", "done", "R4")
+        assert role_content() == "frontend-developer", \
+            f"#11 同角色兄弟 R3 仍在 doing，R4 done 不该清锁：{role_content()!r}"
+        quiet("task", "done", "R3")
+        assert not role_file.exists(), \
+            f"#11 同角色任务全部收工后锁该还回去：{role_content()!r}"
+
+        # role set / clear 也走同一条原子写路径：就地截断重写（write_text = truncate +
+        # write）时 inode 不变，而那条路径上守卫会读到空 role。写两次比 inode：
+        # 原子替换每次都新建 inode。
+        quiet("role", "set", "qa")
+        before_inode = role_file.stat().st_ino
+        code, out = quiet("role", "set", "backend-developer")
+        assert code == 0 and role_content() == "backend-developer", f"#11 role set 失败：{out}"
+        assert role_file.stat().st_ino != before_inode, \
+            "#11 role 文件没换 inode，说明是就地截断而不是原子替换（空窗口内守卫整层跳过）"
+        code, out = quiet("role", "clear")
+        assert code == 0 and not role_file.exists(), f"#11 role clear 后文件应消失：{out}"
         os.chdir(old)
         shutil.rmtree(tmp2, ignore_errors=True)
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / 权限守卫 / "
-          "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / "
+          "包装前缀 / 守卫本体 / 特权子命令 / 契约 owner / 空范围 / sed 目标 / 写命令族 / "
           "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
-          "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / skills 双份同步")
+          "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / role 原子写与清理 / "
+          "skills 双份同步")
 
 

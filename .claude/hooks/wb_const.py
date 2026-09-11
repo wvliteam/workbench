@@ -230,7 +230,10 @@ BASH_WRITE = re.compile(
 WRITE_TOOL = re.compile(
     r"Write|Edit|MultiEdit|NotebookEdit|"
     r"apply_patch|write_file|edit_file", re.I)
+# Monitor：与 Bash 同一个 shell 环境跑 tool_input.command（ws 模式无 command，
+# 取到空串后在 pre/post 两侧自然 no-op）。它的 command 是完整脚本字符串（多行、
+# 可含 heredoc），下游 strip_heredocs/_split_pipeline/resolve 与 Bash 同一条路径。
 SHELL_TOOL = re.compile(
-    r"Bash|shell|exec_command|unified_exec", re.I)
+    r"Bash|Monitor|shell|exec_command|unified_exec", re.I)
 READ_TOOL = re.compile(r"^(?:Read|read_file|file_read)$", re.I)
 
