@@ -1,8 +1,11 @@
 # 运行时状态：每个项目 wb.py init 时自己生成，不属于工作台本体
 .workbench/
 
-# clone 进来的代码库各有自己的远程
-repos/
+# clone 进来的代码库各有自己的远程；repos/index.md 是仓库索引、repos/notes/ 是单仓
+# 稳定事实（职责/启动/测试），都是工作区材料，要进版本，其余内容忽略
+repos/*
+!repos/index.md
+!repos/notes/
 
 # Claude Code 本地覆盖配置
 .claude/settings.local.json

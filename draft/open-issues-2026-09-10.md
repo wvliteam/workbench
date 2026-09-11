@@ -1,5 +1,7 @@
 # 待修复问题清单（2026-09-10，2026-09-10 复查已修复 6 项）
 
+> 2026-09-11 修订：`wb.py` 已拆为薄入口 + 六模块（fe3df75），文内行号引用一律改为函数/常量所在模块。文首提到的核对对象「`.claude/hooks/wb.py`」现指 `.claude/hooks/` 整目录（wb_const / wb_bash / wb_core / wb_guard / wb_cli / wb_selfcheck）。
+
 汇总此前多份评估/审查文档（`framework-assessment.md`、`code-review-2026-09-09.md`、`docs/architecture.md`「已知边界与升级路径」）里提出、且经本次逐条对照当前代码（`.claude/hooks/wb.py`、`scripts/repos_apply.py`、`scripts/repos_tui.py`）核实**仍未修复**的问题。已在 `3bd493e`、`92b6dfb`、`17f6d1b` 等提交中修复的项不再重复列出（如 `.codex/hooks/wb.py` 软链已跟踪、`repos_apply.py`/`repos_tui.py` 已加脚本执行拒绝、`repos.json` 已精确匹配、任务租约/owner/attempts/自依赖已实现、状态 schema version 已加、TUI 数据丢失三项已修）。
 
 **更新（同日晚些时候）：P0 两项、P1 两项（waiver 展示、循环依赖前提固化）、P2 两项（强推硬确认、审计留存）共 6 项已按短期方案落地，selfcheck 新增 #6-#9 断言覆盖。仍未处理：P1「契约只校验哈希不校验语法」、P2「fnmatch 路径匹配偏宽松」——这两项文档已承认是需要挂到项目自身 `gate_commands.lint` 或另需架构级取舍的问题，本次不动。逐项状态见每节标题后的标记。**
@@ -19,7 +21,7 @@
 **证据**：
 - `framework-assessment.md:61-63`（"门禁命令仍在本地执行，编排者同时选择命令、执行命令和判断结果...门禁更像流程约束而不是不可伪造的质量证明"）
 - 门禁命令实现是 `shell=True` 的 subprocess（`docs/architecture.md` 提及，代码位置 `.claude/hooks/wb.py` 的 `run_check` 中 `kind == "cmd"` 分支），执行结果只落 `state.json` 与 `gate-<键>.log`，没有任何外部可验证的证据链（如 CI 运行 ID、签名、时间戳服务）。
-- 当前 `state_rev` compare-and-swap（`wb.py:1758-1766` 附近）解决的是"门禁结论与状态是否同步"，不解决"门禁命令本身是否被诚实执行"。这是两个不同层面的问题，CAS 机制不能替代独立证明。
+- 当前 `state_rev` compare-and-swap（`wb_cli.py` 的 `cmd_phase` advance 分支）解决的是"门禁结论与状态是否同步"，不解决"门禁命令本身是否被诚实执行"。这是两个不同层面的问题，CAS 机制不能替代独立证明。
 
 **影响**：编排者（无论是被误导的模型还是恶意调用者）可以谎报门禁命令的执行结果，或选择一个总是通过的门禁命令，流程完全无法察觉。在"不完全信任调用者"的威胁模型下，这是当前控制面最大的单点缺口。
 
@@ -30,17 +32,17 @@
 
 **验证方式**：新增 selfcheck 断言，模拟门禁命令谎报退出码的场景，确认当前机制确实无法检测（作为回归基线），再逐步补齐检测手段后更新断言。
 
-**处理结果（2026-09-10）**：核实 `run_check` 的 `_record` 闭包（`wb.py:1405-1408`）已经完整捕获 `stdout+stderr` 与退出码写入 `gate-<键>.log`，短期方案第1点原本就已满足，文档描述过期。新增 `print_gate`（`wb.py:1455`）的注释说明 detail 里已嵌日志路径，人工抽查不需要重跑命令。中期（外部 CI attestation）与长期（隔离执行 + 签名）方案涉及架构级取舍，本次不动，仍是待办。
+**处理结果（2026-09-10）**：核实 `run_check` 的 `_record` 闭包（`wb_core.py` 的 `run_check`）已经完整捕获 `stdout+stderr` 与退出码写入 `gate-<键>.log`，短期方案第1点原本就已满足，文档描述过期。新增 `print_gate`（`wb_core.py` 导出）的注释说明 detail 里已嵌日志路径，人工抽查不需要重跑命令。中期（外部 CI attestation）与长期（隔离执行 + 签名）方案涉及架构级取舍，本次不动，仍是待办。
 
 ---
 
 ## P0：CLI 缺少调用者授权矩阵与字段级白名单 —— ✅ 短期方案已落地
 
-**背景**：`config set` 可以修改任意 dotted key（`cmd_config`，`.claude/hooks/wb.py:2509`），只对 `gate_commands.*` 做了灾难命令拦截（`catastrophic_command` 检查），其余字段（`role_scopes.*`、`max_parallel`、`gate_waivers.*` 等）没有独立的字段级合法性校验——合法性依赖上层 `hook_pre_tool` 的角色特权判断（`privileged_wb_calls`），但特权判断本身是一张按命令名匹配的表，不是按字段内容做类型/范围校验。
+**背景**：`config set` 可以修改任意 dotted key（`cmd_config`，`wb_cli.py`），只对 `gate_commands.*` 做了灾难命令拦截（`catastrophic_command` 检查），其余字段（`role_scopes.*`、`max_parallel`、`gate_waivers.*` 等）没有独立的字段级合法性校验——合法性依赖上层 `hook_pre_tool` 的角色特权判断（`privileged_wb_calls`），但特权判断本身是一张按命令名匹配的表，不是按字段内容做类型/范围校验。
 
 **证据**：
 - `framework-assessment.md:49-59`（"本地 `config set`、阶段操作和任务操作仍需要明确的调用者矩阵与受保护字段约束"）
-- `cmd_config`（`.claude/hooks/wb.py:2509`）：`dotted_set(st, args.key, val)` 对任意 `args.key` 生效，没有针对 key 本身的白名单校验，只在 `gate_commands.` 前缀时做内容安全检查（灾难命令），其余 key（如伪造一个 `phases.develop.gates` 之类的路径）没有结构校验，只受角色特权层拦截。
+- `cmd_config`（`wb_cli.py`）：`dotted_set(st, args.key, val)` 对任意 `args.key` 生效，没有针对 key 本身的白名单校验，只在 `gate_commands.` 前缀时做内容安全检查（灾难命令），其余 key（如伪造一个 `phases.develop.gates` 之类的路径）没有结构校验，只受角色特权层拦截。
 - 主线程（无 `agent_type`）不受特权层限制，可以对任意字段调用 `config set`，这是设计的一部分（主线程是可信调用者），但如果威胁模型扩展到"主线程本身可能被提示注入误导"，这一层就没有第二道防线。
 
 **影响**：特权判断层（`privileged_wb_calls`）与字段级白名单是两个独立的防御层，当前只有前者。一旦特权判断的命令名匹配逻辑出现遗漏（新增字段忘记登记），或者主线程被诱导执行不合理的 `config set`，没有字段级校验能兜底。
@@ -52,7 +54,7 @@
 
 **验证方式**：selfcheck 增加对未登记字段调用 `config set` 应被拒绝的断言；对已登记字段的非法类型/越界值调用应被拒绝的断言。
 
-**处理结果（2026-09-10）**：新增 `CONFIG_SCHEMA` 常量（`wb.py:534-543`，元组列出 `gate_commands.`/`gate_waivers.`/`role_scopes.`/`allowed_skills`/`max_parallel`/`gate_timeout`/`task_lease` 七项，前缀项以 `.` 结尾覆盖 dotted 子键）与 `config_key_allowed()` 辅助函数（`wb.py:545-546`）。`cmd_config` 的 `set` 分支（`wb.py:2577-2580`）在 `dotted_set` 之前先过一遍白名单，不在表里直接 `die`，即使调用者是主线程。selfcheck 新增断言 `#6`：未登记字段 `some_未登记字段` 被拒且报错文本含 `CONFIG_SCHEMA`；已登记字段 `max_parallel` 正常放行。第3点"语义校验"（如 role_scopes 不能被清空覆盖成通配）本次未做，`DEFAULT_ROLE_SCOPES` 的兜底逻辑覆盖到什么程度需要单独复核，标记为后续可选项。
+**处理结果（2026-09-10）**：新增 `CONFIG_SCHEMA` 常量（`wb_bash.py:302`，元组列出 `gate_commands.`/`gate_waivers.`/`role_scopes.`/`allowed_skills`/`max_parallel`/`gate_timeout`/`task_lease` 七项，前缀项以 `.` 结尾覆盖 dotted 子键）与 `config_key_allowed()` 辅助函数（`wb_bash.py:313`）。`cmd_config` 的 `set` 分支（`wb_cli.py`）在 `dotted_set` 之前先过一遍白名单，不在表里直接 `die`，即使调用者是主线程。selfcheck 新增断言 `#6`：未登记字段 `some_未登记字段` 被拒且报错文本含 `CONFIG_SCHEMA`；已登记字段 `max_parallel` 正常放行。第3点"语义校验"（如 role_scopes 不能被清空覆盖成通配）本次未做，`DEFAULT_ROLE_SCOPES` 的兜底逻辑覆盖到什么程度需要单独复核，标记为后续可选项。
 
 ---
 
@@ -62,7 +64,7 @@
 
 **证据**：
 - `framework-assessment.md:71-73`（"未配置 `gate_commands.test/lint/build` 时命令检查会跳过...未配置、明确不适用和已通过应当是不同状态"）
-- 代码中已有 `gate_waivers.*` 的雏形（`.claude/hooks/wb.py:1383-1390` 附近的错误提示已经提到 `config set gate_waivers.<名> '<理由>'`），说明设计上已经预留了 waiver 机制的接口，但从 `run_check` 的实际分支看，"未配置"与"已配置 waiver"两种状态目前在门禁展示上没有区分——都表现为"跳过"。
+- 代码中已有 `gate_waivers.*` 的雏形（`wb_core.py` 的 `run_check` cmd 分支，错误提示已经提到 `config set gate_waivers.<名> '<理由>'`），说明设计上已经预留了 waiver 机制的接口，但从 `run_check` 的实际分支看，"未配置"与"已配置 waiver"两种状态目前在门禁展示上没有区分——都表现为"跳过"。
 
 **影响**：项目接入时如果忘记配置 `gate_commands.test`，门禁会静默放行，且没有任何日志或状态标记提示"这里从未配置过，不是被判定为不需要"。长期运行的项目容易在"忘配置"和"确认不需要"之间产生混淆，尤其是新负责人接手时无法从 `status` 输出判断历史决策依据。
 
@@ -73,7 +75,7 @@
 
 **验证方式**：selfcheck 增加分别覆盖 `unconfigured`、`waived-explicit`、`configured-pass`、`configured-fail` 四种状态展示是否可区分的断言。
 
-**处理结果（2026-09-10）**：核实 `gate_waivers` **已被 `run_check` 消费**（`wb.py:1385-1390`），文档第 3 点"如果尚未消费需要接入"的表述过期，只有第 1、2 点（三态展示区分）是真缺口——`cmd_status`/`cmd_report` 原来都只区分 passed/forced 二态，不展示 waiver 理由或未配置提示。修复：`cmd_status` 里新增一段（`wb.py:1670-1683`），遍历 `GATES` 表里全部 `cmd:` 断言，与 `gate_commands`/`gate_waivers` 比对后分两行展示"豁免门禁：<key>（理由）"与"⚠ 未配置门禁（隐形放行，不代表不需要）：<keys>"。selfcheck 新增断言 `#5b`：豁免的门禁在 status 里能看到理由文本，未配置的门禁（lint）能看到警告提示。`configured-pass`/`configured-fail` 两态本来就在 `!`/`v` 标记里可见，不需要额外处理。
+**处理结果（2026-09-10）**：核实 `gate_waivers` **已被 `run_check` 消费**（`wb_core.py` 的 `run_check` cmd 分支），文档第 3 点"如果尚未消费需要接入"的表述过期，只有第 1、2 点（三态展示区分）是真缺口——`cmd_status`/`cmd_report` 原来都只区分 passed/forced 二态，不展示 waiver 理由或未配置提示。修复：`cmd_status`（`wb_cli.py`）里新增一段，遍历 `GATES` 表里全部 `cmd:` 断言，与 `gate_commands`/`gate_waivers` 比对后分两行展示"豁免门禁：<key>（理由）"与"⚠ 未配置门禁（隐形放行，不代表不需要）：<keys>"。selfcheck 新增断言 `#5b`：豁免的门禁在 status 里能看到理由文本，未配置的门禁（lint）能看到警告提示。`configured-pass`/`configured-fail` 两态本来就在 `!`/`v` 标记里可见，不需要额外处理。
 
 ---
 
@@ -99,11 +101,11 @@
 
 ## P1：任务图缺少循环依赖检测（仅自依赖已挡） —— ✅ 前提已核实并固化为回归断言
 
-**背景**：`task add` 目前只拒绝任务依赖自己（`wb.py:1932-1933`，"任务 T1 不能依赖自己"），但没有检测多节点环（如 T1 依赖 T2，T2 依赖 T1，或更长的环）。
+**背景**：`task add` 目前只拒绝任务依赖自己（`cmd_task` 的 add 分支，"任务 T1 不能依赖自己"），但没有检测多节点环（如 T1 依赖 T2，T2 依赖 T1，或更长的环）。
 
 **证据**：
-- `task_dependency_errors`（`.claude/hooks/wb.py:1133`）与 `cmd_task` 的 `add` 分支（`wb.py:1931-1936`）：依赖校验只做两件事——依赖不能是自己、依赖的任务必须已存在（"依赖的任务 X 不存在"）。因为要求依赖必须先存在才能被引用，两节点及以上的环理论上无法通过"正常添加顺序"构造出来（T2 若要依赖 T1，T1 必须先存在；此时 T1 不可能同时依赖尚不存在的 T2）。
-- selfcheck 里的注释也印证了这一点（`wb.py:5212`："任务不能依赖自己（唯一的图漏洞——依赖必须先存在已挡住环与悬空依赖）"），即当前设计依赖"添加时必须引用已存在任务"这一约束来隐式防止环，并非显式的图算法检测。
+- `task_dependency_errors`（`wb_core.py:657`）与 `cmd_task` 的 `add` 分支：依赖校验只做两件事——依赖不能是自己、依赖的任务必须已存在（"依赖的任务 X 不存在"）。因为要求依赖必须先存在才能被引用，两节点及以上的环理论上无法通过"正常添加顺序"构造出来（T2 若要依赖 T1，T1 必须先存在；此时 T1 不可能同时依赖尚不存在的 T2）。
+- selfcheck 里的注释也印证了这一点（`wb_selfcheck.py` 的自依赖断言："任务不能依赖自己（唯一的图漏洞——依赖必须先存在已挡住环与悬空依赖）"），即当前设计依赖"添加时必须引用已存在任务"这一约束来隐式防止环，并非显式的图算法检测。
 
 **影响**：只要任务图的构造路径严格遵守"先创建被依赖方，再创建依赖方"，隐式约束确实能杜绝环。但这依赖两个前提：(1) 没有后续修改依赖关系的命令能绕过这个顺序约束；(2) 未来如果引入"编辑已有任务的依赖列表"这类命令，需要重新显式做环检测，否则隐式约束会被绕开。当前代码没有独立于"创建顺序"的环检测算法，一旦以后新增编辑依赖的入口，环检测就会出现真空。
 
@@ -119,7 +121,7 @@
 
 ## P2：路径匹配偏宽松（`fnmatch` 跨 `/`） —— 仍未处理（文档已承认是有意设计取舍）
 
-**背景**：角色写入范围校验用 `fnmatch.fnmatch(rel, pattern)`（`.claude/hooks/wb.py:2967`、`:4290`），Python 的 `fnmatch` 把 `*` 编译成 `.*`，会跨越路径分隔符 `/`。
+**背景**：角色写入范围校验用 `fnmatch.fnmatch(rel, pattern)`（`wb_guard.py` 的角色范围检查），Python 的 `fnmatch` 把 `*` 编译成 `.*`，会跨越路径分隔符 `/`。
 
 **证据**：
 - `docs/architecture.md:287-295`："`*.css` 也匹配 `web/theme/a.css`，`src/**` 匹配任意深度...**要严格匹配**：换成 `pathlib.PurePath.full_match()`（Python 3.13+）或引入 `wcmatch.globmatch`。改动在 `hook_pre_tool` 一处"
@@ -142,7 +144,7 @@
 
 **证据**：
 - `docs/architecture.md:301-305`："`phase advance --force` 直接生效，只写日志和交付报告。「先问用户」是 `wb-flow` skill 里的约定，不是代码约束...要硬约束：在 `cmd_phase` 的 force 分支加环境变量门（如要求 `WB_ALLOW_FORCE=1`），让强推必须由人在 shell 里显式开。约 5 行"
-- 确认当前代码 `cmd_phase` 的 force 分支（`.claude/hooks/wb.py:1723` 附近）没有任何环境变量或额外确认步骤，`args.force` 为真即直接放行（`wb.py:1767` 附近 "`if not passed and not args.force: die(...)`"，反之则直接继续执行推进）。
+- 确认当时代码 `cmd_phase` 的 force 分支没有任何环境变量或额外确认步骤，`args.force` 为真即直接放行（"`if not passed and not args.force: die(...)`"，反之则直接继续执行推进）。
 
 **影响**：如果某个角色或被误导的编排者错误地拼出 `--force` 参数（哪怕只是复制粘贴错误），阶段会被无声推进，唯一的事后线索是日志里的 `forced: true` 标记，没有事前拦截。虽然 `--force` 本身已经被特权命令层限制（只有主线程/特定角色能跑），但主线程本身的误操作没有第二道防线。
 
@@ -150,17 +152,17 @@
 
 **验证方式**：selfcheck 增加断言：不设置 `WB_ALLOW_FORCE` 时 `--force` 应被拒绝；设置后应正常生效。
 
-**处理结果（2026-09-10）**：按文档给出的方案原样落地。`cmd_phase` 的 advance 分支（`wb.py:1818-1825`）在门禁结果打印之后、`die`/推进之前插入检查：`args.force` 为真但环境变量 `WB_ALLOW_FORCE` 未设置时直接拒绝，报错提示需要在 shell 里先 `export WB_ALLOW_FORCE=1`。selfcheck 新增断言 `#7`：未设变量时 `--force` 被拒且报错含 `WB_ALLOW_FORCE`；设置后 `--force` 正常生效。原有的 selfcheck 场景（`quiet("phase", "advance", "--force")`，约原 4477 行）同步改为先设变量再调用，否则该断言本身会因为新加的环境变量门而失败。
+**处理结果（2026-09-10）**：按文档给出的方案原样落地。`cmd_phase` 的 advance 分支（`wb_cli.py:250` 附近）在门禁结果打印之后、`die`/推进之前插入检查：`args.force` 为真但环境变量 `WB_ALLOW_FORCE` 未设置时直接拒绝，报错提示需要在 shell 里先 `export WB_ALLOW_FORCE=1`。selfcheck 新增断言 `#7`：未设变量时 `--force` 被拒且报错含 `WB_ALLOW_FORCE`；设置后 `--force` 正常生效。原有的 selfcheck 场景（`quiet("phase", "advance", "--force")`）同步改为先设变量再调用，否则该断言本身会因为新加的环境变量门而失败。
 
 ---
 
 ## P2：日志尾部截断，无完整审计留存 —— ✅ 已落地
 
-**背景**：`state.json` 里的 `log` 字段只保留最后 500 条（`MAX_LOG = 500`，`.claude/hooks/wb.py:532`），超出部分直接丢弃，长期项目早期的操作记录会永久丢失，复盘时看不到全程。
+**背景**：`state.json` 里的 `log` 字段只保留最后 500 条（`MAX_LOG = 500`，`wb_bash.py:294`），超出部分直接丢弃，长期项目早期的操作记录会永久丢失，复盘时看不到全程。
 
 **证据**：
 - `docs/architecture.md:307-311`："`log` 只保留最后 500 条...长项目早期的记录会丢，复盘时看不到全程。**要完整审计**：改成追加写 `.workbench/audit.jsonl`，`state.json` 里只留最近 500 条做快速查看。约 10 行"
-- 代码确认：`st["log"] = st["log"][-MAX_LOG:]`（`wb.py:749`），截断逻辑直接丢弃旧记录，没有任何归档动作。
+- 代码确认：`st["log"] = st["log"][-MAX_LOG:]`（`wb_core.py` 的 `save_state`），截断逻辑直接丢弃旧记录，没有任何归档动作。
 
 **影响**：对于运行时间较长、任务量较大的工作台实例，早期决策（比如为什么某个契约被 `unlock` 过、为什么某次 `phase set` 回退）的记录会被静默冲刷掉，复盘阶段（retro）如果需要回顾全程会缺失关键证据链。这与工作台"契约冻结留痕"的设计初衷存在张力——冻结机制保证内容不丢，但决策过程的日志会丢。
 
@@ -168,21 +170,41 @@
 
 **验证方式**：selfcheck 增加断言：写入超过 500 条日志后，`audit.jsonl` 应包含全部记录，`state.json.log` 应只保留最近 500 条。
 
-**处理结果（2026-09-10）**：按文档方案落地，并补了文档未提及的一个安全细节。`save_state`（`wb.py:771-800`）在截断 `st["log"]` 之前，用 `load_state` 时记录的 `_log_len_before`（下划线前缀，不落盘、不参与字段补齐，见 `wb.py:764-766`）算出本次新增的日志条目，追加写入同 flow 目录下的 `audit.jsonl`（append-only，`"a"` 模式打开）。**额外修复**：新文件本身也需要冻结保护，否则角色能用 Bash 直接篡改审计记录反而制造新漏洞——把 `"audit.jsonl"` 加进 `FROZEN_ALWAYS`（`wb.py:238`），`frozen_paths()` 与 `_check_write_target` 的冻结判断因此自动覆盖它，不需要改守卫函数本身。selfcheck 新增断言 `#8`：写入 510 条日志后 `audit.jsonl` 全部保留、`state.json.log` 仍截断在 500 条以内、且角色 Bash 重定向追加 `audit.jsonl` 被拒。
+**处理结果（2026-09-10）**：按文档方案落地，并补了文档未提及的一个安全细节。`save_state`（`wb_core.py`）在截断 `st["log"]` 之前，用 `load_state` 时记录的 `_log_len_before`（下划线前缀，不落盘、不参与字段补齐）算出本次新增的日志条目，追加写入同 flow 目录下的 `audit.jsonl`（append-only，`"a"` 模式打开）。**额外修复**：新文件本身也需要冻结保护，否则角色能用 Bash 直接篡改审计记录反而制造新漏洞——把 `"audit.jsonl"` 加进 `FROZEN_ALWAYS`（`wb_const.py`），`frozen_paths()` 与 `_check_write_target` 的冻结判断因此自动覆盖它，不需要改守卫函数本身。selfcheck 新增断言 `#8`：写入 510 条日志后 `audit.jsonl` 全部保留、`state.json.log` 仍截断在 500 条以内、且角色 Bash 重定向追加 `audit.jsonl` 被拒。
 
 ---
+
+## P0（新发现，2026-09-12）：角色写入范围层曾被重构删掉，现已恢复 —— 仍有两层未恢复
+
+**代码事实**：`d606944`（refactor: unify workbench sources and preserve local guard）从 `wb_guard.py` 删掉 536 行、`wb_selfcheck.py` 删掉 770 行，`role_scopes` 从此只被计算与展示，不再参与任何写入判定；selfcheck 当时改成断言这层不存在（`"角色范围不应由 Workflow Guard 拦截"`）。实测复核过：模拟载荷 `agent_type=pm` 写 `server/x.py`，退出码 0。
+
+**2026-09-12 已恢复**（按 `d606944^` 的实现回移后再按用户的边界收窄）：角色范围判定（`_role_scope_allows` + `_guarded_prefix`，受守前缀只认显式前缀模式、显式空清单 = 什么都不能写、缺 key 回落默认值）、调用者三态（角色名 / 内置白名单退回 role 文件 / 陌生 `agent_type` 与 `agent_id`-only 判 `UNKNOWN_ROLE` 拒写）、`references/workspace/<角色>/` 私有目录例外、`repos_apply.py` / `repos_tui.py` 非主线程硬拒。
+
+**边界（用户 2026-09-12 定调）**：角色范围**只对工作流核心路径强制执行** —— 受守前缀（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/` + 多仓库布局下的 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`）。核心路径之外一律不判：仓库代码、`/tmp`、项目根外。理由：这些是开发常态动作，且「别乱写文件、别乱执行脚本」属于 harness 层与模型层的规范，不是工作台的职责 —— 守卫的目标是保证工作流本身能推进，不是给编码过程当警察。
+
+因此以下**有意不做**（不是待恢复项）：
+
+- **越根写 / 越根执行**：`_check_write_target` 不再判「目标是否在项目根内」，`_exec_script_targets` / `_check_script_exec`（按位置收严脚本执行）整体移除，`uncertain` 的动态命令也不再对 subagent 一律拒绝。
+- **仓库代码的角色判定**：`pm` 写 `server/x.py`、后端写前端仓库这类不拦（`repo_layout_scopes` 的按仓库认领仍然生成范围表、仍供 `unclaimed_repos` 提示认领，但不再是写入门槛）。
+
+**仍未恢复的两层**（同样被 `d606944` 删掉，需要单独决定）：
+
+- **skill 白名单**（`allowed_skills`）：角色当前可以调任意 skill。
+- **非主线程工具管控**（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）：角色当前可以自己排任务、派生 worker、对外发布。
+
+**与文档的冲突面**：`AGENTS.md`「权限守卫」节、`docs/permissions.md`（第四层已按新边界重写；skill 审核门与非主线程工具节标了「待恢复」）、`docs/roles.md` 的角色矩阵（已加边界注）、`docs/architecture.md`「三件事让它成立」表 —— 角色范围那层已与代码一致。
 
 ## 已确认修复、无需再跟踪的项（供交叉核对）
 
 以下项经代码核实已在 `3bd493e`、`92b6dfb` 等提交中修复，不再列入本清单，仅记录以避免重复排查：
 
 - `.codex/hooks/wb.py` 未跟踪软链问题 → 已 `git add`，`git ls-files` 确认已跟踪
-- `repos_apply.py`/`repos_tui.py` 脚本执行绕过守卫 → `GUARDED_SCRIPTS` 常量 + 专门拒绝逻辑已加（`wb.py:2999` 起）
+- `repos_apply.py`/`repos_tui.py` 脚本执行绕过守卫 → `GUARDED_SCRIPTS` 常量 + 专门拒绝逻辑已加（`wb_guard.py:442` 起）
 - `repos.json` 文件名前缀过宽匹配 `repos.json5`/`repos.json.bak` → `WORKSPACE_GUARDED_PREFIXES` 已用精确匹配
-- `scripts/`/`.vscode/` 硬编码全局保留误伤单项目场景 → 已条件化于 `(root / "repos").is_dir()`（`wb.py:2870`）
+- `scripts/`/`.vscode/` 硬编码全局保留误伤单项目场景 → 已条件化于 `(root / "repos").is_dir()`（`wb_guard.py:313`）
 - TUI 静默销毁损坏清单、丢失顶层 key、Backspace 后清空默认值 → `repos_tui.py` 的 `load_entries`/`save_entries`/`replaced` 标志已分别修复
 - `materialize` 不比对 remote 导致换仓库地址后 clone 不生效 → 已加 `git remote get-url origin` 比对（`repos_apply.py:130-135`）
 - `derive_name` 对 SCP 风格 remote 整串返回 → 已加冒号后段派生逻辑（`repos_apply.py:64-73`）
 - 任务租约（`lease_until`）、`owner`、`attempts`、`start → doing → done/blocked` 状态机、自依赖拒绝、门禁豁免三态雏形 → 已在 `92b6dfb` 落地
-- `state.json` schema version 校验（拒绝比代码更新的 state） → 已加 `STATE_SCHEMA`（`wb.py:47`）
+- `state.json` schema version 校验（拒绝比代码更新的 state） → 已加 `STATE_SCHEMA`（`wb_const.py`）
 - `next` 停机判定未纳入 stale 任务 → 已在 `17f6d1b` 修复

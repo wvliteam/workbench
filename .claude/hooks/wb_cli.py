@@ -23,13 +23,16 @@ from wb_const import (
 )
 from wb_bash import CONFIG_SCHEMA, catastrophic_command, config_key_allowed
 from wb_core import (
-    DEFAULT_FLOW, _FLOW_NAME, all_flows, artifact_path, close_dispute, close_unlock,
+    DEFAULT_FLOW, ORIENTATION_TITLE, REPO_NOTE_DIR, _FLOW_NAME, all_flows, artifact_path,
+    close_dispute, close_unlock,
     contract_binding, contract_drift, contract_ref_name, contract_revision, default_state,
-    die, dotted_get, dotted_set, find_contract, find_root, find_task, flow_dir,
+    die, dotted_get, dotted_set, ensure_repo_orientation_tasks, find_contract, find_root,
+    find_task, flow_dir,
     flow_override, gate_check, inherit_flow_config, knowledge_entries, lease_expired,
     load_state, log, now, pointer_flow, print_gate, read_current_flow, read_disputes,
     read_frozen, read_unlock_records, read_unlocks, ready_tasks, refresh_task_contracts,
-    release_state_lock, repo_layout_scopes, save_state, set_current_flow,
+    release_state_lock, repo_claims, repo_index_issues, repo_layout_scopes, repo_names,
+    repo_note_issues, read_repos_manifest, save_state, set_current_flow,
     set_flow_override, sha256_file, state_path, task_binding_for_name, task_check_errors,
     task_contract_names, task_dependency_errors, unclaimed_repos, wb_dir,
     normalize_write_scopes, select_task_batch,
@@ -54,6 +57,9 @@ def cmd_init(args) -> None:
     if scopes:
         st["role_scopes"] = scopes
     inherited = inherit_flow_config(root, st, flow)
+    # 仓库画像任务在这里建：工作区一落地就该摸清每个仓库（怎么跑、怎么测、坑在哪），
+    # 与任何需求无关。需求的 analyze 覆盖不到整仓，所以这批必须独立派。
+    orientation = ensure_repo_orientation_tasks(root, st)
     log(st, "init", project=st["project"], flow=flow,
         **({"inherited_from": inherited} if inherited else {}))
     save_state(root, st)
@@ -73,6 +79,15 @@ def cmd_init(args) -> None:
         print("门禁命令也要各自 cd：config set gate_commands.test "
               "'(cd repos/frontend && npm test) && (cd repos/backend && pytest)'")
         print_unclaimed(root, scopes)
+    if orientation:
+        # 这批任务不属于任何需求，也不该等需求到位 —— 现在就派，一个仓库一个 analyst。
+        print(f"\n已建 {len(orientation)} 个仓库画像任务："
+              + ", ".join(f"{t['id']}（{t['title'][len(ORIENTATION_TITLE):]}）" for t in orientation))
+        print("**初始化后先派这批**（每个仓库一份稳定事实：职责 / 启动 / 测试，落到 "
+              f"{REPO_NOTE_DIR}/<仓库>.md）：需求驱动的 analyze 只看需求相关的那部分代码，"
+              "产不出整仓画像，所以它们是独立任务，别并进需求的 analyze。")
+        print("派发：`wb.py task start <ID>` 交给 analyst（可并行），完成后 "
+              "`wb.py task done <ID>`；analyze 门禁 repos_notes_exist 会兜底点名漏掉的仓库。")
 
 
 def print_unclaimed(root: Path, scopes: dict[str, list[str]]) -> None:
@@ -128,6 +143,21 @@ def cmd_status(args) -> None:
         print("豁免门禁：" + ", ".join(f"{k}（{v}）" for k, v in waivers.items()))
     if unconfigured:
         print(f"⚠ 未配置门禁（隐形放行，不代表不需要）：{', '.join(unconfigured)}")
+
+    # 仓库地图：多仓库布局下编排者第一件事是确认「哪个库归谁写、是干什么的」。
+    # 认领从 role_scopes 现算（不建存储），一句话说明来自 repos/index.md 与清单。
+    repos = repo_names(root)
+    if repos:
+        claims = repo_claims(root, st.get("role_scopes") or {})
+        descs = read_repos_manifest(root)
+        bits = []
+        for n in repos:
+            who = ",".join(claims.get(n) or []) or "⚠未认领"
+            d = f"（{descs[n]}）" if descs.get(n) else ""
+            bits.append(f"{n}{d}→{who}")
+        print("仓库：" + "、".join(bits) + "　（repos/，认领按目录名，详见 role scopes）")
+        for issue in repo_index_issues(root) + repo_note_issues(root):
+            print(f"⚠ {issue}")
 
     by_status: dict[str, int] = {}
     for t in st["tasks"]:
@@ -934,6 +964,18 @@ def cmd_role(args) -> None:
             print(f"\n  {r}")
             for g in globs:
                 print(f"    {g}")
+        names = repo_names(root)
+        if names:
+            claims = repo_claims(root, st["role_scopes"])
+            descs = read_repos_manifest(root)
+            print("\n仓库（repos/ 下按目录名认领；职责一句话写在 repos/index.md，"
+                  "稳定事实在 repos/notes/<仓库>.md）：")
+            for n in names:
+                who = ", ".join(claims.get(n) or []) or "⚠ 未认领"
+                note = "" if (root / "repos" / "notes" / f"{n}.md").is_file() else "  ⚠ 缺笔记"
+                print(f"  {n:<20} {who:<34} {descs.get(n, '')}".rstrip() + note)
+            for issue in repo_index_issues(root) + repo_note_issues(root):
+                print(f"  ⚠ {issue}")
         print_unclaimed(root, st["role_scopes"])
         print("\n冻结文件（任何角色都不能用工具直接写）：")
         for fr in read_frozen(root):

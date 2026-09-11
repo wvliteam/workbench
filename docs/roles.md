@@ -19,7 +19,7 @@
 | 角色 | 阶段 | 产出 | 可写 | 模型 |
 | --- | --- | --- | --- | --- |
 | `pm` | clarify | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
-| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` | `artifacts/*/analyze/**` | sonnet |
+| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` + `repos/notes/<仓库>.md`（跨需求复用的稳定事实：职责 / 启动 / 测试） | `artifacts/*/analyze/**` / `repos/notes/**` | sonnet |
 | `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` / `docs/**` | opus |
 | `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
 | `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
@@ -46,6 +46,8 @@
 ## 四个不许动手的角色
 
 `analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。`pm` 同样不含代码路径（它只能写自己的产物目录），只是它的本职是澄清需求而非触碰代码，不算一个「诱惑」。这不是疏忽：
+
+> 注（2026-09-12）：上表「可写」列是**范围表**，守卫只在工作流核心路径（受守前缀：`.workbench/` `knowledge/` `references/` `.claude/` 等 + 多仓库布局下的 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`）上强制执行它；仓库代码、`/tmp`、项目根外不做角色判定 —— 「谁写哪块代码」由 harness 与模型层面规范，不是工作台的职责。详见 [permissions.md](permissions.md#第四层角色写入范围)。
 
 | 角色 | 为什么不许改代码 |
 | --- | --- |

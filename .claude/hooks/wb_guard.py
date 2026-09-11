@@ -7,6 +7,7 @@ wb_cli.cmd_hook（hook 子命令）与 selfcheck 调用。"""
 from __future__ import annotations
 
 import json
+import fnmatch
 import os
 import re
 import shlex
@@ -14,8 +15,9 @@ import sys
 from pathlib import Path
 
 from wb_const import (
-    ARTIFACT_LOG, BASH_WRITE, DEVELOPER_ROLES, FROZEN_ALWAYS, PHASE_CN, READ_TOOL,
-    ROLES, SHELL_TOOL, WRITE_TOOL,
+    ARTIFACT_LOG, BASH_WRITE, DEFAULT_ROLE_SCOPES, DEVELOPER_ROLES, FROZEN_ALWAYS,
+    GUARDED_PREFIXES, PHASE_CN, READ_TOOL, ROLES, SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES,
+    WRITE_TOOL,
 )
 from wb_bash import (
     _split_pipeline, _strip_wrappers, resolve, strip_heredocs,
@@ -187,8 +189,19 @@ def frozen_advice(root: Path, rels: list[str], role: str = "") -> str:
             f"改完 `wb.py contract bump --name {names}` 重新锁定并通知消费方。")
 
 
-# 内置非角色 subagent 类型仍沿用工作台 role 文件，仅用于工作流熔断和日志归属。
+# 内置非角色 subagent 类型白名单：这些 `agent_type` 是 harness 自带的通用工具身份
+# （不在 ROLES 里），不是伪造或未知调用者，退回读 role 文件兜底是安全的 —— 文件空时
+# 它们本来就该落在「无角色」范围而非被当成越权写手。凡不在此列的非角色 `agent_type`
+# 都判 UNKNOWN_ROLE 拒写，堵住「子 worker 顶陌生身份越权」缺口。
 BUILTIN_AGENT_TYPES = ("Explore", "general-purpose", "Plan")
+
+# 载荷有 subagent 迹象（`agent_id`）但拿不到可识别身份时的哨兵。它**不是**角色：
+# 既不查 role_scopes 也不回落到「无角色放行」，而是直接拒绝写入 —— 把「身份识别坏了」
+# 伪装成「这是主线程」是最坏的失败模式（静默降级）。
+UNKNOWN_ROLE = "__unknown__"
+
+# 装守卫本体的前缀，拒绝话术要单独说明（交回主线程，别给角色开范围）。
+GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/")
 
 # 契约管理员。接口契约由 architect 定义，但 `--owner` 填的是实现方
 # （architect.md 里就是 `--owner backend-developer`），所以 owner 校验必须放它一条路，
@@ -198,14 +211,22 @@ CONTRACT_STEWARD = "architect"
 
 
 def current_role(root: Path, data: dict) -> str:
-    """返回工作流所需的角色标签，不承担通用权限判定。
+    """当前角色：subagent 优先取 hook 载荷里的 `agent_type`，主线程退回读 `.workbench/role`。
 
     载荷里的 `agent_type` 就是 agent 定义 frontmatter 的 `name`，与 ROLES 同名 ——
     实测（Claude Code 2.1.252）subagent 的 PreToolUse / PostToolUse / SubagentStop
     都带 `agent_type` 与 `agent_id`，主线程两个都没有。所以并行 subagent 各自判定，
     不再抢 `.workbench/role` 那个单文件：谁写的由谁的载荷说，与启动顺序无关。
 
-    未知 agent_type 仅作为标签返回，不会触发通用权限拒绝。
+    三态而非两态：
+    - 有 `agent_type` 且是角色名 → 用它
+    - 有 `agent_type` 且是内置白名单类型（Explore / general-purpose / Plan）→ 读文件兜底
+    - `agent_type` 是陌生值，或无 `agent_type` 但有 `agent_id` → UNKNOWN_ROLE（拒写）
+    - 两者都无 → 读 `.workbench/role`（真正的主线程兜底）
+
+    陌生 `agent_type` 曾经和内置白名单走同一条退回文件兜底分支：文件为空时
+    `_check_write_target` 的「无角色」直接放行，等于任何顶着陌生身份 spawn 出的子 worker
+    都能写到角色范围之外。现在陌生值单独判 UNKNOWN，与 `agent_id`-only 汇入同一拒绝出口。
     """
     at = (data.get("agent_type") or "").strip()
     if at in ROLES:
@@ -213,8 +234,8 @@ def current_role(root: Path, data: dict) -> str:
     if at in BUILTIN_AGENT_TYPES:
         f = wb_dir(root) / "role"
         return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
-    if at:
-        return at
+    if at or data.get("agent_id"):
+        return UNKNOWN_ROLE
     f = wb_dir(root) / "role"
     return f.read_text(encoding="utf-8").strip() if f.is_file() else ""
 
@@ -244,8 +265,74 @@ def active_task_contract_errors(root: Path, rel: str) -> list[str]:
     return errors
 
 
+def _guarded_prefix(root: Path, rel: str) -> str:
+    """命中的守卫前缀；目录条目按前缀匹配，文件条目精确匹配（`repos.json` 是文件）。
+
+    workspace 层条目（`scripts/` `repos.json` `.vscode/`）只在 workbench 布局（存在
+    `repos/`）下生效 —— 单仓库适配场景里它们是项目自己的目录，见 wb_const 的说明。
+    """
+    prefixes = GUARDED_PREFIXES + (
+        WORKSPACE_GUARDED_PREFIXES if (root / "repos").is_dir() else ())
+    for g in prefixes:
+        if g.endswith("/"):
+            if rel.startswith(g):
+                return g
+        elif rel == g or rel.startswith(g + "/"):
+            return g
+    return ""
+
+
+def _role_scope_allows(root: Path, scopes: dict, role: str, rel: str) -> list[str]:
+    """角色 role 能在 rel 上落笔的模式表（空表 = 不许写）。
+
+    受守前缀（`GUARDED_PREFIXES` / `WORKSPACE_GUARDED_PREFIXES`）下的路径只认**显式以该
+    前缀打头**的模式：`fnmatch` 的 `*` 跨 `/`，不收窄的话 `*.md` 会跨进别的阶段的产物、
+    `*.py` 会跨进守卫本体。
+    """
+    globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))
+    if not isinstance(globs, list):
+        globs = []
+    guarded = _guarded_prefix(root, rel)
+    if guarded:
+        if guarded.endswith("/"):
+            globs = [g for g in globs if g.startswith(guarded)]
+        else:
+            globs = [g for g in globs if g == guarded or g.startswith(guarded + "/")]
+    return [g for g in globs if fnmatch.fnmatch(rel, g)]
+
+
+# 受守卫的公共脚本：它们的写入不走 Bash 能解析的形态（`python3 x.py` 不是写命令），
+# 脚本内部却写 .vscode/、.workbench/*.code-workspace、repos.json 与 repos/* 软链 ——
+# 角色执行就把「工作区材料角色只读」整个绕开。脚本没有角色用得上的合法形态，非主线程一律拒。
+# 注意这**不是**通用的脚本执行管控：只有这两个具名脚本在此列，`bash /tmp/x.sh`、
+# `./deploy.sh` 这类一律放行（见 _check_write_target 第 3 步的边界说明）。
+GUARDED_SCRIPTS = frozenset({"repos_apply.py", "repos_tui.py"})
+_SCRIPT_INTERPRETERS = frozenset({"python3", "python", "py", "bash", "sh", "zsh"})
+
+
+def _guarded_script_exec(cmd: str) -> bool:
+    """命令里是否执行了受守卫的公共脚本（角色执行 = 绕过工作区材料的只读收窄）。
+
+    只认「脚本被当成程序执行」：脚本名作为命令首 token，或解释器后紧跟脚本路径
+    （`python3 scripts/repos_apply.py`）。`grep` / `cat` / 读日志把脚本名当参数用不算执行。
+    """
+    for seg in _split_pipeline(strip_heredocs(cmd)):
+        try:
+            tokens = shlex.split(seg)
+        except ValueError:
+            continue
+        if not tokens:
+            continue
+        if Path(tokens[0]).name in GUARDED_SCRIPTS:
+            return True
+        for i, t in enumerate(tokens[:-1]):
+            if Path(t).name in _SCRIPT_INTERPRETERS and Path(tokens[i + 1]).name in GUARDED_SCRIPTS:
+                return True
+    return False
+
+
 def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
-    """检查单个写入目标：活动契约 → 争议 → 冻结。"""
+    """检查单个写入目标：活动契约 → 争议 → 冻结 → 工作流核心路径的角色范围。"""
     target = resolve_target(cwd, raw_path)
     rootr = root.resolve()
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
@@ -289,6 +376,65 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                     f"{fro_rel} 是已冻结的契约文档，不能直接改。{where}"
                     + frozen_advice(fro_root, [fro_rel], current_role(fro_root, data))
                 )
+
+    # 3. 角色写入范围：**只对工作流核心路径强制执行** —— 受守前缀下的东西
+    #    （.workbench/ 的阶段产物与契约、knowledge/ 知识库、references/ 规范、
+    #    .claude/ 等守卫本体、workbench 布局下的工作区材料）。这些文件坏了，工作流
+    #    本身就跑不下去，所以守卫兜住。
+    #
+    #    其余路径一律不判角色：仓库代码（server/ web/ …）、/tmp、项目根之外 ——
+    #    写业务代码越界、在 /tmp 建测试脚本、跑根外的临时脚本，都是开发过程中的
+    #    常态，且不影响工作流推进。这层规范（谁该写哪里、别乱写文件乱执行脚本）
+    #    交给 harness 与模型自己，不是本工作台的职责；工作台管得越宽，越容易在
+    #    正常开发动作上误拦，把「守卫」变成流程的阻力。
+    role = current_role(rootr, data)
+    guarded = _guarded_prefix(rootr, rel)
+    if not guarded:
+        return
+    if role == UNKNOWN_ROLE:
+        hook_deny(
+            f"无法验证调用者身份，拒绝写入工作流核心路径 {rel}：载荷有 agent_id 但"
+            "没有可识别的 agent_type（门禁失效告警，不是权限错误）。"
+            "升级 Claude / Codex CLI 后重试；主线程不带 agent_id，不该落到这一条。"
+        )
+    if not role or not state_path(rootr).is_file():
+        return   # 主线程 / 无角色：只剩冻结与特权子命令两层约束
+    # references/workspace/<角色>/ 是角色私有知识：只有对应角色可改，别的角色看着也一样。
+    private_match = re.match(r"references/workspace/([^/]+)/", rel)
+    if private_match:
+        if private_match.group(1) != role:
+            hook_deny(
+                f"角色 {role} 无权写角色 {private_match.group(1)} 的私有知识 {rel}。"
+                "只能改 references/workspace/<自己的角色>/。"
+            )
+        return   # 自己那份是「references/ 角色只读」的例外，不再过范围匹配
+    scopes = load_state(rootr).get("role_scopes") or {}
+    # 范围缺 key 回落到默认值；显式的空清单是「什么都不能写」，不是「不限制」。
+    # 反过来读会让 `config set role_scopes.<角色> '[]'` 变成一键解除范围的开关 ——
+    # 空值当放行时，越权路径连 GUARDED_PREFIXES 收窄都走不到。
+    allowed = _role_scope_allows(rootr, scopes, role, rel)
+    if not allowed:
+        if guarded == "knowledge/":
+            extra = ("（knowledge/ 是跨 flow 的长期知识库，只有 knowledger 角色可写。"
+                     "沉淀或查找走 wb-knowledge skill，或交回主线程派 knowledger。）")
+        elif guarded == "references/":
+            extra = "（references/ 是公共操作规范，任何角色只读。要改规范交回主线程。）"
+        elif guarded in GUARD_BODY_PREFIXES:
+            extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
+                     "要改它交回主线程，别给角色开范围。）")
+        elif guarded == ".workbench/":
+            extra = ("（产物目录按阶段隔离：只能写自己阶段的产物，上游文档要改走 "
+                     "contract unlock / 派对应角色。）")
+        else:
+            extra = (f"（{guarded} 是工作区级公共材料（公共脚本、清单、仓库索引、"
+                     "单仓笔记或本机 IDE 配置），由主线程与对应角色维护。）")
+        scopes_shown = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))
+        hook_deny(
+            f"角色 {role} 无权写 {rel}（不在其写入范围内）。{extra}"
+            f"该角色的范围：{', '.join(scopes_shown) or '（空）'}。"
+            "确需跨界交给对应角色；范围本身要改，报回编排者"
+            f"（`wb.py config set role_scopes.{role} '<JSON 数组>'` 角色跑不了）。"
+        )
 
 # 角色 subagent 一律不能跑的 wb.py 子命令：改的是守卫自己的规则、门禁结论或状态
 # 基线，全部属于编排者决策。`(子命令, action)` -> 理由。
@@ -463,6 +609,19 @@ def hook_pre_tool(data: dict) -> None:
         if wb_role in ROLES:
             for reason in privileged_wb_calls(cmd, rootr, wb_role):
                 hook_deny(reason)
+
+        # --- 受守卫公共脚本的执行绕过 ---
+        # `python3 scripts/repos_apply.py` 没有 Bash 能解析的写目标（不带 -c 的 python3
+        # 不是写命令），脚本内部却写 .vscode/、.workbench/*.code-workspace、repos.json
+        # 与 repos/* 软链 —— 角色执行就把「工作区材料角色只读」整个绕开。
+        # 只认这两个具名脚本；**执行其他脚本（含 /tmp 下的临时脚本、项目根外的脚本）
+        # 不做位置判定** —— 那是开发过程的常态，不属于工作流核心的管控范围。
+        if (data.get("agent_id") or data.get("agent_type")) and _guarded_script_exec(cmd):
+            hook_deny(
+                "repos_apply.py / repos_tui.py 的写入不被 Bash 守卫解析，subagent 执行"
+                "会绕过 scripts/、repos.json、.vscode/ 的只读收窄。"
+                "初始化清单与 IDE 配置交回主线程跑。"
+            )
 
         # --- 争议熔断 ---
         # 任何争议哨兵存在时，developer 角色全线停工。

@@ -917,6 +917,23 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         ok = needle in p.read_text(encoding="utf-8", errors="replace")
         return ok, label, "已覆盖" if ok else "缺少该章节"
 
+    if kind == "repos_notes_exist":
+        label = "各仓库有稳定事实笔记"
+        names = repo_names(root)
+        if not names:
+            return True, label, "无 repos/ 布局，跳过"
+        missing = [n for n in names if not (root / REPO_NOTE_DIR / f"{n}.md").is_file()]
+        if missing:
+            n = missing[0]
+            return False, label, (
+                f"缺 {', '.join(missing)} 的 {REPO_NOTE_DIR}/<仓库>.md。这是与需求分析分开的"
+                f"独立任务（需求只覆盖相关部分，产不出整仓画像）：先 "
+                f"`wb.py task add --title \"{ORIENTATION_TITLE}{n}\" --role analyst "
+                f"--phase analyze --write-scopes \"{REPO_NOTE_DIR}/{n}.md\"` 再派给 analyst"
+                "（init 建过的那批直接用，别重复建）")
+        incomplete = [i for i in repo_note_issues(root) if "缺「" in i]
+        return (not incomplete), label, "已覆盖" if not incomplete else "；".join(incomplete)
+
     if kind == "analyze_parts_complete":
         manifest = artifact_path(root, phase, "parts/manifest.json")
         label = "analyze 多专项完整"
@@ -1244,6 +1261,11 @@ def select_task_batch(tasks: list[dict], limit: int) -> tuple[list[dict], list[d
 # CLI 命令实现
 # --------------------------------------------------------------------------
 
+# 跨仓库改写时原样保留的范围前缀：这些路径挂在工作区根，不随 `repos/<仓库>/` 挪动。
+# 改写成 `repos/*/knowledge/**`（或 notes）会把范围指向不存在的路径，而门禁查的是根上的那份。
+WRITE_PATH_ANCHORS = (".workbench/", "knowledge/", "repos/notes/")
+
+
 def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
     """跨仓库布局（`repos/<仓库>/`）下的默认角色范围；不是这个布局返回 None。
 
@@ -1273,12 +1295,12 @@ def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
     for role, pats in DEFAULT_ROLE_SCOPES.items():
         mine = [r for r in repos if any(h in r.lower() for h in REPO_HINTS.get(role, ()))]
         extra = [f"repos/{r}/**" for r in mine] or \
-                [f"repos/*/{p}" for p in pats
-                 if not p.startswith((".workbench/", "knowledge/"))]
+                [f"repos/*/{p}" for p in pats if not p.startswith(WRITE_PATH_ANCHORS)]
         # knowledge/ 与 .workbench/ 同免改写：知识库挂在工作区根（一个工作区一份），
         # 改写成 repos/*/knowledge/** 会跟 knowledge_written 门禁检查点错位。
-        out[role] = [p for p in pats
-                     if p.startswith((".workbench/", "knowledge/"))] + extra
+        # repos/notes/ 同理：单仓笔记按仓库名一个文件，挂在 repos/notes/<仓库>.md，
+        # 不能被改写成 repos/*/repos/notes/**（那会把范围指向不存在的路径）。
+        out[role] = [p for p in pats if p.startswith(WRITE_PATH_ANCHORS)] + extra
     return out
 
 
@@ -1293,14 +1315,214 @@ def unclaimed_repos(root: Path, scopes: dict[str, list[str]]) -> list[str]:
     `repos/*/tests/**` 覆盖所有仓库，但「只有 qa 能写它的测试目录」不是认领。
     全都认不出名字时两个角色都拿到 `repos/*/src/**`，探路径命中，不会误报。
     """
+    return [n for n, claims in repo_claims(root, scopes).items() if not claims]
+
+
+# --------------------------------------------------------------------------
+# 仓库地图与索引
+#
+# 编排者在多仓库工作区里要回答两个问题，两个的来源不同：
+#   「这个仓库归谁写」—— 可从 role_scopes 现算（repo_claims），不建存储、不会漂移；
+#   「这个仓库是干什么的」—— 没有任何源可派生，只能人写进 repos/index.md。
+# 所以前者是衍生视图，后者是手维护索引 + 机械校验（缺行 / 死行 / 重复 /
+# 占位符 / 死链），护栏靠校验而不是靠「写完就准」（ROMA check_repos.py 同一思路）。
+# --------------------------------------------------------------------------
+
+REPO_INDEX = "repos/index.md"
+
+# 单仓稳定事实。与 index 的一行职责、analyst 的 current-state.md 三者的分工：
+#   index：一句话，编排者扫分工用；
+#   notes/<仓库>.md：**跨需求复用**的客观事实（怎么跑、怎么测、坑在哪）—— 仓库不变它就不变；
+#   current-state.md：本次需求的现状（要动哪几处、撞什么风险），按 flow 隔离、过门禁即冻结。
+# 三者会互相抄的话就退化成三份副本，所以内容边界写死：notes 只放「下个需求还用得上、
+# 与本次需求无关」的部分，需求相关的一律进 current-state.md。
+REPO_NOTE_DIR = "repos/notes"
+REPO_NOTE_SECTIONS = ("职责", "启动", "测试")
+
+# 占位符按结构化写法认（ROMA：无法取证的字段写「待补充」，不要猜）。职责列是这些
+# 值等于还没写 —— 校验点名，但不替人编一句话。
+REPO_INDEX_PLACEHOLDERS = {"", "-", "?", "TODO", "TBD", "待补充", "待填", "待定"}
+
+
+def repo_names(root: Path) -> list[str]:
+    """`repos/` 下的仓库目录名（排序）。没有该目录返回空表。
+
+    跳过点开头的目录与笔记目录本身（`repos/notes/` 装的是单仓笔记，不是仓库）——
+    否则它会以「未建 repos/notes/notes.md」的形态混进校验输出。
+    """
     d = root / "repos"
     if not d.is_dir():
         return []
-    pats = [p for r in ("frontend-developer", "backend-developer")
-            for p in scopes.get(r, ())]
-    return [r.name for r in sorted(d.iterdir()) if r.is_dir() and not any(
-        fnmatch.fnmatch(f"repos/{r.name}/src/probe{ext}", p)
-        for ext in (".ts", ".py") for p in pats)]
+    skip = {REPO_NOTE_DIR.rsplit("/", 1)[-1]}
+    return sorted(p.name for p in d.iterdir()
+                  if p.is_dir() and not p.name.startswith(".") and p.name not in skip)
+
+
+def read_repos_manifest(root: Path) -> dict[str, str]:
+    """`repos.json` 的 name -> description，供仓库地图带一句话说明。
+
+    清单是可选元数据：缺失、坏 JSON、条目没写 description 都返回空串而不是报错 ——
+    它只影响显示，不参与任何判定（判定看 role_scopes 与 repos/ 目录本身）。
+    """
+    try:
+        data = json.loads((root / "repos.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    entries = data.get("repos", []) if isinstance(data, dict) else data
+    out: dict[str, str] = {}
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and str(e.get("name") or "").strip():
+            out[str(e["name"]).strip()] = str(e.get("description") or "").strip()
+    return out
+
+
+def repo_claims(root: Path, scopes: dict[str, list[str]],
+                roles: tuple[str, ...] = ("frontend-developer", "backend-developer"),
+                ) -> dict[str, list[str]]:
+    """每个仓库被哪些角色认领：{仓库名: [角色...]}，没认领的是空表。
+
+    与 `unclaimed_repos` 共用同一套探路径判据（拿模式去撞 `repos/<名>/src/probe.<ext>`），
+    只是把「有没有人认领」展开成「都有谁」。两个入口一个判据，不会各说各话。
+    """
+    out = {}
+    for name in repo_names(root):
+        out[name] = [r for r in roles if any(
+            fnmatch.fnmatch(f"repos/{name}/src/probe{ext}", p)
+            for ext in (".ts", ".py") for p in scopes.get(r, ()))]
+    return out
+
+
+def _index_cells(line: str) -> list[str]:
+    """`| a | b |` -> ["a", "b"]。非表格行（或不足两列）返回空表。"""
+    s = line.strip()
+    if not s.startswith("|"):
+        return []
+    cells = [c.strip("`").strip() for c in s.strip("|").split("|")]
+    return cells if len(cells) >= 2 else []
+
+
+def repo_index_issues(root: Path) -> list[str]:
+    """`repos/index.md` 与 `repos/` 目录的一致性检查。report-only，不自动改文件。
+
+    格式（每仓一行）：`| 仓库 | 职责 | 入口文档 |`，入口文档可空。查五类：未建索引、
+    缺行、登记了不存在的仓库（死行）、重复行、职责仍是占位符、入口文档死链。
+
+    为什么不自动生成：职责与入口文档没有可派生的事实源，自动写只会写空话；而校验
+    是机械的。ROMA 的 check_repos.py 明确「不要让脚本自动改文件」，同一条。
+    """
+    repos = repo_names(root)
+    if not repos:
+        return []
+    path = root / REPO_INDEX
+    if not path.is_file():
+        return [f"未建 {REPO_INDEX}（每仓一行「仓库 | 职责 | 入口文档」）—— "
+                "编排者据此确认各库分工，缺了只能逐个翻仓库"]
+    issues: list[str] = []
+    seen: dict[str, int] = {}
+    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        cells = _index_cells(line)
+        # 分隔行（`| --- | --- |`）与表头行不是登记
+        if not cells or all(set(c) <= set("-: ") for c in cells) or cells[0] in ("仓库", "repo"):
+            continue
+        name, duty = cells[0], cells[1]
+        doc = cells[2] if len(cells) > 2 else ""
+        if name not in repos:
+            issues.append(f"{REPO_INDEX}:{lineno} 登记了 {name}，但 repos/{name}/ 不存在"
+                          "（改名或删除后没同步）")
+            continue
+        if name in seen:
+            issues.append(f"{REPO_INDEX}:{lineno} 重复登记 {name}（第一次在第 {seen[name]} 行）")
+        seen.setdefault(name, lineno)
+        if duty in REPO_INDEX_PLACEHOLDERS or (duty.startswith("<") and duty.endswith(">")):
+            issues.append(f"{REPO_INDEX}:{lineno} {name} 的职责还是占位符 —— "
+                          "一句话说清它做什么；不知道就写「待补充」并交回编排者")
+        if doc and doc not in REPO_INDEX_PLACEHOLDERS and "://" not in doc \
+                and not (root / doc).exists():
+            issues.append(f"{REPO_INDEX}:{lineno} {name} 的入口文档 {doc} 不存在（死链）")
+    for name in repos:
+        if name not in seen:
+            issues.append(f"repos/{name}/ 未登记到 {REPO_INDEX} —— 索引缺它一行")
+    return issues
+
+
+def _note_section(text: str, heading: str) -> str | None:
+    """取 `## <heading>` 到下一个二级标题之间的正文；没有这一节返回 None。"""
+    out: list[str] = []
+    inside = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line[3:].strip() == heading
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out) if inside else None
+
+
+# 「仓库画像」任务的标题前缀。这批任务是**工作区级**的：与任何需求无关，每个仓库一个，
+# 产出就是 `repos/notes/<仓库>.md`。为什么必须与需求的 analyze 分开：analyst 的常规任务
+# 边界是「实现 requirements 要动哪些地方」，它的取证是需求导向的 —— 一整仓的画像
+# （怎么跑、怎么测、有哪些子模块）不会被顺带产出。所以 init 直接建这批任务，
+# `repos_notes_exist` 门禁在 analyze 准出时兜底（新增仓库、漏派都会被点名）。
+ORIENTATION_TITLE = "仓库画像："
+
+
+def ensure_repo_orientation_tasks(root: Path, st: dict) -> list[dict]:
+    """为还没有稳定事实笔记的仓库建「仓库画像」任务，返回新建的任务表。
+
+    幂等：已有同名 todo / doing / done 任务就不重复建（笔记后来被删由门禁点名，
+    不在这里自动重开 —— 重开会让 `task done` 的历史失去意义）。
+    """
+    created: list[dict] = []
+    for name in repo_names(root):
+        if (root / REPO_NOTE_DIR / f"{name}.md").is_file():
+            continue
+        title = f"{ORIENTATION_TITLE}{name}"
+        if any(t.get("title") == title for t in st["tasks"]):
+            continue
+        st["seq"] += 1
+        tid = f"T{st['seq']}"
+        while find_task(st, tid):
+            st["seq"] += 1
+            tid = f"T{st['seq']}"
+        t = {
+            "id": tid, "title": title, "role": "analyst", "phase": "analyze",
+            "status": "todo", "deps": [], "contracts": [], "artifacts": [],
+            "notes": "", "created": now(), "updated": now(),
+            "write_scopes": [f"{REPO_NOTE_DIR}/{name}.md"],
+        }
+        st["tasks"].append(t)
+        log(st, "task_add", id=tid, role="analyst", phase="analyze", title=title)
+        created.append(t)
+    return created
+
+
+def repo_note_issues(root: Path) -> list[str]:
+    """单仓稳定事实笔记（`repos/notes/<仓库>.md`）的检查：未建 / 缺节 / 只剩占位符。
+
+    放的是**跨需求复用**的客观事实：这个仓库是干什么的、怎么跑起来、怎么测。analyst
+    每个需求都要重新摸一遍的东西，摸完就该落在这里，而不是跟着 flow 的产物一起归档
+    （ROMA `repo-management` 的 overview / setup / test 三件套，见 roma-comparison 第十一节）。
+
+    与索引同一条护栏原则：只报不改。取不到证写结构化「待补充」，交给 analyst 补。
+    """
+    issues: list[str] = []
+    for name in repo_names(root):
+        p = root / REPO_NOTE_DIR / f"{name}.md"
+        if not p.is_file():
+            issues.append(f"未建 {REPO_NOTE_DIR}/{name}.md（稳定事实：职责 / 启动 / 测试）"
+                          " —— 每个需求重新摸一遍仓库是重复成本，写一次即可复用")
+            continue
+        text = p.read_text(encoding="utf-8")
+        for sec in REPO_NOTE_SECTIONS:
+            body = _note_section(text, sec)
+            if body is None:
+                issues.append(f"{REPO_NOTE_DIR}/{name}.md 缺「## {sec}」一节")
+            elif body.strip() in REPO_INDEX_PLACEHOLDERS or (
+                    body.strip().startswith("<") and body.strip().endswith(">")):
+                issues.append(f"{REPO_NOTE_DIR}/{name}.md 的「{sec}」还是占位符")
+    return issues
 
 
 # 新 flow 从 main 继承的工作区级配置。这些键描述的是「这个工作区怎么构建、怎么

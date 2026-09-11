@@ -7,7 +7,7 @@ description: 多仓库工作区初始化。按 repos.json 清单把代码仓库 
 
 把「清单里的仓库」落到本地并配好 IDE，配合 CLAUDE.md「多仓库工作区」的唯一布局（外层一份状态）。脚本幂等：已有 checkout 不覆盖、IDE 配置只刷新；clone 失败显式列为阻塞项，不伪装成功。
 
-**由主线程直接执行，不派 subagent** —— 初始化是编排动作；且写入目标 `scripts/`、`repos.json`、`.vscode/**` 都收在守卫前缀里（`repos/**` 不在其中，但 clone 到那里同样是编排决定），派下去会被自己的守卫拦。内核命令 `WB = python3 .claude/hooks/wb.py`。
+**由主线程直接执行，不派 subagent** —— 初始化是编排动作；且写入目标 `scripts/`、`repos.json`、`repos/index.md`、`repos/notes/`、`.vscode/**` 都收在守卫的工作区材料前缀里（角色只读），派下去会被自己的守卫拦。内核命令 `WB = python3 .claude/hooks/wb.py`。
 
 ## 交互式管理清单（repos_tui.py）
 
@@ -38,7 +38,7 @@ python3 .claude/hooks/wb.py status
 ```json
 {
   "repos": [
-    { "name": "frontend", "remote": "git@github.com:org/frontend.git" },
+    { "name": "frontend", "remote": "git@github.com:org/frontend.git", "description": "用户界面，React SPA" },
     { "name": "backend", "remote": "https://github.com/org/backend.git", "branch": "main" },
     { "name": "shared-libs", "link": "/Users/me/code/shared-libs" }
   ]
@@ -48,6 +48,7 @@ python3 .claude/hooks/wb.py status
 - `name` 省略时取 remote 最后一段（去 `.git`）；必须是单段路径名。
 - `remote` 逐字使用 —— URL 里的 `user@` 是 SSH 登录账号，删掉它会退化成当前 shell 用户登录。
 - `link` 是本机已有 checkout 的路径（软链接入，不复制代码），与 `remote` 二选一。
+- `description` 可选，一句话职责：`repos_apply.py` 会打印出来，也是 `repos/index.md` 的种子。取不到证就留空，别猜。
 
 ## 第 2 步：落地仓库与 IDE 配置
 
@@ -62,6 +63,34 @@ python3 scripts/repos_apply.py --root .
 - `.workbench/<工作区名>.code-workspace`（folders = 工作区根 + `repos/` 下全部 git 仓库，**以磁盘扫描为准**，不信任清单）与 `.vscode/settings.json`（`git.scanRepositories` 等，保留用户已有键）每次都刷新，所以部分仓库已存在时也不要跳过本步。
 - `repos/` 未被外层 git 忽略时给一行警告（clone 进来的仓库会脏外层 git status）。
 
+## 仓库索引与单仓笔记（分工图与稳定事实）
+
+仓库落地后补两处，`wb.py status` 与 `role scopes` 每次校验并点名缺失：
+
+**索引 `repos/index.md`** —— 编排者扫分工用，每仓一行：
+
+```markdown
+| 仓库 | 职责 | 入口文档 |
+| --- | --- | --- |
+| frontend | 用户界面，React SPA | repos/notes/frontend.md |
+| backend | API 服务 | repos/notes/backend.md |
+```
+
+**单仓笔记 `repos/notes/<仓库>.md`** —— 跨需求复用的稳定事实，作者是 `analyst`：
+
+```markdown
+# <仓库>
+
+## 职责
+## 启动
+## 测试
+```
+
+- 职责来源：清单的 `description`、仓库 README、或直接问用户。**取不到证写「待补充」，不要猜** —— 校验只报不改，编一句话比留空更糟。
+- 三节（职责 / 启动 / 测试）缺任一节、或整节仍是占位符，都会被点名；笔记没建也点名。首轮初始化可以只建索引、笔记留给第一次 analyze 的 analyst 补。
+- 入口文档可空；填了就必须存在，否则点名死链。
+- 两者都进 git（`.gitignore` 用 `repos/*` + `!repos/index.md` + `!repos/notes/`），`repos/` 其余内容仍忽略。
+
 ## 第 3 步：工作台 init（外层）
 
 **唯一布局：只在外层 init，各仓库里都不要 init。** 项目根 = 整个工作区，一份 state、一份契约、一条流水线：
@@ -71,6 +100,8 @@ python3 .claude/hooks/wb.py init --name <需求名>
 ```
 
 init 检测到 `repos/*` 会把角色范围按仓库前缀重算，并点名认不出的仓库 —— 按它给的命令 `config set` 认领，再配 `gate_commands`（子 shell 分别 cd）。**不调这两处是静默出错**：认不出的仓库谁都写不了，门禁命令在外层根跑不了。
+
+init 还会为每个还没有笔记的仓库建一个 `仓库画像：<仓库>` 任务，并在输出里提示**先派这批** —— 画像与需求分析是两件事，需求驱动的那次只覆盖需求相关部分，产不出整仓事实。派发方式与常规任务相同（`task start` → analyst → `task done`），analyze 门禁 `repos_notes_exist` 兜底点名漏掉的仓库。新增仓库后补建同一条命令：`task add --title "仓库画像：<名>" --role analyst --phase analyze --write-scopes "repos/notes/<名>.md"`。
 
 ## 第 4 步：汇总
 

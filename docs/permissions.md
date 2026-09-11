@@ -80,22 +80,29 @@ def unlocked_paths(root):
 
 ### 第四层：角色写入范围
 
+**这一层只覆盖工作流核心路径** —— 受守前缀下的东西：`.workbench/`（状态、契约、阶段产物）、`knowledge/`、`references/`、`.claude/` `.codex/` `.agents/`（守卫本体），以及多仓库布局下的工作区材料 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`。这些文件坏了，工作流本身就跑不下去：改状态能伪造门禁、改契约能让并行开发失准、改守卫本体能让防线整体失效。
+
+核心路径之外**一律不判角色**：仓库代码（`server/` `web/` `src/` `migrations/` …）、`/tmp`、项目根之外。理由有两条，都是实测出来的：
+
+- **误拦率高。** 开发过程中在 `/tmp` 建测试脚本、跑根外的临时脚本、跨目录搬文件都是常态动作，一律判定等于把守卫变成流程阻力 —— 而误拦比漏拦更快教会 agent 去想办法绕。
+- **不属于工作台的职责。** 「谁该写哪个仓库的代码」「别乱写文件、别乱执行脚本」是 harness 层与模型层的规范，工作台管不了也不该管；它只管自己这套流程能不能继续推进（这个边界与门禁一致：管产物齐不齐，管不了内容对不对）。
+
 ```python
 role = current_role(rootr, data)          # 载荷 agent_type 优先，取不到才读 .workbench/role
+guarded = _guarded_prefix(rootr, rel)     # 非受守前缀 -> 本层直接返回
+if not guarded:
+    return
 globs = scopes.get(role, DEFAULT_ROLE_SCOPES.get(role, []))   # 缺 key 才回落默认，显式 [] 是全拒
-rel = os.path.relpath(target, rootr).replace(os.sep, "/")
-guarded = next((g for g in GUARDED_PREFIXES if rel.startswith(g)), "")
-if guarded:                               # 裸扩展名模式不得跨进状态目录与守卫本体
-    globs = [g for g in globs if g.startswith(guarded)] or ["（无）"]
+globs = [g for g in globs if g.startswith(guarded)]           # 裸扩展名模式不得跨进核心路径
 if not any(fnmatch.fnmatch(rel, g) for g in globs):
-    hook_deny(f"角色 {role} 无权写 {rel}。允许范围：{', '.join(globs)}。…")
+    hook_deny(f"角色 {role} 无权写 {rel}。该角色的范围：…")
 ```
 
-**`role_scopes` 里缺 key 和显式空清单是两个不同的意思。** 缺 key 回落 `DEFAULT_ROLE_SCOPES`（升级前建的项目、手写过 `state.json` 的项目都会缺），显式的 `[]` 是「什么都不能写」。早期版本两者都当成「不限制」（`globs = st["role_scopes"].get(role)` 取到 `None` 或 `[]` 后 `any(...)` 恒假之前先被一句 `if not globs: return` 放过），于是 `config set role_scopes.qa '[]'` 就是一键解除本层 —— 而 `config set` 本来就是角色跑得到的命令（现在这条也被[特权子命令层](#wbpy-特权子命令只有-hook-拿得到调用者身份)拦住了）。空值当放行时越权路径连 `GUARDED_PREFIXES` 收窄都走不到，`.claude/hooks/wb.py` 直接可写。两个方向各有断言：`qa` 显式空范围写 `tests/x.py` 被拒，`role_scopes` 整个删掉后 `qa` 写 `tests/x.py` 照常放行。
+**`role_scopes` 里缺 key 和显式空清单是两个不同的意思。** 缺 key 回落 `DEFAULT_ROLE_SCOPES`（升级前建的项目、手写过 `state.json` 的项目都会缺 —— 新增默认值后要跑一次 `role scopes --reset` 才生效），显式的 `[]` 是「什么都不能写」。早期版本两者都当成「不限制」（`globs = st["role_scopes"].get(role)` 取到 `None` 或 `[]` 后 `any(...)` 恒假之前先被一句 `if not globs: return` 放过），于是 `config set role_scopes.qa '[]'` 就是一键解除本层 —— 而 `config set` 本来就是角色跑得到的命令（现在这条也被[特权子命令层](#wbpy-特权子命令只有-hook-拿得到调用者身份)拦住了）。空值当放行时越权路径连 `GUARDED_PREFIXES` 收窄都走不到，`.claude/hooks/wb.py` 直接可写。两个方向各有断言：`qa` 显式空范围写自己阶段的产物被拒，`role_scopes` 整个删掉后照常放行。
 
 **角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。多仓库工作区布局（存在 `repos/`）下再叠加三个工作区级前缀：`scripts/`、`repos.json`、`.vscode/` —— 公共脚本、仓库清单与本机 IDE 配置由主线程维护，角色只读。范围里没有以该前缀打头的模式，就是谁都不能写。
+**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。多仓库工作区布局（存在 `repos/`）下再叠加工作区级前缀：`scripts/`、`repos.json`、`repos/index.md`、`repos/notes/`、`.vscode/` —— 公共脚本、仓库清单、仓库分工与单仓事实、本机 IDE 配置由主线程与对应角色维护（`repos/notes/` 归 `analyst`），其余角色只读。范围里没有以该前缀打头的模式，就是谁都不能写。
 
 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/main/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
@@ -125,21 +132,28 @@ wb.py config set role_scopes.backend-developer \
 
 ### 工具层边界：非主线程禁用工具与脚本执行
 
-前四层判的都是**写入目标**（在哪写、写什么）；下面三处判的是**工具与执行形态**，都是 catch-all 之后才真正生效的。
+前四层判的都是**写入目标**（在哪写、写什么）；下面三处判的是**工具与执行形态**。
 
-**非主线程禁用工具**（`NON_MAIN_THREAD_DENIED_TOOLS`：`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）。判定在这里，动作却发生在守卫看不见的地方 —— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，第二次拦不住，所以门只能设在「调它」这一步。角色 subagent 的工具清单里没有它们，但 `general-purpose` worker 有，而 worker 正是降级模式下会被派活的身份。主线程是编排者，不受限。
+> **2026-09-12 状态说明**：这一节的三条里，只有**受守卫公共脚本的硬拒**当前在本地内核中生效；**非主线程禁用工具**与 **`Skill` 审核门**在 `d606944` 的重构中被移除，尚未恢复（记录在 `draft/open-issues-2026-09-10.md` 的 P0 条目）。**执行脚本按位置收严**是**有意不做**的 —— 见下。
 
-**执行脚本文件按位置收严**（`_exec_script_targets` / `_check_script_exec`）。执行一个脚本等于执行脚本内容代表的全部写入，而正文不在命令行里、守卫解析不到 —— 于是不收内容改收位置：**项目根内且在该角色写入范围内**才放行，`/tmp` 与项目根外一律拒（`/tmp/evil.sh`、`python3 < /tmp/x.py` 实测拒绝）。`repos_apply.py` / `repos_tui.py` 另有一条硬拒（`_guarded_script_exec`），它们的写入目标是 `scripts/`、`repos.json`、`.vscode/`，正是角色只读的那几个前缀。`python3 .claude/hooks/wb.py ...` 不走这条 —— 它是受控状态接口，子命令由下面的特权层把关。
+**受守卫公共脚本**（`_guarded_script_exec`，`GUARDED_SCRIPTS` = `repos_apply.py` / `repos_tui.py`）：非主线程执行即拒。它们的写入目标是 `scripts/`、`repos.json`、`.vscode/`，正是角色只读的那几个前缀，而 `python3 x.py` 这种形态 Bash 解析不出写目标。`python3 .claude/hooks/wb.py ...` 不走这条 —— 它是受控状态接口，子命令由下面的特权层把关。
 
-**`Skill` 审核门**：非主线程调用者只能调 `allowed_skills` 白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来，那条「spawn 出的 worker 顶 `general-purpose` 身份降级越权」的路子也就无从触发。catch-all 之前 `Skill` 不在 matcher 里，白名单是死代码；现在工作区要显式配一张表（本工作区当前是 `["wb-flow","wb-loop","wb-contract","wb-knowledge","wb-init"]`），空表 = 拒全部。
+**执行其它脚本不做管控**（2026-09-12 定调）。曾经按位置收严（项目根内且在该角色写入范围内才放行，`/tmp` 与根外一律拒），现已移除：在 `/tmp` 建测试脚本、跑根外的临时脚本、`python3 -c` 这类动态写入，都是开发过程中的常态动作，一律判定等于把守卫变成流程阻力。**「别乱执行脚本、别乱写文件」属于 harness 层与模型层的规范，不是本工作台的职责** —— 工作台只保证自己的流程（状态、契约、阶段产物、守卫本体、工作区材料）不被写坏。
+
+**非主线程禁用工具**（`NON_MAIN_THREAD_DENIED_TOOLS`：`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`，**待恢复**）。判定在这里，动作却发生在守卫看不见的地方 —— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，第二次拦不住，所以门只能设在「调它」这一步。主线程是编排者，不受限。
+
+**`Skill` 审核门**（`allowed_skills`，**待恢复**）：非主线程调用者只能调白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来。
 
 ### 拒绝信息要可操作
 
 ```
-[工作台权限守卫] 拒绝：角色 qa 无权写 src/app.ts。
-允许范围：.workbench/artifacts/*/verify/**, tests/**, test/**, e2e/**, spec/**, *.config.ts, *.config.js, *.config.mjs, pytest.ini, tox.ini。
-确需跨界请交给对应角色，或 wb.py config set role_scopes.qa '<JSON 数组>'
+[工作台 Workflow Guard] 拒绝：角色 qa 无权写 .workbench/artifacts/main/clarify/notes.md（不在其写入范围内）。
+（产物目录按阶段隔离：只能写自己阶段的产物，上游文档要改走 contract unlock / 派对应角色。）
+该角色的范围：.workbench/artifacts/*/verify/**, tests/**, …
+确需跨界交给对应角色；范围本身要改，报回编排者（`wb.py config set role_scopes.qa '<JSON 数组>'` 角色跑不了）。
 ```
+
+拒绝信息按命中的前缀分岔（`.workbench/` 说阶段隔离、`knowledge/` 说专属角色、守卫本体说交回主线程、工作区材料说由主线程维护），并附该角色当前的范围 —— 撞上的人不必去翻 `state.json`。
 
 三段：拒绝了什么、允许什么、怎么正确地做。只说「拒绝」会让 subagent 反复试同一件事。
 
@@ -181,8 +195,8 @@ if BASH_WRITE.search(cmd) or all_targets:
 三段式：**先用 `resolve()` 解析写入目标，再用冻结清单过滤，最后按角色范围检查。** `resolve()` 按命令名分类处理：重定向取 `>` 右侧，`cp`/`mv`/`rsync`/`install` 取最后一个非 flag 参数（目标），带 `-t`/`--target-directory` 时末参数是源、目标改算 `DIR/<源文件名>`；`ln` 单独处理（末参数照常按写入目标判，其余参数是链接指向项，resolve 后落进受守前缀即拒，见下）；`sed -i` 只取 `-i` 之后真实存在的文件（操作数里的脚本 `s/a/b/`、BSD 版 sed 的独立空后缀 `-i ''` 都不是路径，早期按「非 flag 全算」会把脚本当写入目标 —— 存在不存在的路径不可能，按存在性过滤即可剥干净），`tee`/`rm`/`truncate`/`touch` 取全部非 flag 参数（`patch` 同族，但先排掉 `-i`/`--input` 的补丁输入），`~` 在解析前 `expanduser()`（不展开时 `~/evil.py` 会被当成根内相对路径、匹配裸 `*.py` 放行，真实落点是 `$HOME`）。**目录状态按段累积**：`cd`/`pushd` 更新、`popd` 退栈（`_step_cwd`），每段的相对写入目标按**该段 cwd** 解析 —— 先 `cd` 再写这条在解析层就已经算对，不再只靠兜底；`cd` 目标含变量或命令替换时标记 uncertain。`strip_heredocs()` 剥掉 heredoc body，避免 body 里提到的冻结路径被误判为写入目标。
 
 `resolve()` 返回三元组 `(all_targets, outside_targets, uncertain)`：
-- `all_targets`：所有写入目标的相对路径（用于冻结检查）
-- `outside_targets`：仅项目根外的目标（用于越根检查）
+- `all_targets`：所有写入目标的相对路径（用于冻结检查与受守前缀下的角色判定）
+- `outside_targets`：仅项目根外的目标（**当前不据此拒绝** —— 根外写入不判角色，见第四层）
 - `uncertain`：碰到 `eval`/`xargs`/`awk`/`sh -c`/`$(...)`、解释器从 stdin 读脚本（`python3 -`、`python3 < f`、`bash < f`、`bash <<EOF` —— 脚本正文不在命令行里，写入目标无法解析）、以及目标不在命令行里的 `find -delete`/`-exec`/`-execdir`/`-ok` 与 `git apply` 时为 True，此时退回旧行为
 
 **`uncertain` 退回旧行为**：`BASH_WRITE` + `frozen_hits()` 文本匹配，外加一条只认 `/` 开头的重定向兜底正则做越根检查。误报面比精确模式宽（`cp`/`mv` 不分源和目标），但不漏拦。拒绝信息里会注明「写入目标无法解析，已一并拦截」。

@@ -143,6 +143,8 @@ workbench/
 ├── .claude/            # 工作台本体，唯一一份
 ├── .workbench/         # 唯一的状态、契约、流水线（init 就 init 在这里）
 ├── repos/foo/          # 纯代码目录，不 init；在里面跑命令状态归属外层
+├── repos/index.md      # 仓库索引（进 git）：每仓一行职责与入口文档，status 校验
+├── repos/notes/<仓库>.md  # 单仓稳定事实（进 git）：职责 / 启动 / 测试，analyst 维护
 └── scripts/            # 工作区级公共脚本（repos_apply.py / repos_tui.py）
 ```
 
@@ -152,7 +154,7 @@ workbench/
 | --- | --- |
 | `find_root()` 向上查找 | 在任意仓库子目录里跑命令，状态归属外层根 |
 | hook 用绝对路径注册（Claude 端 `$CLAUDE_PROJECT_DIR`，跨端 `WB_ROOT`） | cwd 在任意子目录都能触发，不依赖相对路径 |
-| 守卫第一层按 `find_root(cwd)` 算项目根 | 外层的角色范围（`repos/**` 前缀）管全部仓库 |
+| 守卫第一层按 `find_root(cwd)` 算项目根 | 外层的状态与契约保护覆盖全部仓库；角色范围只在工作流核心路径（受守前缀）上判定，仓库代码不判 |
 
 `cmd_init` 以 `Path.cwd()` 为准（不走 `find_root()`）：在 `repos/foo` 里误跑 init 会建出第二份 `.workbench/` —— 唯一布局下这是误操作入口，`nested_roots()` 反查（见下）拦它的冻结文件，文档教人别在仓库里 init。
 

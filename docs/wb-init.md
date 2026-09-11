@@ -44,6 +44,9 @@
 | `remote` 省略 `name` | `derive_name()` 取最后一段去 `.git`；SCP 风格 remote（`git@gitlab.com:payments-core.git`，无 `://`）取冒号后段 | 整串返回的旧逻辑会让 `git@gitlab.com:payments-core` 过不了 NAME_RE；有 `repos_tui.py --selftest` 断言兜底 |
 | 既存仓库的一致性 | 目标已是 git 仓库时核对 `git remote get-url origin` 与清单 `remote`：不一致报 ERROR、退出码 1，提示 `git remote set-url`；一致才按 `EXISTS` 跳过 | 「已存在」与「存在且与清单一致」是两个不同的幂等结论。不校验的话清单换了源、磁盘还是旧源，IDE 配置看着正常、pull 全走错远端 —— 错误只在第一次 fetch 时以更迷惑的形态出现 |
 | `link` 相对路径 | 非绝对路径时相对工作区根 resolve | 清单进 git，协作者机器上本机 checkout 路径不同是常态 |
+| 仓库索引 | `repos/index.md` 手维护、进 git（`.gitignore` 用 `repos/*` + `!repos/index.md` + `!repos/notes/` 开例外）；`status` / `role scopes` 每次校验缺行、死行、重复行、职责占位符与入口文档死链，只报不改 | 分工有两个问题、两个来源：「谁写这个库」从 `role_scopes` 现算（零漂移），「这个库是干什么的」没有可派生的事实源 —— 职责与入口文档只能人写。护栏因此不是自动生成而是机械校验（ROMA `check_repos.py` 同思路：报出来、不自动改文件）。`description` 字段进清单只作种子与显示，判定不看它 |
+| 单仓笔记 | `repos/notes/<仓库>.md`，三节（职责 / 启动 / 测试），作者 `analyst`；未建、缺节、整节占位符都被点名 | 这是 ROMA 三件套（overview / setup / test）的等价物，最初判为「与 analyst 的 current-state.md 重复」而不抄 —— 判错了：`current-state.md` 是**本次需求**的现状（按 flow 隔离、过门禁即冻结、跟着需求归档），笔记是**跟仓库走**的稳定事实（怎么跑、怎么测、坑在哪），下个需求还要用。合并成一份文件的代价只是三节标题，换来的是校验可以逐节点名 |
+| 画像任务独立派 | `init` / `flow new` 为每个还没有笔记的仓库建一个 `仓库画像：<仓库>` 任务（analyst / analyze / `write-scopes` 指向那份笔记），提示编排者**初始化后先派完**；analyze 门禁 `repos_notes_exist` 兜底 | 不能并进需求的 analyze：那个任务的边界是「实现 requirements 要动哪些地方」，取证跟着需求走，一整仓的画像（模块划分、启动方式、测试入口）不会被顺带产出 —— 把画像绑在需求上，等于画像的覆盖范围由需求决定，而需求只碰仓库的一角。任务化还带来并行、`write_scopes` 隔离与完成度记账 |
 
 清单格式：`{"repos":[{"name":"foo","remote":"git@…","link":"/path/to/local","branch":"dev"}]}`，`remote` 与 `link` 二选一，交互式编辑用 `python3 scripts/repos_tui.py`。
 
@@ -75,7 +78,9 @@
 - **clone 失败的诊断只保留通用提示**：ROMA 那套「从报错登录账号推断 URL 丢了 `user@`」的对话树依赖 iCode 的固定主机名，不通用；SKILL.md 保留了「看 `<user>@<host>` 判断账号」的人工指引。
 - **角色范围认领不做自动化**：`repo_layout_scopes` 按目录名猜前缀、认不出的点名让人 `config set`，这是 wb.py 的既有取舍 —— 初始化 skill 不重复猜一遍。
 - **`repos/` 未被外层 git 忽略只警告不修**：外层工作区通常不是 git 仓库；是且未忽略时打一行 WARN，改 `.gitignore` 留给用户。
+- **索引校验只报不改，也不判断职责写得对不对**：缺行、死行、重复、占位符、死链是机械可查的；「这句话是否说清了职责」查不了 —— 与门禁同一个边界（管产物齐不齐，管不了用户认不认）。职责与 `repos/` 目录改名后不同步时以校验输出为准。
+- **笔记与 current-state.md 的边界靠约定维护**：校验只保证三节在、不是占位符，判断不了「这条事实属于本次需求还是属于仓库」。写错边界的代价是下个 analyst 读到过期结论 —— 与知识库同一条纪律：内容进笔记前自问「换台机器、下个月再做一次还成立吗」。
 
 ## 演进记录
 
-初版（2026-09-07）含布局 A/B 两方案与 `--init` 两步流程（脚本在 `.claude/skills/wb-init/scripts/init_repos.py`，布局 A 可选地对单仓库跑 `wb.py init`）。2026-09-08 收敛为唯一布局：外层一份状态、各仓库不 init，脚本移到根级 `scripts/repos_apply.py`，`--init` 随布局 A 移除，新增 `repos_tui.py`，既存仓库的 origin 一致性校验随后补入。布局取舍的理由见 [architecture.md](architecture.md#状态归属一个工作区多个仓库)；ROMA 对照的完整记录见 [roma-comparison.md](../draft/roma-comparison.md)。
+初版（2026-09-07）含布局 A/B 两方案与 `--init` 两步流程（脚本在 `.claude/skills/wb-init/scripts/init_repos.py`，布局 A 可选地对单仓库跑 `wb.py init`）。2026-09-08 收敛为唯一布局：外层一份状态、各仓库不 init，脚本移到根级 `scripts/repos_apply.py`，`--init` 随布局 A 移除，新增 `repos_tui.py`，既存仓库的 origin 一致性校验随后补入。2026-09-12 补仓库索引与单仓笔记：`repos/index.md` + 清单 `description` + `repos/notes/<仓库>.md` 三节（职责 / 启动 / 测试）+ `status` / `role scopes` 的派生分工图与校验（`repo_claims` / `repo_index_issues` / `repo_note_issues`，笔记写权限归 `analyst`）+ 画像任务（`ensure_repo_orientation_tasks`，init 建、初始化后先派）+ analyze 门禁 `repos_notes_exist` 兜底 —— 参照 ROMA `repo-management` 的 `repos/index.md` 与单仓三件套，三件套合并为一份文件的三节。布局取舍的理由见 [architecture.md](architecture.md#状态归属一个工作区多个仓库)；ROMA 对照的完整记录见 [roma-comparison.md](../draft/roma-comparison.md)。

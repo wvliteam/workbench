@@ -22,7 +22,7 @@
 | 阶段 | 产物 | 章节要求 | 其他断言 | 过门禁后冻结为 |
 | --- | --- | --- | --- | --- |
 | clarify | `requirements.md` | `验收标准`、`非目标` | — | `artifact-requirements`（owner `pm`） |
-| analyze | `current-state.md` | `风险` | — | `artifact-current-state`（owner `analyst`） |
+| analyze | `current-state.md` | `风险` | `analyze_parts_complete` `repos_notes_exist` | `artifact-current-state`（owner `analyst`） |
 | design | `design.md` | `方案对比` | `contracts_locked` `tasks_exist` `no_blocked:*` | `design-doc` —— architect 自己登记 |
 | develop | `verification.md` | — | `contracts_intact` `tasks_done:develop` `cmd:lint` `cmd:build` | 不冻结 |
 | verify | `test-report.md` | — | `contracts_intact` `tasks_done:verify` `cmd:test` | `artifact-test-report`（owner `qa`） |
@@ -32,7 +32,7 @@
 
 ## 断言总览
 
-十种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **9 种 `run_check()` 断言**。两者合称门禁断言，下文「九种」指后者。
+十种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **10 种 `run_check()` 断言**。两者合称门禁断言，下文「十种」指后者。
 
 | 断言 | 语法 | 通过条件 | 用意 |
 | --- | --- | --- | --- |
@@ -46,6 +46,7 @@
 | 命令门禁 | `cmd:<键>` | `gate_commands[键]` 退出码 0 | 测试/构建/lint 真的通过（三态：未配置跳过 / 已豁免 / 通过） |
 | 经验已沉淀 | `knowledge_written` | 递归数 `knowledge/` 下的条目（排除 `README.md` 与类别 `index.md`）非空，或 `retro.md` 显式写「无可沉淀」 | 复盘学到的经验落进跨 flow 的知识库，而不是跟着 artifacts 归档 |
 | 改进项已跟踪 | `improvements_tracked` | `retro.md` 改进项表的每个数据行含 `T<ID>` / `已落地` / `不修：` 三者之一；无表格行时要求章节含「无改进项」 | 改进项真的落地，而不是写进散文就消失 |
+| 仓库画像已写 | `repos_notes_exist` | 无 `repos/` 布局时跳过；否则每个仓库都有 `repos/notes/<仓库>.md` 且不缺节（`职责` / `启动` / `测试`） | 画像与需求分析是两件事：需求驱动的 analyze 只覆盖相关部分，产不出整仓事实 —— 漏派、新增仓库、笔记被删都在这里点名 |
 
 ### 实现要点
 

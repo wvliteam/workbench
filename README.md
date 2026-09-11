@@ -39,14 +39,15 @@ knowledge/                跨 flow 的长期经验库（按知识类别分目录
 ├── state.json                  旧布局的 state（新布局在 flows/<flow>/state.json）
 ├── current-flow                当前需求线指针（CLI 按它定位）
 ├── flows/<flow>/               每条需求线一份：state、锁、门禁日志、解冻窗口
-│   ├── state.json              阶段 / 任务 / 门禁记录 / 契约 / 审计日志
+│   ├── state.json              阶段 / 任务 / 门禁记录 / 契约 / 审计日志（尾部 500 条）
 │   ├── state.lock              写状态的排他锁（`flock`，并行 subagent 的 task done 不互相覆盖）
+│   ├── frozen                  该 flow 的冻结路径清单（守卫读全部 flow 的并集）
+│   ├── audit.jsonl             全量审计日志（append-only，永不截断）
 │   └── unlock/                 解冻申报窗口，一份契约一个文件（文件名=契约名，内容=理由）
 ├── contracts/                  接口定义文件
 ├── artifacts/<flow>/<阶段>/    各阶段产物（按阶段隔离写入权限）
 ├── artifacts.jsonl             改动流水账（PostToolUse 追加，task done 归并）
-├── role                        当前角色锁（守卫兜底用，subagent 优先按 hook 载荷判定）
-└── frozen                      冻结路径清单（守卫读它拒绝直接写，聚合全部 flow）
+└── role                        当前角色锁（守卫兜底用，subagent 优先按 hook 载荷判定）
 ```
 
 ## 上手
@@ -67,7 +68,9 @@ python3 .claude/hooks/wb.py init --name my-project
 python3 .claude/hooks/wb.py init --name <需求名>
 ```
 
-上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
+上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
+
+仓库分工两个来源分开：**谁写**从 `role_scopes` 现算（`status` 给分工图，认不出的标 `⚠未认领`）；**干什么**写进 `repos/index.md`，**怎么跑、怎么测、坑在哪**写进 `repos/notes/<仓库>.md`（`analyst` 维护）—— 两者都进 git，`status` 与 `role scopes` 每次点名缺失（缺行、死链、缺节、占位符），校验只报不改。格式与取舍见 [CLAUDE.md](CLAUDE.md#仓库分工谁写干什么)。
 
 之后正常用全部命令 —— `wb.py` 向上查找最近的 `.workbench/`，hook 用绝对路径注册，都不受 cwd 影响；在各仓库子目录里跑命令，状态仍归属外层。
 
@@ -143,13 +146,13 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 `PreToolUse` hook 拦以下几类，退出码 2 阻止调用并把原因回灌给模型（完整清单与边界见 AGENTS.md「权限守卫」）：
 
 1. 写出项目根之外
-2. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
+2. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
 3. 角色越权写 —— `pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`（产物目录按阶段隔离）
 4. 角色跑特权 wb.py 子命令（`phase set`、`contract unlock|bump`、`config set`、`flow new/switch/remove` 等）
 5. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、`dd of=/dev/`、fork bomb）+ 提示级警告（`git reset --hard`、`git clean -fd`、`npm publish`）
 6. 未审核的 skill 调用 —— subagent 只能调 `allowed_skills` 白名单里的（主线程是审核者，不限）
 
-第 2 条**同时覆盖 Bash 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `python3 -c` `node -e` `ln -sf` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
+第 2 条**同时覆盖 Bash 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `shred` `python3 -c` `node -e` `ln -sf` `cp` `mv` `install` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
 
 ```bash
 python3 .claude/hooks/wb.py role scopes         # 范围 + 冻结清单 + 解冻窗口
@@ -185,7 +188,7 @@ python3 .claude/hooks/wb.py log --tail 200
 1. `.claude/hooks/` 与 `.claude/skills/` **整目录**拷贝 —— `wb.py` 只是入口，实现在同目录 `wb_*.py` 模块里，只拷 `wb.py` 会缺模块（入口给出明确报错，`selfcheck` 有一条分发完整性断值守着）。
 2. 升级后跑一次 `wb.py role scopes --reset`（先 `role scopes` 存一份定制值）—— 新增的默认值不会自动覆盖老 `state.json` 里的旧值。跨仓库布局（`repos/*`）下它跟 `init` 走同一条路径，重新按仓库前缀算，不会把范围刷成裸默认值。
 3. 跑 `wb.py selfcheck`。`status` 根行显示的 `wb <版本>`（`wb_const.py` 的 `WB_VERSION`）用来确认换成了哪一份；`state.json` 的 schema 版本（`STATE_SCHEMA`）只增不改语义，老状态靠 `setdefault` 补齐字段，不需要迁移脚本。
-4. `.agents/skills/` 与 `.claude/skills/` 是**手工同步的两份拷贝**，改一边必须同步另一边 —— `selfcheck` 会逐文件比对内容，不一致直接失败（角色定义不受此影响，`.claude/agents/` 与 `.codex/agents/` 都是指向根 `agents/` 的软链）。
+4. skills 唯一维护在 `.claude/skills/` —— `.agents/skills` 是指向它的软链，改一处两端生效（`selfcheck` 断言软链指向；若某端退回正文副本，则改为逐文件比对内容）。角色定义同样单源：唯一正文在根 `agents/`，`.claude/agents/` 与 `.codex/agents/` 都是软链。
 
 ### 回归防线
 

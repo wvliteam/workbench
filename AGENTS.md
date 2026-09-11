@@ -15,7 +15,7 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 ## 入口
 
 - 主编排：`/wb-flow`；自动排空：`/wb-loop`；契约操作：`/wb-contract`；多仓库初始化：`/wb-init`；知识沉淀/查找：`/wb-knowledge`
-- skills 按端各放一份（当前 `.claude/skills/` 与 `.agents/skills/`，手工同步，见文末「多端适配」）
+- skills 唯一维护在 `.claude/skills/`（`.agents/skills` 软链指向它，见文末「多端适配」）
 - 状态内核：`.claude/hooks/wb.py` 是唯一入口，实现按层次拆在同目录（`wb_const` / `wb_bash` / `wb_core` / `wb_guard` / `wb_cli` / `wb_selfcheck`，分发时整目录拷贝，缺文件入口会明确报错），全端共用同一份，`--format` 适配各端 hook 载荷与输出协议；各端 hook 注册表引用自己的入口 —— Claude 端直接引用，Codex 端经 `.codex/hooks/wb.py` 软链落到同一入口文件，`resolve()` 会解析回真实路径，守卫不受影响
 
 ## 何时走流程，何时不走
@@ -42,7 +42,42 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 └── scripts/            # repos_apply.py / repos_tui.py 等公共脚本
 ```
 
-clone 与 IDE 配置按清单自动化：工作区根放一份 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 按 清单 clone/软链到 `repos/`、生成 `.workbench/<工作区名>.code-workspace` 多根工作区与 `.vscode/settings.json` 的 git 发现配置（幂等，已存在的 checkout 不覆盖，clone 失败显式报错）。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与幂等边界见 `.claude/skills/wb-init/SKILL.md`。
+clone 与 IDE 配置按清单自动化：工作区根放一份 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 按 清单 clone/软链到 `repos/`、生成 `.workbench/<工作区名>.code-workspace` 多根工作区与 `.vscode/settings.json` 的 git 发现配置（幂等，已存在的 checkout 不覆盖，clone 失败显式报错）。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与幂等边界见 `.claude/skills/wb-init/SKILL.md`。
+
+### 仓库分工：谁写、干什么
+
+编排者在多仓库里要回答两个问题，来源不同：
+
+- **谁写这个仓库** —— 从 `role_scopes` 现算，`status` 与 `role scopes` 直接给分工图（`frontend→frontend-developer`），认不出的仓库标 `⚠未认领` 并给认领命令。不建第二份存储，不会漂移。
+- **这个仓库是干什么的** —— 没有可派生的事实源，人手维护 `repos/index.md`（进 git，`repos/` 其余内容仍忽略）：
+
+```markdown
+| 仓库 | 职责 | 入口文档 |
+| --- | --- | --- |
+| frontend | 用户界面，React SPA | repos/notes/frontend.md |
+| payments-svc | 支付核心服务 | |
+```
+
+单仓的**稳定事实**写在 `repos/notes/<仓库>.md`（同样进 git），`analyst` 是作者 —— 它每次 analyze 都要把仓库摸一遍，摸到的「怎么跑起来、怎么测、坑在哪」与本次需求无关，跟着 flow 归档就白丢了：
+
+```markdown
+# <仓库>
+
+## 职责
+一句话说清它做什么。
+
+## 启动
+依赖、启动命令、readiness 判据。
+
+## 测试
+测试入口、命令、成功标准。
+```
+
+三份东西分工写死，避免退化成互相抄的副本：`index.md` 给编排者扫一眼分工；`notes/<仓库>.md` 放**下个需求还用得上**的客观事实；`current-state.md` 只放本次需求的现状（要动哪几处、撞什么风险），按 flow 隔离、过门禁即冻结。需求相关的别写进笔记，仓库相关的别写进现状。
+
+`status` 与 `role scopes` 每次校验两处并点名：索引的缺行 / 死行 / 重复行 / 职责占位符 / 入口文档死链，笔记的未建 / 缺节（职责 / 启动 / 测试）/ 只剩占位符。**校验只报不改** —— 取不到证就写结构化「待补充」，交回编排者或派 `analyst` 补，不要猜。
+
+**画像任务与需求分析是两件事，别并成一件。** 需求驱动的 analyze 边界是「实现这个需求要动哪些地方」，取证跟着需求走 —— 一整仓的画像（怎么跑、怎么测、有哪些子模块、坑在哪）不会被它顺带产出。所以 `init` / `flow new` 会为每个还没有笔记的仓库建一个独立任务（`仓库画像：<仓库>`，`role=analyst`、`phase=analyze`、`write-scopes=repos/notes/<仓库>.md`），初始化后**先派这批**（可并行），派发方式与常规任务相同（`task start` → analyst → `task done`）。新增仓库后照上面那条命令补建。analyze 门禁 `repos_notes_exist` 兜底：任一仓库缺笔记或缺节，analyze 不准出。
 
 在外层跑一次工作台 init（每个工作区一次，不是每个需求一次）：
 
@@ -152,13 +187,12 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 
 `PreToolUse` hook 的 matcher 是 catch-all（`.*`，见 `.claude/settings.json`），每次工具调用都过守卫 —— 逐个列工具名时没列进去的工具等于完全不设防。它拦以下几类：
 
-- 写出项目根之外
-- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash（含 `Monitor`，与 Bash 同一个 shell 环境跑 `tool_input.command`）的 `>` `tee` `sed -i` `python3 -c` 等写法都拦
-- 角色越权写（`pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`）—— 产物目录按阶段隔离；`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值；`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（按知识类别分目录的知识库，专属 `knowledger` 角色）、`references/` 公共规范任何角色只读；仅 `references/workspace/<自己的角色>/` 可由对应角色修改，其他角色目录不可写
+- 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash（含 `Monitor`，与 Bash 同一个 shell 环境跑 `tool_input.command`）的 `>` `tee` `sed -i` `python3 -c` 等写法都拦。**写出项目根之外不在此列**（2026-09-12 起不拦：根外写入不影响工作流推进，属常态动作）
+- 角色越权写**工作流核心路径** —— 受守前缀：`.workbench/`（状态、契约、阶段产物按阶段隔离）、`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（专属 `knowledger`）、`references/`（公共规范只读，仅 `references/workspace/<自己的角色>/` 可改自己的），多仓库布局下再加工作区材料 `scripts/` `repos.json` `repos/index.md` `repos/notes/`（归 `analyst`）`.vscode/`。`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值。**核心路径之外一律不判角色**：仓库代码、`/tmp`、项目根之外 —— 在 `/tmp` 建测试脚本、跑根外脚本、跨目录搬文件都是开发常态，且不影响工作流推进；「谁该写哪块代码、别乱写文件乱执行脚本」属于 harness 与模型层面的规范，不是本工作台的职责。守卫管得越宽，越容易在正常动作上误拦，把防线变成流程阻力
 - 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`init --root`（会在项目外甚至 `.claude/` 下建 `.workbench` 结构）、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
 - 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()` 与 `gate_command_references_outside()`（后者拒 `sh /tmp/x.sh`、`pytest --cov=/tmp/x` 这类项目根外的脚本与路径引用）
-- 非主线程调用会「把动作带出本会话权限边界」的工具（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）—— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，动作发生在守卫看不见的地方，拦不住第二次，所以门只能设在「调它」这一步。主线程是编排者，不受限
-- 未审核的 skill 调用 —— 角色 subagent 都带了 `Skill` 工具，但只能调 `allowed_skills` 白名单里的 skill。任何非主线程调用者（角色、`general-purpose`、`Explore`，凡带 `agent_type`/`agent_id`）都受这层约束；主线程（两者都无）是审核者，不限。默认空表 = 拒全部，`["*"]` = 全放行。白名单只有主线程能改（`config set` 对角色一律拦），所以「哪些 skill 能用」就是编排者的审核动作。被拦的 skill 报回主线程审核，别绕
+- 非主线程调用会「把动作带出本会话权限边界」的工具（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）—— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，动作发生在守卫看不见的地方，拦不住第二次，所以门只能设在「调它」这一步。主线程是编排者，不受限。**⚠ 这层在 `d606944` 重构中被移除，尚未恢复 —— 当前不生效**（见 [draft/open-issues-2026-09-10.md](draft/open-issues-2026-09-10.md) 的 P0 条目）
+- 未审核的 skill 调用 —— 角色 subagent 都带了 `Skill` 工具，但只能调 `allowed_skills` 白名单里的 skill。**⚠ 同上，这层当前也不生效**（`allowed_skills` 仍是 state 里的配置项，但没有执行点）。被拦的 skill 报回主线程审核，别绕
 
 被拦时不要绕（不要改 settings、不要换等价命令）。写冻结文件时 Bash 的等价写法（`>` / `tee` / `sed -i`）也拦，换写法没用。要么走 `contract unlock` 申报，要么交给有权限的角色，要么说明理由让用户决定。契约不够用（缺字段、对不上现实）也不是绕过的理由：`task block` 留言，由 architect 走 unlock/bump 修契约。拒绝信息里已经按 owner 分岔给了该跑的命令与契约实名，照它说的做。
 
@@ -172,6 +206,7 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 ## 多端适配
 
 - 本文件是唯一正文，其他入口文件名（如 `CLAUDE.md`）软链到它 —— 改协作约定只改 `AGENTS.md`，接入新端加软链即可。历史上两文件曾是各自维护的摘要，各端拿到的规则深度不一致，已收敛。
+- skills 同理：唯一正文在 `.claude/skills/`，`.agents/skills` 是整目录软链（`d606944` 起，此前是两份手工拷贝）。新增 skill 只建 `.claude/skills/<名>/`，不要复制一份到别处 —— `selfcheck` 会断言软链指向，若某端退回正文副本则改为逐文件比对。
 - 角色定义唯一维护在根目录 `agents/*.toml`；运行 `python3 scripts/generate_agents.py` 生成 Claude/Comate 使用的 `agents/*.md`。`.claude/agents/` 与 `.codex/agents/` 只保留指向根目录的软链，平台通过各自入口加载。**角色名必须与 `wb_const.py` 的 `ROLES` 完全一致**。新增平台时只增加入口软链，不复制角色正文；改角色先改 TOML，再运行生成脚本和 `--check` 校验。
 - hook 挂在各端自己的注册表里（如 `.claude/settings.json`、`.codex/hooks.json`），部分端要求项目受信任、hook 通过审核后才真正运行。不要把端上的完全放行模式（如 `danger-full-access`）当作角色权限控制 —— 守卫本身就是 hook，hook 不加载就什么都不是。
 - 端注入的环境变量（如 `$CLAUDE_PROJECT_DIR`）只在该端存在，脚本不要依赖它跨端可用；通用钉根用 `WB_ROOT`，或直接相对/绝对路径。
@@ -184,13 +219,13 @@ python3 .claude/hooks/wb.py config set allowed_skills '["wb-flow","wb-knowledge"
 - 产物归属按「角色 + 任务 `started` 时间」认领，同一角色的两个任务并行时分不开。
 - 改状态的命令走 `.workbench/flows/<flow>/state.lock` 排他锁，并行 subagent 的 `task done` 不会互相覆盖。只读的不占锁（`status` / `next` / `gate` / `contract impact` / `log --tail`）。锁不跨门禁命令持有，所以 `phase advance` 的门禁结论是**它开跑那一刻**的快照 —— 期间刚落盘的 `task done` 不算进这次结论，再跑一次 `gate check` 就对了；期间别人推了阶段则这次直接拒绝（「这次门禁结论作废，重跑 phase advance」），照它说的重跑。撞上「等状态锁超时」直接重试。
 - 角色范围用 `fnmatch` 匹配，`*` 跨 `/`，偏宽松而非严格。一处例外：`GUARDED_PREFIXES`（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）与 `WORKSPACE_GUARDED_PREFIXES`（`scripts/` `repos.json` `.vscode/`，仅存在 `repos/` 的多仓库布局下生效）下的路径只认显式以该前缀开头的模式，否则 `*.md` / `*.json` / `*.py` 会跨进产物与契约目录、守卫自己的权限引擎与 hook 注册表、知识库、公共规范、公共脚本与仓库清单、本机 IDE 配置，把阶段隔离、防线本身、沉淀专属性、规范只读性与初始化流程一起绕开。开发与 `reviewer` 有 `*.md`、`qa` 有 `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini`，都只对仓库内的文件生效。
-- Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结、越根和角色范围；`resolve()` 按段维护累积 cwd（`cd`/`pushd` 更新、`popd` 退栈），每段的相对目标按该段 cwd 解析，先切目录再写的目标不再错位；`sed -i` 只把 `-i` 之后真实存在的文件当写入目标，脚本表达式（`s/a/b/`）与 BSD 的空后缀不算。切进任何受守目录（`GUARDED_PREFIXES` + `WORKSPACE_GUARDED_PREFIXES`）再写的整类写法由 `_cd_into_guarded()` 无条件拒绝（按命令原文判，`cd .claude && ls` 这类纯读不拦）。`~` 在解析前展开。动态不可解析命令对 subagent 拒绝，不把「Bash 没被拦」当成「这个写入是允许的」。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。`cp .workbench/contracts/api.yaml /tmp/bak` 的源路径不再误报，目标在 safe 目录时放行。
-- 非主线程执行脚本文件按位置收严（`_exec_script_targets` / `_check_script_exec`）：执行脚本 = 脚本内容代表的全部写入，正文不在命令行里解析不到，所以只有「项目根内且在该角色写入范围内」放行，`/tmp` 与项目根外一律拒；`repos_apply.py` / `repos_tui.py` 另有一条硬拒。写入目标或执行形态不在命令行里的构造（`python3 -` / `python3 < f` / `bash < f` / `bash <<EOF`、`find -delete`/`-exec`、`git apply`、只给补丁输入的 `patch`）走不确定分支、角色一律拒（`python3 - < f.py` 这类 `-` 加重定向的混合形态例外：`-` 之后的重定向文件由脚本位置检查接住 —— 文件在项目根内且在角色范围内放行，`/tmp` 与项目根外照拒）。灾难命令与敏感路径扫描改扫 `strip_heredocs()` 之后的文本 —— 正文里的 `git push --force` 只是回显，不再误拦。
+- Bash 冻结检查先用 `resolve()` 解析重定向、`cp` / `mv` / `install` 等静态写入目标，再检查冻结与（受守前缀下的）角色范围；`~` 在解析前展开；详见 [docs/permissions.md](docs/permissions.md#bash-绕过检查)。**根外写入不判角色**（2026-09-12）：`outside_targets` 只做记录，不据此拒绝。`git checkout`、外部编辑器和用户手改仍由门禁哈希校验兜底。
+- **执行脚本不做位置管控**（2026-09-12 移除）：`bash /tmp/x.sh`、`./deploy.sh`、`python3 -c` 这类一律放行 —— 在 `/tmp` 建测试脚本、跑临时脚本是开发常态。只有 `repos_apply.py` / `repos_tui.py` 两个具名公共脚本被硬拒（它们的写入目标是工作区材料那些只读前缀，而 `python3 x.py` 形态在 Bash 里解析不出写目标）。写入目标不在命令行里的构造（`python3 -` / `bash <<EOF`、`find -delete`、`git apply`）走 uncertain 分支：冻结检查退回保守的文本匹配，**角色范围不做猜测性拒绝**。灾难命令与敏感路径扫描扫的是 `strip_heredocs()` 之后的文本 —— 正文里的 `git push --force` 只是回显，不误拦。
 - 冻结检查带嵌套根反查（写入目标向上找 `.workbench/`）：`repos/` 下若出现自带的 `.workbench/`（如误操作 init 进仓库），写它的冻结契约或 `state.json` 照样拦，申报解冻要在那个仓库里跑 `contract unlock`。本工作台唯一布局下 `repos/` 里不该有 `.workbench/`，这层是防御冗余。
 - 特权子命令层的校验基于**解析出的 wb.py 参数**：heredoc body 不在其中、管道分段、`shlex` 分词后逐段核对。`--name` 用的是 flag 的字面值，`--name $C` 这类 shell 变量在 hook 里解析不了（不做变量展开），按「查不到 owner」拒绝 —— 报回编排者用实名重跑即可。主线程不受这层影响（没有 `agent_type`），这层的存在正是「状态只能经 wb.py 改」能成立的原因：没有它，wb.py 能改的一切任何角色都能改。
 - 门禁命令是 `shell=True` 的 subprocess，不经 Bash 守卫 —— 这是它作为门禁的前提（任意项目的任意测试命令）。已知上限：catastrophic 模式筛得掉，但 qa 配的非灾难命令就是会原样执行。
 - 契约内核只校验内容哈希，不校验语法。要语法校验挂到 `gate_commands.lint`。
-- Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结与越根检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv`/`install` 精确模式下只取最后一个非 flag 参数为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`），源路径不误拦；`ln` 是例外 —— 末参数照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒，所以 `ln -s .claude/hooks/wb.py x.py` 这种「先建链再写」的串联写法拦得住。
+- Bash `resolve()` 三态输出：`(all_targets, outside_targets, uncertain)`。`uncertain=True` 时冻结检查退回旧行为（`BASH_WRITE` + `frozen_hits` 文本匹配 + 重定向兜底正则），误报面宽但不漏拦；拒绝信息里会注明「写入目标无法解析，已一并拦截」。兜底正则里的目标先 `resolve()` 再与 safe 目录比对 —— macOS 的 `/tmp` 是软链，不展开的话 `/tmp/xx` 永远比不中，写临时补丁脚本会被误拦。`cp`/`mv`/`install` 精确模式下只取最后一个非 flag 参数为写入目标（带 `-t`/`--target-directory` 时末参数是源，目标改算 `DIR/<源文件名>`），源路径不误拦；`ln` 是例外 —— 末参数照常按写入目标判，其余参数（链接指向项）resolve 后落进受守前缀即拒，所以 `ln -s .claude/hooks/wb.py x.py` 这种「先建链再写」的串联写法拦得住。
 - 硬链不用解析侧解，用 inode 判：`ln .workbench/flows/main/state.json innocent.md` 之后写 `innocent.md`，`Path.resolve()` 分不清同一 inode 的另一个目录项，别名按 `*.md` 命中角色范围一路放行，内容直改 `state.json` —— 冻结防线与「状态只能经 wb.py 改」同时失效且不留哈希痕迹。`_check_write_target` 因此在冻结检查之后加一道：目标**已存在且是普通文件**且 `st_nlink > 1` 即拒（目录的 nlink 天然 > 1，新建目标与 FIFO/socket 等非常规文件跳过）。`stat()` 抛 OSError（权限、竞态删除等文件系统问题）时跳过而不拒绝 —— 环境问题不该升级成全网阻断。代价是所有已存在的多链接文件一律不可写（本仓库与 `.git` 内当前都没有这类文件，属预期收严）。
 - 门禁 `run_check` 三态：exit code 0 且命中 `0 tests`/`No tests ran`/`-DskipTests`/`--passWithNoTests` 等零用例或跳过标记时返回 `unverified` 而非 PASS。`unverified` 在门禁汇总里等同 FAIL，但拒绝信息说明不同：「exit=0 但无独立证据表明测试通过」。
 

@@ -1,8 +1,8 @@
 # 与 ROMA 的对比：可借鉴项
 
-**第 1、2、3、4、5、6、8、10 节已落地（见各节「落地」段与文末「落地顺序」），第 9 节仍是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。已落地各节的「落地」指当前本地 `wb.py` 与 hook；已移除的 `wbsvr` 只作为历史设计背景，不是运行中的控制面。任何一处落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
+**第 1、2、3、4、5、6、8、10、11 节已落地（见各节「落地」段与文末「落地顺序」），第 9 节仍是未实施的提案。** 记的是「另一套系统解了什么我们没解的问题、抄过来要付什么代价」，不是已有行为。已落地各节的「落地」指当前本地 `wb.py` 与 hook；已移除的 `wbsvr` 只作为历史设计背景，不是运行中的控制面。任何一处落地前，`wb.py` 与 `selfcheck` 的断言仍是唯一权威。
 
-**2026-09-03 复核，2026-09-06 更新落地状态，2026-09-07 第八节沉淀出口完整落地。** 九节断言逐条对过代码，八节仍成立，第 1 节的论据被自己的仓库推翻了一半：`BASH_WRITE` 已补 `cp` / `mv` / `install`（`wb.py:187`，这项能力当前由本地 hook 实现；它曾在已移除的 `wbsvr` 历史设计阶段 0 中被讨论），漏报那一半关掉了。但补上它同时**开了一类新误报**，所以第 1 节没有降级 —— 它从「可选优化」变成了这批改动的必要配套，论据已按新事实重写。同期修正：`wb.py` 行数 2257 → 2851（旧记录中的 hosted 服务设计部分不代表当前能力，与本文九节无关）；第 3 节「先采样载荷」的前提已经有答案（见该节代价段）；跨端节引用的 `codex-agent-migration.md` 已自我更正。2026-09-06：落地顺序节核对后重写 —— 第 3–7 条（stale、unverified、verification.md 分离、UNKNOWN、熔断）都已进代码，之前仍列在「先做」是记录滞后。
+**2026-09-03 复核，2026-09-06 更新落地状态，2026-09-07 第八节沉淀出口完整落地；2026-09-11 行号引用修订：`wb.py` 已拆为薄入口 + 六模块（fe3df75），文内 `wb.py:行号` 一律改为函数/模块名。** 九节断言逐条对过代码，八节仍成立，第 1 节的论据被自己的仓库推翻了一半：`BASH_WRITE` 已补 `cp` / `mv` / `install`（这项能力当前由本地 hook 实现；它曾在已移除的 `wbsvr` 历史设计阶段 0 中被讨论），漏报那一半关掉了。但补上它同时**开了一类新误报**，所以第 1 节没有降级 —— 它从「可选优化」变成了这批改动的必要配套，论据已按新事实重写。同期修正：单文件时代行数 2257 → 2851 的记录已被拆分取代，与本文九节无关；第 3 节「先采样载荷」的前提已经有答案（见该节代价段）；跨端节引用的 `codex-agent-migration.md` 已自我更正。2026-09-06：落地顺序节核对后重写 —— 第 3–7 条（stale、unverified、verification.md 分离、UNKNOWN、熔断）都已进代码，之前仍列在「先做」是记录滞后。
 
 对比材料是 ROMA v0.3.6 的一份源码快照（百度 `roma-team`，`.claude/` + `.codex/` 双端插件树，约 180 个文件）。快照打包在 `output/agents.tgz`，`output/` 在 `.gitignore` 里 —— **不进本仓库**，但要复核 ROMA 侧的引述可以解包。对比日期 2026-09-03。
 
@@ -13,7 +13,7 @@
 | | ROMA | 本工作台 |
 | --- | --- | --- |
 | 层级 | workspace **运行时内核** | 开发**流程编排** |
-| 载体 | 三端插件树（Claude Code / Codex / Comate），10 个 skill + 3 个 hook + 共享 lib | 单个 `wb.py`（2851 行）+ 7 个角色 subagent |
+| 载体 | 三端插件树（Claude Code / Codex / Comate），10 个 skill + 3 个 hook + 共享 lib | 薄入口 `wb.py` + 六模块（当时单文件 2851 行，后拆分）+ 8 个角色 subagent |
 | 管什么 | 仓库路由 `repos/`、知识体系 `docs/`、执行产物 `artifacts/`、健康检查、自更新、跨端适配 | 六阶段流水线、契约冻结、门禁、角色隔离 |
 | 唯一的流水线 | `env-init`（环境初始化），G0–G8 门禁 + `INIT-PLAN.json` 任务图 + evidence ledger | clarify → analyze → design → develop → verify → retro |
 | 门禁强制性 | 规则写在 SKILL.md 里靠模型遵守，校验脚本只做 schema 检查 | `phase advance` 退出码挡住阶段推进 |
@@ -24,14 +24,14 @@
 
 **我们的问题。** 守卫里有**两条互不相干的 shell 检查，各有各的洞。混成一条看会得出错误结论 —— 早期版本的本节就混过。
 
-**冻结检查**（`wb.py:1644`）两段式：`BASH_WRITE` 判有没有写入意图，`frozen_hits()` 判命令文本里有没有提到冻结路径，两段都中才拒。补进 `cp` / `mv` / `install` 之后，`cp 旧文件 .workbench/contracts/api.yaml` 这类真写入不再漏了 —— 但 `frozen_hits()` 只做 `rel in cmd`（`wb.py:1559`），**不分源和目标**，于是换来两类误报：
+**冻结检查**（`wb_guard.py` 的 Bash 分支）两段式：`BASH_WRITE` 判有没有写入意图，`frozen_hits()` 判命令文本里有没有提到冻结路径，两段都中才拒。补进 `cp` / `mv` / `install` 之后，`cp 旧文件 .workbench/contracts/api.yaml` 这类真写入不再漏了 —— 但 `frozen_hits()` 只做 `rel in cmd`（`wb_guard.py:152`），**不分源和目标**，于是换来两类误报：
 
 - `cp .workbench/contracts/api.yaml /tmp/bak` —— 备份契约，纯读，被当成写入拦下。这是补 `cp` / `mv` **新引入**的；
 - `cat 契约.md > /tmp/x`、`grep -R X 契约目录/ > /tmp/o.log` —— 冻结路径在读位置，重定向目标在 `/tmp`，一样拦。这类比 `cp` 更早就在。
 
 heredoc 是第三类：`cat > design.md <<'EOF' … 见 openapi.yaml … EOF`，body 里提到已冻结的契约路径就命中 `frozen_hits()`。body 不是写入目标，拦它没有依据。
 
-**越根检查**（`wb.py:1677`）是另一条路，只扫 `>>?\s*['\"]?(/…)` 这一种形式，**不看 `BASH_WRITE`**。所以 `cp x /etc/foo`、`mv x /etc/foo` 在这条上仍然全漏 —— 补 `BASH_WRITE` 补不到它，两处代码没有关系。它的注释把理由写明了：「任意 shell 命令的写入目标抽不干净……做一个漏一半的检查会让人误以为有防护，所以只认这一种可靠形式」。
+**越根检查**（拆分前 `wb.py` 的旧实现）是另一条路，只扫 `>>?\s*['\"]?(/…)` 这一种形式，**不看 `BASH_WRITE`**。所以 `cp x /etc/foo`、`mv x /etc/foo` 在这条上仍然全漏 —— 补 `BASH_WRITE` 补不到它，两处代码没有关系。它的注释把理由写明了：「任意 shell 命令的写入目标抽不干净……做一个漏一半的检查会让人误以为有防护，所以只认这一种可靠形式」。
 
 三个洞的成因是同一个：**没有真正解析写入目标**。
 
@@ -59,7 +59,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 | 改哪里 | 怎么改 | 方向 | 风险 |
 | --- | --- | --- | --- |
-| 越根检查（`wb.py:1677`） | 目标集从「只扫 `>` 正则」换成 `resolve()` 的 `targets` | 从宽变严 | 低 —— 现在是漏，补上只多拦真写入 |
+| 越根检查（同上旧实现） | 目标集从「只扫 `>` 正则」换成 `resolve()` 的 `targets`（`wb_bash.py:133`） | 从宽变严 | 低 —— 现在是漏，补上只多拦真写入 |
 | heredoc | `strip_heredocs()` 剥正文后再喂 `frozen_hits()` | 从严变宽 | 低 —— body 不是写入目标，本来就不该拦 |
 | 冻结检查源/目标 | `uncertain=False` 且冻结路径不在 `targets` 里时放行 | 从严变宽 | **中** —— 解析器漏一个写法，原本拦住的就放行了 |
 
@@ -93,7 +93,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 三、`__unknown__` 调用者 = 门禁失效告警
 
-**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底（`wb.py:1612`）。[architecture.md](../docs/architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
+**我们的问题。** `current_role()` 拿不到载荷里的 `agent_type` 时退回读 `.workbench/role` 文件兜底（`wb_guard.py:250`）。[architecture.md](../docs/architecture.md) 的已知边界承认了这条，但兜底的实际效果是：**把「身份识别坏了」伪装成「这是主线程」**，静默降级。
 
 **ROMA 的做法。** 三态而不是两态：
 
@@ -115,7 +115,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 四、`stale` 状态与下游自动失效
 
-**我们的问题，也是真漏洞。** 任务只有 `todo` / `doing` / `done` / `blocked`，`deps` 只在派发前挡一次（`ready_tasks` 只对 `status == "todo"` 的任务查 `deps`，`wb.py:720`）。qa 把某任务打回成 `blocked` 后，**依赖它的任务仍然是 `done`**，`tasks_done:*` 只查 `!= "done"`（`wb.py:643`）照过。上游被推翻不会让下游失效。
+**我们的问题，也是真漏洞。** 任务只有 `todo` / `doing` / `done` / `blocked`，`deps` 只在派发前挡一次（`ready_tasks` 只对 `status == "todo"` 的任务查 `deps`，`wb_core.py:1034`）。qa 把某任务打回成 `blocked` 后，**依赖它的任务仍然是 `done`**，`tasks_done:*` 只查 `!= "done"`（`wb_core.py` 的 `run_check`）照过。上游被推翻不会让下游失效。
 
 **ROMA 的做法。** 状态七态：`PENDING` / `IN_PROGRESS` / `PASS` / `FAIL` / `BLOCKED` / `STALE` / `NOT_APPLICABLE`。规则三条：
 
@@ -135,7 +135,7 @@ cp repos/index.md /tmp/idx.md                           # 老规则 deny
 
 ## 五、`unverified` 档与反自证校验
 
-**我们的问题。** `run_check` 的 `cmd:` 分支只看退出码（`return r.returncode == 0, ...`，`wb.py:682`）。`npm test -- --passWithNoTests` 退 0，`pytest --collect-only` 退 0，`mvn -DskipTests` 退 0 —— 全部记 PASS。门禁在这三种情况下形同虚设，而这正是 `gate_commands` 存在的理由。
+**我们的问题。** `run_check` 的 `cmd:` 分支只看退出码（`return r.returncode == 0, ...`，`wb_core.py` 的 `run_check`）。`npm test -- --passWithNoTests` 退 0，`pytest --collect-only` 退 0，`mvn -DskipTests` 退 0 —— 全部记 PASS。门禁在这三种情况下形同虚设，而这正是 `gate_commands` 存在的理由。
 
 **ROMA 的做法。** 验证项五态，「测试没跑」单独一档 `UNVERIFIED`，且和 `FAIL` 一样卡准出。`validate_verification_result.py` 拒四类自证：
 
@@ -270,6 +270,24 @@ SHELL_TOOL = re.compile(r"shell|bash|exec|run_command|process", re.I)
 
 ROMA 每命令显式传 work-item 选择器、我们用指针，差别在 hook 场景指针是唯一可行的：subagent 跑 shell 时不会记得带 flag，而守卫必须不依赖它。指针的漂移风险（命令中途切指针）用 `st["_flow"]` 定点消掉。
 
+## 十一、仓库索引（`repo-management`，2026-09-12 落地）
+
+**我们的问题。** 多仓库工作区里，编排者每题都要回答两个问题：「这个仓库归谁写」与「这个仓库是干什么的」。前者能从 `role_scopes` 现算，后者**没有任何源** —— `init` 只按目录名猜归属（认不出的硬拦点名），仓库职责（支付核心、共享库、谁依赖谁）散在人的脑子里，每轮 analyze 重新摸一遍。
+
+**ROMA 的做法。** `repo-management` skill 维护 `repos/index.md` 路由表（仓库、源码入口、所属项目、主要职责、入口文档 + 跨库关系段）与每仓三件套 `overview.md` / `setup.md` / `test.md`，代码本体在 gitignore 的 `repos/.source/`；`check_repos.py --root .` 校验重复行、必备章节、模板占位符、源码入口死链，**report-only、不自动改文件**；`docs-map-reminder.py` hook 盯「声明表 vs 实际目录」的漂移。两条纪律最值钱：**无法取证的字段写结构化「待补充」，不要猜**；**三件套按阶段取证 → 落盘 → 回读通过才进下一阶段**，禁止批量填占位符。
+
+**落地（2026-09-12）。** 取索引、单仓笔记与护栏：
+
+- `repos/index.md` 手维护、进 git（`.gitignore` 改 `repos/*` + `!repos/index.md` + `!repos/notes/`），格式 `| 仓库 | 职责 | 入口文档 |`；`repos.json` 的 `description` 字段作种子与显示，不参与判定。
+- `repo_claims()`（`wb_core`）把「谁认领」展开成 `{仓库: [角色]}`，与 `unclaimed_repos` 共用同一探路径判据；`status` 与 `role scopes` 打印分工图，认不出的标 `⚠未认领`。
+- `repo_index_issues()` 每次校验五类：未建索引、缺行、死行（登记了不存在的仓库）、重复行、职责占位符、入口文档死链。只报不改，不自动生成 —— 职责没有可派生的事实源，自动写只会写空话。
+- **单仓笔记抄了**（`repos/notes/<仓库>.md`，三节：职责 / 启动 / 测试），但三件套合并成一份文件的三节。最初判它「与 analyst 的 `current-state.md` 重复」是错的：`current-state.md` 是**本次需求**的现状，按 flow 隔离、过门禁即冻结、跟着需求归档；笔记是**跟仓库走**的稳定事实，下个需求还要用。作者是 `analyst`（唯一在 analyze 阶段把仓库摸透的角色），`repo_note_issues()` 逐节点名未建 / 缺节 / 占位符。
+- **画像独立成任务**：`init` / `flow new` 为每个还没有笔记的仓库建 `仓库画像：<仓库>`（analyst / analyze / `write-scopes` 指向那份笔记），编排者初始化后先派完；analyze 门禁 `repos_notes_exist` 兜底。不能并进需求的 analyze —— 那个任务的边界是「实现 requirements 要动哪些地方」，取证跟着需求走，整仓画像不会被顺带产出（ROMA 的 repo-management 同样是「录入仓库」这一步独立执行，不挂在需求上）。
+- 三份东西的边界写死以免退化成互相抄的副本：`index.md` 一行职责给编排者扫；`notes/` 放下个需求还用得上的客观事实；`current-state.md` 只放本次需求。`artifacts/repo-env-facts/*.json` 缓存仍不抄 —— 那是它 `env-init` 流水线的配套，我们的对应物是 UNRUN 累积信号 + `knowledge/`。
+- 写入边界照抄精神：索引只放路由与一句话职责，不放平台 dump、不记凭据值。
+
+**代价。** `wb_core.py` 约 140 行 + selfcheck 断言一组；`status` 每轮多读几个小文件。与第七节证据账本「不做，只留判据」的分野：这条的问题真实存在，且解在既有管线上（派生的归派生、手维护的配机械校验），没有新造一类账本。
+
 ## 明确不抄的
 
 | 它有的 | 为什么不抄 |
@@ -296,7 +314,8 @@ ROMA 每命令显式传 work-item 选择器、我们用指针，差别在 hook �
 7. **契约争议熔断** —— 哨兵 + 终止令话术 + `status` 显示，`bump` / `dispute --clear` 解除。
 8. **环境变量钉根 + flow 维度 + 嵌套根反查（2026-09-06）** —— 见第十节。`find_root()` 环境变量优先堵 cwd 漂移；flow 把状态、锁、门禁记录、产物按需求线隔离，守卫读全部 flow 并集；`nested_roots()` 让外层会话写内层仓库冻结对象时反查目标所在的根。
 9. **retro 沉淀出口（2026-09-07 完整落地）** —— 第八节：retro 门禁 `knowledge_written` + `knowledger` 角色（写权限专属）+ `wb-knowledge` skill + 条目 schema 契约 `knowledge-convention`。
+10. **仓库索引（2026-09-12）** —— 第十一节：`repos/index.md` 手维护 + `description` 种子 + `repo_claims()` 派生分工图 + `repo_index_issues()` 机械校验（report-only）。
 
 **不做**
 
-10. 证据账本 —— 见第七节与「明确不抄的」。等归属之外的问题真的出现再回来看。
+11. 证据账本 —— 见第七节与「明确不抄的」。等归属之外的问题真的出现再回来看。

@@ -65,6 +65,10 @@ GATES = {
         "checks": [
             "artifact_contains:current-state.md:风险",
             "analyze_parts_complete",
+            # 仓库画像与需求分析是两件事：需求驱动的那次只看需求相关部分，产不出整仓的
+            # 稳定事实（怎么跑、怎么测、坑在哪）。init 会建好画像任务，这条兜底 ——
+            # 新增仓库、漏派、笔记被删都在 analyze 准出时点名。
+            "repos_notes_exist",
         ],
     },
     "design": {
@@ -146,7 +150,9 @@ PHASE_ARTIFACT_CONTRACTS = {
 # 原来的列表默认了「源码在 src/ 或 web/ 下且用 TypeScript」。
 DEFAULT_ROLE_SCOPES = {
     "pm": [".workbench/artifacts/*/clarify/**"],
-    "analyst": [".workbench/artifacts/*/analyze/**"],
+    # 单仓稳定事实（`repos/notes/<仓库>.md`）归 analyst：它是唯一在 analyze 阶段把仓库
+    # 摸透的角色，摸到的跨需求事实（怎么跑、怎么测、坑在哪）顺手落这里，别跟着 flow 归档。
+    "analyst": [".workbench/artifacts/*/analyze/**", "repos/notes/**"],
     "architect": [
         ".workbench/artifacts/*/design/**", ".workbench/contracts/**", "docs/**",
     ],
@@ -207,12 +213,14 @@ ARTIFACT_LOG = "artifacts.jsonl"
 # 不收窄的话 backend-developer 的裸 `*.py` 能改 init 脚本、frontend-developer 的裸
 # `*.json` 能改清单 —— 都是初始化流程被静默改坏的形态。守卫本体在 `.claude/`，这层
 # 只是「公共脚本与清单同样由主线程维护、角色只读」的收窄。`.vscode/` 同理：机器本地
-# 的 IDE 配置由 repos_apply.py 生成，裸 `*.json` 一样跨得进去。
-# 这三条只在 workbench 布局（存在 repos/）下生效：README「适配到自己的项目」的单仓库
+# 的 IDE 配置由 repos_apply.py 生成，裸 `*.json` 一样跨得进去。`repos/index.md` 与
+# `repos/notes/` 是仓库分工与单仓稳定事实（进 git 的工作区材料），性质与清单相同。
+# 这几条只在 workbench 布局（存在 repos/）下生效：README「适配到自己的项目」的单仓库
 # 场景里 scripts/ 是项目自己的代码目录、.vscode/ 是项目自己的配置，不归工作台管。
 GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/",
                     "knowledge/", "references/")
-WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", ".vscode/")
+WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", "repos/index.md",
+                              "repos/notes/", ".vscode/")
 
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——

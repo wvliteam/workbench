@@ -308,10 +308,17 @@ def main() -> int:
     vs_path, vs_warn = ensure_vscode_settings(root, repos)
     warnings = [w for w in [vs_warn, warn_unignored(root)] if w]
 
+    # 清单里的 description 只用于显示（也是 repos/index.md 的种子）；缺失不影响挂载。
+    # 仓库地图与索引校验在 wb.py status / role scopes，这里带出来省一次翻清单。
+    descs = {str(e.get("name") or derive_name(e.get("remote", "") or e.get("link", ""))):
+             str(e.get("description") or "").strip()
+             for e in entries if isinstance(e, dict)}
+
     errors = [r for r in results if r["status"] == "error"]
     if args.json:
         print(json.dumps({
             "results": results,
+            "descriptions": descs,
             "workspace_file": str(ws_path),
             "settings_file": str(vs_path) if vs_path else None,
             "warnings": warnings,
@@ -319,13 +326,17 @@ def main() -> int:
         }, ensure_ascii=False, indent=2))
     else:
         for r in results:
-            print(f"{r['status'].upper()}: {r['repo']} ({r['action']}) - {r['detail']}")
+            d = f"　[{descs[r['repo']]}]" if descs.get(r["repo"]) else ""
+            print(f"{r['status'].upper()}: {r['repo']} ({r['action']}) - {r['detail']}{d}")
         print(f"IDE workspace: {ws_path.relative_to(root).as_posix() if ws_path.is_relative_to(root) else ws_path}")
         if vs_path:
             print(f"IDE settings: {vs_path.relative_to(root).as_posix()}")
         for w in warnings:
             print(f"WARN: {w}")
         print(f"共 {len(results)} 项操作，{len(errors)} 个错误，{len(repos)} 个仓库已挂载")
+        if repos and not (root / "repos" / "index.md").is_file():
+            print("提示：repos/index.md 还没建 —— 每仓一行「仓库 | 职责 | 入口文档」，"
+                  "建了 wb.py status 会给编排者一张分工图（缺行 / 死链会被点名）")
     return 1 if errors else 0
 
 

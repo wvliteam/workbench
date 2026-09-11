@@ -25,10 +25,12 @@ from wb_bash import MAX_LOG, resolve
 from wb_core import (
     INHERIT_KEYS, acquire_state_lock, artifact_path, close_unlock, find_contract,
     find_task, frozen_paths, gate_check, lease_expired, load_state, log, now,
-    read_disputes, read_frozen, read_unlock_records, read_unlocks, ready_tasks,
-    repo_layout_scopes, retro_enter_epoch, run_check, save_state, set_flow_override,
+    read_disputes, read_frozen, read_repos_manifest, read_unlock_records, read_unlocks,
+    ready_tasks, repo_claims, repo_index_issues, repo_layout_scopes, repo_names,
+    repo_note_issues, retro_enter_epoch, run_check, save_state, set_flow_override,
     select_task_batch, state_path, task_contract_errors, task_contract_names,
     task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
+    ensure_repo_orientation_tasks,
 )
 from wb_guard import frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop
 from wb_cli import cmd_task, main, merge_artifacts
@@ -58,8 +60,9 @@ def cmd_selfcheck(args) -> None:
     # 四个 hook（SessionStart/PreToolUse/PostToolUse/SubagentStop）在干净 checkout 上
     # 全部静默失效（exit 0 无报错，守卫、契约冻结、角色执法全瘫）。
     real_root = Path.cwd().resolve()
-    # skills 是手工同步的两份拷贝（.claude/skills 与 .agents/skills，见
-    # knowledge/development/skills-and-agents-are-manual-copies.md）。不一致时两端
+    # skills 的唯一正文在 .claude/skills，.agents/skills 是指向它的软链；不是软链才
+    # 逐文件比对两棵目录树（两种布局都守得住，见
+    # knowledge/development/multi-end-assets-share-one-source.md）。不一致时两端
     # 拿到不同版本的编排约定，且不报错 —— 靠人记得 diff 就是迟早漂移。
     # 角色定义 TOML 必须能被解析：description 里嵌裸双引号会静默破坏解析，
     # Codex 端加载不出这个角色且不报错（实测踩过，flow main 的 retro 改进项 2，
@@ -449,11 +452,15 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"file_path": "scripts/deploy.py"}}) == 0, \
             "单仓库布局下 scripts/ 被误当工作区公共资源"
-        # workbench 布局不改变源码写入范围。
+        # workbench 布局（有 repos/）下 scripts/ 是工作区公共脚本：角色范围的裸
+        # `*.py` 跨不进受守前缀，只有主线程（无角色）能写。
         (tmp / "repos").mkdir()
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "scripts/deploy.py"}}) == 2, \
+            "workbench 布局下角色写工作区公共脚本未被拦"
+        assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "scripts/deploy.py"}}) == 0, \
-            "源码路径不应由 Workflow Guard 拦截"
+            "主线程维护公共脚本被误拦"
         # 活动任务一旦看到开放契约窗口，产品代码写入必须停下；执行记录仍可落盘。
         quiet("task", "add", "--title", "活动契约实现", "--role", "backend-developer",
               "--phase", "develop", "--contracts", "user-api")
@@ -508,18 +515,23 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Bash", "cwd": cw,
                       "tool_input": {"command": "npm test"}}) == 0
 
+        # 角色范围**只管工作流核心路径**：仓库代码不判角色（谁写哪块代码属于
+        # harness / 模型层面的规范，守卫掺进去只会在正常开发动作上误拦）。
         quiet("role", "set", "pm")
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "src/app.ts"}}) == 0, \
-            "角色范围不应由 Workflow Guard 拦截"
+            "业务代码不该由角色范围拦"
+        # 角色写入范围：受守前缀下才是硬拦（阶段产物、知识库、守卫本体、工作区材料）。
+        # 无 agent_type 的调用者退回 `.workbench/role` 兜底，subagent 走载荷。
         quiet("role", "set", "frontend-developer")
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": "web/index.tsx"}}) == 0
+                      "tool_input": {"file_path": "web/index.tsx"}}) == 0, \
+            "前端写自己的组件被误拦"
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": "migrations/001.sql"}}) == 0, \
-            "角色范围不应由 Workflow Guard 拦截"
+                      "tool_input": {"file_path": ".workbench/artifacts/main/design/notes.md"}}) == 2, \
+            "下游角色写上游阶段产物目录应被阶段隔离拦住"
 
-        # skill 调用不属于 Workflow Guard 的职责。
+        # skill 调用不属于 Workflow Guard 的职责（白名单层不在这里）。
         assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
                       "agent_id": "be-1", "tool_input": {"skill": "unreviewed-skill"}}) == 0, \
             "skill 审核不应由 Workflow Guard 拦截"
@@ -531,16 +543,23 @@ def cmd_selfcheck(args) -> None:
             "后端 subagent 写自己的迁移被误拦：角色要取载荷 agent_type，不是最后一次 role set"
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"file_path": "web/index.tsx"}}) == 0, \
-            "角色范围不应由 Workflow Guard 拦截"
+            "仓库代码不做角色判定"
+        # 内置白名单身份（Explore / general-purpose / Plan）不是角色，退回 role 文件兜底
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "general-purpose",
-                      "tool_input": {"file_path": "migrations/001.sql"}}) == 0, \
-            "未知或内置 agent 身份不应触发角色范围检查"
+                      "tool_input": {"file_path": ".workbench/artifacts/main/clarify/notes.md"}}) == 2, \
+            "内置身份退回 role 文件（此刻是 frontend-developer），核心路径仍按角色判"
+        # 陌生 agent_type，以及只有 agent_id 没有 agent_type：身份识别失败，
+        # 核心路径拒写（那是最坏的失败模式 —— 门禁看着在、其实没人管）
+        for extra in ({"agent_type": "some-unknown-type"}, {"agent_id": "a-1"}):
+            assert guard({"tool_name": "Write", "cwd": cw, **extra,
+                          "tool_input": {"file_path": ".workbench/artifacts/main/clarify/notes.md"}}) == 2, \
+                f"无法识别的调用者身份未被拒写：{extra}"
+            assert guard({"tool_name": "Write", "cwd": cw, **extra,
+                          "tool_input": {"file_path": "src/app.ts"}}) == 0, \
+                f"身份不明不该拦普通代码路径：{extra}"
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "some-unknown-type",
-                      "tool_input": {"file_path": "migrations/001.sql"}}) == 0, \
-            "未知 agent 身份不应触发通用越权拒绝"
-        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "some-unknown-type",
-                      "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 0, \
-            "守卫本体写入不应由角色范围检查拦截"
+                      "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 2, \
+            "陌生身份写守卫本体未被拦"
         # 产物归属同样按载荷取角色，否则并行下两个角色的改动全挂到同一个名下
         hook_post_tool({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                         "tool_input": {"file_path": "migrations/001.sql"}})
@@ -558,16 +577,30 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "migrations/001.sql"}}) == 0, "无角色时不应做角色限制"
 
-        # shell 写入目标仍记录到流水账，但不再经过角色范围检查
+        # Bash 的写入目标同样按「受守前缀才判角色」处理 —— 否则 Bash 是 Write/Edit
+        # 之外绕开核心路径管控的通道；而普通代码路径与 /tmp 不判。
         quiet("role", "set", "frontend-developer")
         assert guard({"tool_name": "Bash", "cwd": cw,
                       "agent_type": "frontend-developer", "agent_id": "fe-1",
                       "tool_input": {"command": "echo x > migrations/blocked.sql"}}) == 0, \
-            "Bash 不应执行角色范围检查"
+            "仓库代码不做 Bash 角色判定"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "agent_type": "frontend-developer", "agent_id": "fe-1",
+                      "tool_input": {"command": "echo x > .workbench/artifacts/main/design/x.md"}}) == 2, \
+            "Bash 写核心路径绕过角色范围未被拦"
         assert guard({"tool_name": "Bash", "cwd": cw,
                       "agent_type": "frontend-developer", "agent_id": "fe-1",
                       "tool_input": {"command": "echo x > web/shell.tsx"}}) == 0, \
             "Bash 正常角色范围写入被误拦"
+        # 解析不出的动态写入不一律拒绝：/tmp 建脚本、`python3 -c` 都是常态，
+        # 保守的冻结文本匹配仍在（见下面的 frozen 用例），其余放行
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "agent_type": "frontend-developer", "agent_id": "fe-1",
+                      "tool_input": {"command": "python3 -c \"open('/tmp/x.tsx','w')\""}}) == 0, \
+            "subagent 的动态写入被一律拒绝"
+        assert guard({"tool_name": "Bash", "cwd": cw,
+                      "tool_input": {"command": "python3 -c \"open('web/x.tsx','w')\""}}) == 0, \
+            "主线程的动态命令被角色范围误拦"
         hook_post_tool({"tool_name": "Bash", "cwd": cw,
                         "agent_type": "frontend-developer", "agent_id": "fe-1",
                         "session_id": "s-1", "turn_id": "t-1",
@@ -592,39 +625,38 @@ def cmd_selfcheck(args) -> None:
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
                           "tool_input": {"file_path": path}}) == 0, f"{agent} 写 {path} 被误拦（{why}）"
 
-        # 工作台状态和契约仍受冻结保护；其它路径不做角色范围判断。
+        # 核心路径越权：冻结（契约 / 状态）+ 角色范围（阶段隔离、知识库、工作区材料）
         for agent, path in [
             ("backend-developer", ".workbench/artifacts/main/clarify/notes.md"),
             ("reviewer", ".workbench/artifacts/main/design/design.md"),
             ("backend-developer", ".workbench/contracts/user-api.json"),
             ("qa", ".workbench/artifacts/main/design/notes.config.ts"),
-            ("pm", "README.md"),
-            ("reviewer", "src/app.ts"),
-            ("qa", "src/app.ts"),
         ]:
-            expected = 2 if path in (
-                ".workbench/contracts/user-api.json",
-            ) else 0
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
-                          "tool_input": {"file_path": path}}) == expected, \
-                f"Workflow Guard 对 {path} 的冻结判定错误"
+                          "tool_input": {"file_path": path}}) == 2, \
+                f"Workflow Guard 放行了 {agent} 写 {path}"
+        # 同一批角色写仓库代码：不判（规范层的事，不是工作流核心）
+        for agent, path in [("pm", "README.md"), ("reviewer", "src/app.ts"),
+                            ("qa", "src/app.ts")]:
+            assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
+                          "tool_input": {"file_path": path}}) == 0, \
+                f"仓库代码被角色范围误拦：{agent} 写 {path}"
 
-        # 已锁定契约不能被随意修改；未锁定的方案文档不由本守卫按角色隔离。
+        # 已锁定契约不能被随意修改；未锁定的方案文档由阶段隔离管（不是冻结管）。
         DESIGN = ".workbench/artifacts/main/design/design.md"
         REQ = ".workbench/artifacts/main/clarify/requirements.md"
-        # 产物目录按阶段隔离 —— 下游角色写不了上游阶段的产物目录
+        # 产物目录按阶段隔离 —— 下游角色写不了上游阶段的产物目录（未冻结也一样）
         quiet("role", "set", "qa")
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": DESIGN}}) == 0, \
-            "未锁定方案文档不应触发角色范围拒绝"
+                      "tool_input": {"file_path": DESIGN}}) == 2, \
+            "qa 写未锁定的方案文档应被阶段隔离拦住"
         assert guard({"tool_name": "Write", "cwd": cw,
-                      "tool_input": {"file_path": ".workbench/artifacts/main/clarify/notes.md"}}) == 0, \
-            "阶段产物不应触发角色范围拒绝"
+                      "tool_input": {"file_path": ".workbench/artifacts/main/clarify/notes.md"}}) == 2, \
+            "qa 写上游阶段产物目录应被拦住"
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": ".workbench/artifacts/main/verify/test-report.md"}}) == 0, \
             "qa 写自己阶段的产物被误拦"
         quiet("role", "clear")
-
         # 已登记为契约的阶段产物仍走同一套冻结与申报流程
         assert guard({"tool_name": "Write", "cwd": cw, "tool_input": {"file_path": REQ}}) == 2, \
             "无角色时上游产物仍应受冻结保护"
@@ -852,6 +884,12 @@ def cmd_selfcheck(args) -> None:
         # repos/*/knowledge/** 会跟 knowledge_written 门禁的检查点（根 knowledge/）错位
         assert rs["knowledger"] == ["knowledge/**"], \
             f"knowledger 范围被跨仓库改写：{rs['knowledger']}"
+        # 单仓笔记挂工作区根，与 knowledge/ 同免改写，且归 analyst（它才是摸仓库的人）
+        assert "repos/notes/**" in rs["analyst"], \
+            f"analyst 的单仓笔记范围被跨仓库改写：{rs['analyst']}"
+        assert allowed("repos/notes/frontend.md", "analyst")
+        assert not allowed("repos/notes/frontend.md", "backend-developer"), \
+            "单仓笔记不该是人人可写 —— 写的人多了就是第四个副本"
         assert allowed("knowledge/x.md", "knowledger")
         assert not allowed("docs/x.md", "knowledger"), "knowledger 角色不该能写 docs/"
         # 认领靠目录名。认不出的仓库落在所有角色范围外 —— 是硬拦不是跨仓库放行，
@@ -878,6 +916,89 @@ def cmd_selfcheck(args) -> None:
         assert after == rs, "role scopes --reset 丢了跨仓库布局"
         assert "migrations/**" not in after["backend-developer"], \
             "--reset 把跨仓库项目刷成了裸默认值"
+
+        # 仓库地图：认领从 role_scopes 现算（不建第二份存储），与 unclaimed_repos 同一判据
+        claims = repo_claims(tmp, after)
+        assert claims["frontend"] == ["frontend-developer"], claims
+        assert claims["backend"] == ["backend-developer"], claims
+        assert claims["shared"] == [], f"认不出名字的仓库不该有角色：{claims}"
+        assert claims["payments-svc"] == ["backend-developer"], \
+            f"svc 提示词应认出 payments-svc：{claims}"
+
+        # 仓库索引：职责与入口文档没有可派生的事实源，护栏是机械校验 + 结构化占位符
+        # （ROMA 的 check_repos.py 同一思路：报出来，不自动改文件）
+        assert read_repos_manifest(tmp) == {}, "没有清单时不该报错"
+        issues = repo_index_issues(tmp)
+        assert len(issues) == 1 and "未建 repos/index.md" in issues[0], issues
+        (tmp / "repos" / "index.md").write_text(
+            "# 仓库索引\n\n| 仓库 | 职责 | 入口文档 |\n| --- | --- | --- |\n"
+            "| frontend | 界面与交互 | |\n"
+            "| frontend | 重复登记 | |\n"
+            "| ghost | 已删掉的仓库 | |\n"
+            "| backend | TODO | docs/nope.md |\n",
+            encoding="utf-8")
+        joined = " | ".join(repo_index_issues(tmp))
+        for frag in ("重复登记 frontend", "repos/ghost/ 不存在", "职责还是占位符",
+                     "docs/nope.md 不存在（死链）", "repos/payments-svc/ 未登记",
+                     "repos/shared/ 未登记"):
+            assert frag in joined, f"{frag} 没被点名：{joined}"
+        # 补齐后不再点名 —— 校验是为了可操作，不是制造每轮都忽略的噪音
+        (tmp / "repos" / "index.md").write_text(
+            "# 仓库索引\n\n| 仓库 | 职责 | 入口文档 |\n| --- | --- | --- |\n"
+            "| frontend | 界面与交互 | |\n| backend | API 服务 | |\n"
+            "| payments-svc | 支付核心 | |\n| shared | 共享库 | |\n",
+            encoding="utf-8")
+        assert repo_index_issues(tmp) == [], repo_index_issues(tmp)
+
+        # 单仓稳定事实（repos/notes/<仓库>.md）：跨需求复用的客观事实（怎么跑、怎么测、
+        # 坑在哪）。与本次需求的 current-state.md 分工不同 —— 后者按 flow 隔离、过门禁即
+        # 冻结、跟着需求归档；前者仓库不变它就不变。作者是 analyst，护栏同样只报不改。
+        notes = repo_note_issues(tmp)
+        assert len(notes) == len(repo_names(tmp)) and \
+            all("未建 repos/notes/" in i for i in notes), notes
+        # analyze 准出兜底：画像与需求分析分开，缺笔记不许过门禁
+        ok, _, detail = run_check(tmp, load_state(tmp), "analyze", "repos_notes_exist")
+        assert not ok and "frontend" in detail, detail
+        (tmp / "repos" / "notes").mkdir(parents=True, exist_ok=True)
+        (tmp / "repos" / "notes" / "frontend.md").write_text(
+            "# frontend\n\n## 职责\n界面与交互\n\n## 启动\n待补充\n", encoding="utf-8")
+        joined = " | ".join(repo_note_issues(tmp))
+        assert "缺「## 测试」" in joined, joined
+        assert "「启动」还是占位符" in joined, joined
+        for n in ("frontend", "backend", "payments-svc", "shared"):
+            (tmp / "repos" / "notes" / f"{n}.md").write_text(
+                f"# {n}\n\n## 职责\n一句话\n\n## 启动\n跑起来的命令\n\n## 测试\n测试入口与判据\n",
+                encoding="utf-8")
+        assert repo_note_issues(tmp) == [], repo_note_issues(tmp)
+        ok, _, detail = run_check(tmp, load_state(tmp), "analyze", "repos_notes_exist")
+        assert ok, detail
+
+        # 仓库画像任务：需求驱动的 analyze 只覆盖需求相关的那部分代码，整仓画像
+        # （怎么跑、怎么测、坑在哪）产不出来 —— 所以它是**独立任务**，init 直接建。
+        st2 = load_state(tmp)
+        st2["tasks"] = []
+        assert ensure_repo_orientation_tasks(tmp, st2) == [], "已有笔记的仓库不该再建画像任务"
+        (tmp / "repos" / "notes" / "frontend.md").unlink()
+        made = ensure_repo_orientation_tasks(tmp, st2)
+        assert len(made) == 1 and made[0]["title"] == "仓库画像：frontend", made
+        assert made[0]["role"] == "analyst" and made[0]["phase"] == "analyze", made
+        assert made[0]["write_scopes"] == ["repos/notes/frontend.md"], made
+        assert ensure_repo_orientation_tasks(tmp, st2) == [], \
+            "同一仓库重复建了画像任务（幂等要求：todo/doing/done 都不重复建）"
+        (tmp / "repos" / "notes" / "frontend.md").write_text(
+            "# frontend\n\n## 职责\n一句话\n\n## 启动\n跑起来的命令\n\n## 测试\n测试入口与判据\n",
+            encoding="utf-8")
+        # 编排者每轮先看 status：分工图与未认领标记必须在那一行里
+        (tmp / "repos.json").write_text(
+            '{"repos": [{"name": "frontend", "remote": "git@example:org/fe",'
+            ' "description": "界面与交互"}]}', encoding="utf-8")
+        assert read_repos_manifest(tmp)["frontend"] == "界面与交互"
+        code, out = quiet("status")
+        assert code == 0, out
+        assert "仓库：" in out, out
+        assert "frontend（界面与交互）→frontend-developer" in out, out
+        assert "shared→⚠未认领" in out, out
+        (tmp / "repos.json").unlink()
         shutil.rmtree(tmp / "repos")
         quiet("role", "scopes", "--reset")   # repos/ 已删，恢复裸默认值给后面的断言
         assert load_state(tmp)["role_scopes"] == DEFAULT_ROLE_SCOPES
@@ -1112,11 +1233,17 @@ def cmd_selfcheck(args) -> None:
         assert not ok and "unverified" in detail, f"skip 标志未检出：{detail}"
         quiet("config", "set", "gate_commands.test", "exit 0")
 
-        # agent 身份只用于 Workflow Guard 的开发任务熔断，不做通用越权拒绝。
+        # 只有 agent_id 没有 agent_type：身份识别失败时核心路径拒写
+        #（静默降级成主线程是最坏的失败模式 —— 门禁看着在、其实没人管）；
+        # 普通代码路径不判，避免影响正常开发。
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "agent_id": "a123",
+                      "tool_input": {"file_path": ".workbench/artifacts/main/design/design.md"}}) == 2, \
+            "无法识别的调用者身份未被拒写"
         assert guard({"tool_name": "Write", "cwd": cw,
                       "agent_id": "a123",
                       "tool_input": {"file_path": "web/index.tsx"}}) == 0, \
-            "未知调用者不应触发通用权限拒绝"
+            "身份不明不该拦普通代码路径"
 
         # --- apply_patch 工具识别 ---
         assert guard({"tool_name": "apply_patch", "cwd": cw,
@@ -1156,7 +1283,7 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": "README.md"}}) == 0, \
             "普通文件读取被误拦"
 
-        # --- 包装命令下冻结检查仍然生效，越根检查已移除 ---
+        # --- 包装命令下冻结检查仍然生效；越根写入不拦 ---
         # env / nohup / timeout 的首 token 不是真命令名。不剥掉就解析出空目标集且
         # uncertain=False，精确检查因此判定「冻结路径不在写入目标里」而放行 ——
         # 包装前缀不能绕过冻结检查。
@@ -1168,7 +1295,7 @@ def cmd_selfcheck(args) -> None:
                 f"包装前缀 {pre!r} 绕过冻结检查"
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
                           "tool_input": {"command": f"{pre}cp server/main.py /etc/evil"}}) == 0, \
-                f"包装前缀 {pre!r} 触发了已移除的越根检查"
+                f"包装前缀 {pre!r} 触发了已移除的越根检查（根外写入不判角色）"
         assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"command": "nice -n 10 sed -i s/a/b/ .workbench/state.json"}}) == 2, \
             "带值 flag 的前缀绕过冻结检查"
@@ -1190,13 +1317,12 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"command": "python3 -c 'pass' > ../evil.py"}}) == 0, \
             "tempdir 场景下 ../ 重定向被误拦"
 
-        # --- 守卫本体与工作区级公共资源不由 Workflow Guard 做角色限制 ---
+        # --- 受守前缀：守卫本体与工作区级公共资源角色只读 ---
         # fnmatch 的 * 跨 /，所以 *.py 会放行 .claude/hooks/wb.py（权限引擎本身）、
         # *.json 放行 settings.json（hook 注册表）、*.md 放行 agent 定义。这些文件不在
         # 任何哈希基线里，改完 contract verify 也发现不了 —— 防线必须保护防线自己。
-        # scripts/、repos.json、.vscode/ 同理：裸 *.py / *.json 会跨进公共脚本、
-        # 仓库清单与本机 IDE 配置，初始化流程会被静默改坏（GUARDED_PREFIXES 收窄层）。
-        # 上面 4213 行删掉了 repos/ 并重置了 scope，这里重新进入 workbench 布局。
+        # scripts/、repos.json、.vscode/ 同理（GUARDED_PREFIXES 收窄层）。
+        # 上面删掉了 repos/ 并重置了 scope，这里重新进入 workbench 布局。
         (tmp / "repos").mkdir()
         for role, path in (("backend-developer", ".claude/hooks/wb.py"),
                            ("frontend-developer", ".claude/settings.json"),
@@ -1208,20 +1334,25 @@ def cmd_selfcheck(args) -> None:
                            ("frontend-developer", "repos.json"),
                            ("frontend-developer", ".vscode/settings.json")):
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
-                          "tool_input": {"file_path": path}}) == 0, \
-                f"{role} 写公共资源被 Workflow Guard 拦截 {path}"
+                          "tool_input": {"file_path": path}}) == 2, \
+                f"{role} 写公共资源未被拦 {path}"
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
-                          "tool_input": {"command": f"cp /tmp/x {path}"}}) == 0, \
-                f"{role} 用 shell 写公共资源被 Workflow Guard 拦截 {path}"
-        # 仓库和公共脚本操作不属于 Workflow Guard。
+                          "tool_input": {"command": f"cp /tmp/x {path}"}}) == 2, \
+                f"{role} 用 shell 写公共资源未被拦 {path}"
+        # 受守卫公共脚本：脚本内部写工作区材料，非主线程拒绝；**其他脚本执行一律放行**
+        #（/tmp 下建测试脚本、跑根外脚本都是开发常态，不属于工作流核心管控）
         for role in ("backend-developer", "frontend-developer"):
-            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
-                          "tool_input": {"command": "python3 scripts/repos_apply.py --root ."}}) == 0, \
-                f"{role} 执行 repos_apply.py 被 Workflow Guard 拦截"
-            assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
-                          "tool_input": {"command": "python3 scripts/repos_tui.py"}}) == 0, \
-                f"{role} 执行 repos_tui.py 被 Workflow Guard 拦截"
-        # Codex 端软链入口不再由角色范围检查。
+            for cmd in ("python3 scripts/repos_apply.py --root .",
+                        "python3 scripts/repos_tui.py"):
+                assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                              "tool_input": {"command": cmd}}) == 2, \
+                    f"{role} 执行受守卫脚本未被拦：{cmd}"
+            for cmd in ("bash /tmp/evil.sh", "./deploy.sh",
+                        "python3 /tmp/mk_fixture.py", "python3 server/manage.py migrate"):
+                assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
+                              "tool_input": {"command": cmd}}) == 0, \
+                    f"{role} 执行普通脚本被误拦：{cmd}"
+        # Codex 端软链入口：resolve 后落在守卫本体，角色一样写不了
         claude_hook_file = tmp / ".claude" / "hooks" / "wb.py"
         claude_hook_file.parent.mkdir(parents=True, exist_ok=True)
         if not claude_hook_file.exists():
@@ -1232,15 +1363,15 @@ def cmd_selfcheck(args) -> None:
             codex_hook_link.symlink_to(Path("../../.claude/hooks/wb.py"))
         for role in ("backend-developer", "frontend-developer"):
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
-                          "tool_input": {"file_path": ".codex/hooks/wb.py"}}) == 0, \
-                f"{role} 经软链路径写守卫本体被 Workflow Guard 拦截"
+                          "tool_input": {"file_path": ".codex/hooks/wb.py"}}) == 2, \
+                f"{role} 经软链路径写守卫本体未被拦"
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
-                          "tool_input": {"command": "sed -i '' s/a/b/ .codex/hooks/wb.py"}}) == 0, \
-                f"{role} 经软链解析路径改守卫本体被 Workflow Guard 拦截"
+                          "tool_input": {"command": "sed -i '' s/a/b/ .codex/hooks/wb.py"}}) == 2, \
+                f"{role} 经软链解析路径改守卫本体未被拦"
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": role,
                           "tool_input": {"command": "ln -sf ../../.claude/hooks/wb.py "
-                                        ".codex/hooks/wb.py"}}) == 0, \
-                f"{role} 改软链入口被 Workflow Guard 拦截"
+                                        ".codex/hooks/wb.py"}}) == 2, \
+                f"{role} 改软链入口未被拦"
         # 主线程仍要能改工作台本体，否则没人能维护它
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": ".claude/hooks/wb.py"}}) == 0, \
@@ -1253,24 +1384,31 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": "README.md"}}) == 0, \
             "后端写 README 被误拦"
 
-        # --- knowledge/references/repos 操作不由 Workflow Guard 做角色隔离 ---
+        # --- knowledge / references / repos 的角色隔离 ---
         for role, path in (("reviewer", "knowledge/entry.md"),
                            ("backend-developer", "references/output-contract.md"),
-                           ("analyst", "references/workspace/analyst/role.md"),
-                           ("backend-developer", "repos.json"),
-                           ("backend-developer", "repos.json5")):
+                           ("backend-developer", "references/workspace/analyst/role.md")):
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": role,
-                          "tool_input": {"file_path": path}}) == 0, \
-                f"{role} 写 {path} 被 Workflow Guard 拦截"
+                          "tool_input": {"file_path": path}}) == 2, \
+                f"{role} 写 {path} 未被拦"
+        # 私有知识目录是「角色只读 references/」的例外：自己的那份可以改
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "analyst",
+                      "tool_input": {"file_path": "references/workspace/analyst/role.md"}}) == 0, \
+            "角色改自己的 references/workspace/<角色>/ 被误拦"
+        # 受守文件条目精确匹配：repos.json5 / repos.json.bak 不是清单本身，
+        # 归角色范围管（这里显式放行），不被 workspace 前缀收窄连坐
         quiet("config", "set", "role_scopes.backend-developer",
               json.dumps(["repos/backend/**", ".workbench/artifacts/*/develop/tasks/**",
-                          "repos.json.bak"]))
+                          "repos.json.bak", "repos.json5"]))
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"file_path": "repos.json.bak"}}) == 0, \
-            "role_scopes 配置不应影响 Workflow Guard"
+            "受守条目误用了前缀匹配"
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"file_path": "repos.json5"}}) == 0, \
-            "role_scopes 配置不应影响 Workflow Guard"
+            "受守条目误用了前缀匹配"
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"file_path": "repos.json"}}) == 2, \
+            "仓库清单本身仍应对角色只读（放行 repos.json5 不该连坐）"
         quiet("role", "scopes", "--reset")
 
         # --- phase set 必须申报理由 ---
@@ -1381,22 +1519,23 @@ def cmd_selfcheck(args) -> None:
                                      "--name $C --reason x"}}) == 2, \
             "契约名取不到时应拒绝：核对不了 owner 就不能放行"
 
-        # role_scopes 仍是状态配置，但不再由 Workflow Guard 执行。
+        # role_scopes 语义（在受守前缀上验证）：显式空清单 = 什么都不能写（不是
+        # 「不限制」），缺 key 回落默认值；仓库代码路径不受影响。
         st = load_state(tmp)
         st["role_scopes"]["qa"] = []
         save_state(tmp, st)
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
-                      "tool_input": {"file_path": "tests/test_x.py"}}) == 0, \
-            "role_scopes 不应作为 Workflow Guard 的写入权限"
+                      "tool_input": {"file_path": ".workbench/artifacts/main/verify/test-report.md"}}) == 2, \
+            "显式空清单被当成不限制 —— 一条 config set 就能一键解除本层"
         st = load_state(tmp)
         st["role_scopes"].pop("qa", None)
         save_state(tmp, st)
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
-                      "tool_input": {"file_path": "tests/test_x.py"}}) == 0, \
-            "缺失 role_scopes 不应改变 Workflow Guard 行为"
+                      "tool_input": {"file_path": ".workbench/artifacts/main/verify/test-report.md"}}) == 0, \
+            "缺 key 应回落默认范围而不是拒绝"
         assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "qa",
                       "tool_input": {"file_path": "server/api.py"}}) == 0, \
-            "role_scopes 不应拦截源码写入"
+            "仓库代码不做角色判定"
         st = load_state(tmp)
         st["role_scopes"]["qa"] = list(DEFAULT_ROLE_SCOPES["qa"])
         save_state(tmp, st)
