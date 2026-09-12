@@ -1,6 +1,6 @@
 # 权限模型
 
-权限守卫是 `PreToolUse` hook，在**每一次**工具调用之前同步执行。matcher 是 catch-all（`.claude/settings.json` 里是 `.*`），不逐个列工具名 —— 早期显式清单的写法漏掉了清单外的工具，`Skill` 审核门与 `Monitor`（与 Bash 同一个 shell 环境跑 `tool_input.command`）因此都是死代码，直到 catch-all 才真正生效。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
+权限守卫是 `PreToolUse` hook，在**每一次**工具调用之前同步执行。matcher 是 catch-all（`.claude/settings.json` 里是 `.*`），不逐个列工具名 —— 早期显式清单的写法漏掉了清单外的工具，`Monitor`（与 Bash 同一个 shell 环境跑 `tool_input.command`）就曾因此整层绕过。catch-all 下每个工具调用都过守卫、由 hook 自己分发。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
 
 ## 为什么需要这一层
 
@@ -17,18 +17,11 @@ Claude Code 原生有两种权限机制，都不够：
 
 ## 四层拦截
 
-`hook_pre_tool()` 按顺序检查，任一条命中即退出码 2。
+`hook_pre_tool()` 按顺序检查，任一条命中即退出码 2。第一层（项目根边界）已于 2026-09-12 移除，小节保留说明理由。
 
-### 第一层：项目根边界
+### 第一层：项目根边界（2026-09-12 移除）
 
-```python
-if target != rootr and rootr not in target.parents:
-    hook_deny(f"写入越出项目根 {rootr}：{target}")
-```
-
-路径先 `resolve()`（展开符号链接与 `..`），再比对是否在项目根之下。挡住 `/etc/passwd`、`~/.ssh/`、`../../其他项目/`。
-
-这是**信任边界上的检查，不做简化**。模型写错路径、被提示注入诱导、或误解相对路径基准时，这是唯一的物理防线。
+早期版本在这里拦「写入越出项目根」（`/etc/passwd`、`~/.ssh/`、`../../其他项目/`）。已移除：跨目录搬文件、往 `/tmp` 写临时脚本都是开发常态，「别乱写文件」属于 harness 与模型层面的规范，不是工作台的职责。`resolve()` 仍返回 `outside_targets`，但**只做记录、不据此拒绝**。密钥文件由 `settings.json` 的 `Read` deny 与 hook 的敏感路径检查挡（见文末「settings.json 层的兜底」），破坏性命令由「危险命令分级」挡。
 
 ### 第二层：冻结清单
 
@@ -344,7 +337,7 @@ hook 是主要机制，`settings.json` 做粗粒度兜底：
 ]
 ```
 
-`Read` 类的拦截**只能在这一层做** —— hook 只挂在 Write/Edit/Bash 上，不挂 Read（每次读文件都跑一个 Python 进程太贵）。密钥文件靠 `permissions.deny` 挡。
+`Read` 类的拦截这一层与 hook 各有一份：`permissions.deny` 是静态规则，不依赖 hook 进程；hook 的敏感路径检查（`sensitive_read_target` / `sensitive_shell_reads`）覆盖 Read 与 shell 两类调用，`Bash` 的 `cat .env` 这类绕过 `Read` 规则直读密钥的形态由它挡。
 
 `Edit(./.workbench/state.json)` 与 hook 第二层重复是故意的：`permissions.deny` 是静态规则，不依赖 hook 进程正常工作。hook 因自身 bug 放行时，这一层还在。
 

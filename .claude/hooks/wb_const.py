@@ -241,6 +241,9 @@ BASH_WRITE = re.compile(
 WRITE_TOOL = re.compile(
     r"Write|Edit|MultiEdit|NotebookEdit|"
     r"apply_patch|write_file|edit_file", re.I)
+# Monitor 与 Bash 同一个 shell 环境跑 `tool_input.command`，不列进来就是整层绕过：
+# matcher 是 catch-all，载荷会到 hook，但路由不到 shell 分支 —— 冻结检查、角色范围、
+# 危险命令全跳过，实测 `Monitor` 写 `.workbench/state.json` 直接放行。
 SHELL_TOOL = re.compile(
-    r"Bash|shell|exec_command|unified_exec", re.I)
+    r"Bash|Monitor|shell|exec_command|unified_exec", re.I)
 READ_TOOL = re.compile(r"^(?:Read|read_file|file_read)$", re.I)

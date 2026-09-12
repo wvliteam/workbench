@@ -2,7 +2,7 @@
 
 把「配置的代码仓库 clone 到本地 + 自动生成 VS Code 多根 workspace 文件」做成初始化 skill，让一个新工作区从清单到可开发状态一条命令完成。对照材料是 ROMA v0.3.6 源码快照（`output/agents.tgz`，`output/` 不进仓库）里的 `roma-onboarding` 与 `check-health` 两个 skill。
 
-改动范围：根级 `scripts/repos_apply.py`（清单落地，`--root` 起跑）、`scripts/repos_tui.py`（交互式编辑清单，带 `--selftest` 非交互自测）、工作区根 `repos.json` 清单；SKILL.md 双端各一份（`.claude/skills/wb-init/` 与 `.agents/skills/wb-init/`，逐字一致），执行脚本全端共用一份。**不动 `wb.py`** —— 初始化不是流程状态，不属于状态内核。
+改动范围：根级 `scripts/repos_apply.py`（清单落地，`--root` 起跑）、`scripts/repos_tui.py`（交互式编辑清单，带 `--selftest` 非交互自测）、工作区根 `repos.json` 清单；SKILL.md 唯一正文在 `.claude/skills/wb-init/`（`.agents/skills` 是指向 `.claude/skills` 的软链，2026-09-11 起不再逐端拷贝），执行脚本全端共用一份。**不动 `wb.py`** —— 初始化不是流程状态，不属于状态内核。
 
 ## 需求与验收
 
@@ -10,7 +10,7 @@
 
 1. **按清单 clone**：仓库清单是一份跟着 git 走的配置文件，脚本按清单把仓库落到 `repos/`，软链本机已有 checkout 作为等价选项。
 2. **自动生成 VS Code workspace 文件**：多根 `.code-workspace`（根 + 全部仓库）与 `.vscode/settings.json` 的 git 发现配置，VS Code 打开一个文件就能同时看到所有仓库。
-3. **兼容 Claude、Codex 与其他通用 agents**：SKILL.md 双端各一份，执行脚本全端共用一份；SKILL.md 本身不引用任何一家独有的工具机制。
+3. **兼容 Claude、Codex 与其他通用 agents**：SKILL.md 单一正文（软链到各端），执行脚本全端共用一份；SKILL.md 本身不引用任何一家独有的工具机制。
 
 明确不做：依赖安装与环境验证（那是各仓库开发阶段的事，走 `/wb-flow`）；仓库知识沉淀（ROMA 的 overview/setup/test 三件套，对单人工作台是纯开销，与 [roma-comparison.md](../draft/roma-comparison.md)「明确不抄的」同一判据）。
 
@@ -38,7 +38,7 @@
 | workspace 文件落点 | `.workbench/<工作区名>.code-workspace` | 对应 ROMA 的 `.roma/`：folders 用绝对路径，所以必须放 gitignore 里（`.workbench/` 已忽略），每台机器自理。绝对路径换机器失效的解药就是「始终刷新」—— 重跑一次脚本即修复 |
 | settings 合并策略 | `git.scanRepositories` 只管理 `repos/` 前缀（按磁盘重写），前缀外的用户条目原样保留；`git.autoRepositoryDetection` / `git.repositoryScanMaxDepth` 直接更新；无效 JSON 不覆盖只告警 | 照抄 check-health 的 `_init_ide_settings`。代价：用户手写的 `repos/xxx` 条目若目录不存在会被清掉 —— 这是「磁盘为准」的延伸，不是缺陷 |
 | 脚本归属 | 根级 `scripts/`（`repos_apply.py` / `repos_tui.py`），不进 `wb.py`，也不进 `.claude/skills/wb-init/scripts/` | clone 和 IDE 配置不是流程状态，`wb.py` 是状态内核；`scripts/` 与 `repos.json` 是工作区级公共资产，进守卫前缀、角色写不到（见 [permissions.md](permissions.md#第四层角色写入范围)），主线程直做 |
-| 双端兼容 | 脚本一份，SKILL.md 双端各一份，内容逐字一致 | 与 Codex hook 共用 `.claude/hooks/wb.py` 同一模式 —— 每端一份脚本买不到任何东西（roma-comparison 跨端节的结论） |
+| 双端兼容 | 脚本一份，SKILL.md 单一正文 + 各端软链（2026-09-11 起从「双份逐字拷贝」收敛） | 与 Codex hook 共用 `.claude/hooks/wb.py` 同一模式 —— 每端一份脚本买不到任何东西（roma-comparison 跨端节的结论）；双份拷贝的代价是改一处要同步两处，`selfcheck` 的软链断言替掉逐文件比对 |
 | 执行者 | 主线程直做，SKILL.md 明令不派 subagent | 写入目标 `repos/**` 与 `.vscode/**` 不在任何 developer 角色范围内，派下去会被自己的守卫拦；ROMA 的 materialize 同样是主 Agent 直做 |
 | 输入校验 | `name` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`（单段、不以 `.` 开头）；clone 命令带 `--` 分隔；`remote` 以 `-` 开头直接拒绝 | 防 `../` 穿越与 `.git` 这类名字；防远程地址被 git 解析成选项；URL 里的 `user@` 是 SSH 登录账号，逐字使用 —— 这是 ROMA SKILL.md 里用整段教训换来的规则 |
 | `remote` 省略 `name` | `derive_name()` 取最后一段去 `.git`；SCP 风格 remote（`git@gitlab.com:payments-core.git`，无 `://`）取冒号后段 | 整串返回的旧逻辑会让 `git@gitlab.com:payments-core` 过不了 NAME_RE；有 `repos_tui.py --selftest` 断言兜底 |

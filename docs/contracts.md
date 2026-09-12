@@ -175,25 +175,25 @@ wb.py contract bump --name user-api
 
 ## bump 的影响面传播
 
-`bump` 是这套机制真正有牙齿的地方。它做四件事：
+`bump` 是这套机制真正有牙齿的地方。它做五件事 —— 前置校验是「必须消费一份预先存在的 unlock 窗口，且窗口基于的 SHA / 版本 / 修订号都还是当前基线」，否则拒绝：
 
 ```python
-c["version"] += 1                    # 1. 面向人的版本递增
-c["revision"] += 1                  # 2. 内部修订号单调递增
+c["version"] = old_version + 1        # 1. 面向人的版本递增
+c["revision"] = old_revision + 1      # 2. 内部修订号单调递增
 c["sha"], c["locked_at"] = sha, now()
-snapshot = {                         # 3. 任务绑定完整快照，不按名称动态解析
+snapshot = {                          # 3. 任务绑定完整快照，不按名称动态解析
     "name": name,
     "version": c["version"],
     "revision": c["revision"],
     "sha": c["sha"],
 }
-for role in c["consumers"]:
-    st["tasks"].append({
-        "title": f"同步契约 {name} v{snapshot['version']} 变更：{reason}",
-        "role": role, "phase": "develop", "status": "todo",
-        "contracts": [snapshot], "notes": "由 contract bump 自动创建",
-    })
-log(st, "contract_bump", name=..., **{"from": old, "to": c["version"], "reason": ...})  # 4. 审计
+for t in st["tasks"]:                 # 4. 绑旧快照的任务标 stale，并沿依赖图传播
+    if matches(t, old_binding) and t["status"] != "skipped":
+        t["status"] = "stale"
+        _propagate_stale(st, t["id"])
+for role in c["consumers"]:           # 5. 每个消费方一条带新快照的同步任务
+    st["tasks"].append({...})         #    （失败/backlog 的返工入口）
+log(st, "contract_bump", ...)         #    并记审计 + 关闭本契约的窗口与争议
 ```
 
 第三步是关键。契约变更最常见的失败模式不是「没人发现契约变了」，而是「发现了但忘了通知下游」。自动建任务让下游的返工进入任务表 —— 任务表是主线程每轮都读的东西，报告不是。任务携带创建时的完整 `{name, version, revision, sha}` 快照，执行者必须核对该快照与当前契约一致；不能只保存契约名称并在执行时解析最新版本。

@@ -32,12 +32,13 @@
 
 ## 断言总览
 
-十种准出条件分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **10 种 `run_check()` 断言**。两者合称门禁断言，下文「十种」指后者。
+门禁断言分两层：**`artifacts` 键**（产物存在性，1 种，挂在规则表不在 `run_check()` 分支里）加 **11 种 `run_check()` 断言**。下文「断言」指后者。
 
 | 断言 | 语法 | 通过条件 | 用意 |
 | --- | --- | --- | --- |
 | 产物存在 | （`artifacts` 键） | 文件存在且 size > 0 | 阶段真的产出了东西 |
 | 章节包含 | `artifact_contains:<文件>:<字符串>` | 文件内容含该子串 | 产物覆盖了关键思考，不是敷衍 |
+| 多域部件齐全 | `analyze_parts_complete` | 无 `analyze/parts/manifest.json` 时跳过（历史兼容）；有则校验清单合法、每个 part 非空、canonical 逐条引用 slug 与路径 | 多域 analyze 的每个 scope 都真产出了独立取证 |
 | 契约已锁定 | `contracts_locked` | 接口契约非空且每份都有 `sha`（阶段产物不计） | 并行开发的前提已就绪；也让 `design.md` 转为只读 |
 | 契约无漂移 | `contracts_intact` | 每份契约当前哈希 == 锁定哈希 | 兜住守卫覆盖不到的改动路径 |
 | 已拆解任务 | `tasks_exist` | 任务数 > 0 | 设计阶段真的落到了可执行任务 |
@@ -154,7 +155,7 @@ wb.py gate check --phase X   # 只校验不推进（会执行该阶段的 cmd:* 
 
 ## 扩展
 
-**加一条准出条件**：往 `GATES[阶段]["checks"]` 加一行，用现有的九种断言之一（例如 `artifact_contains:design.md:回滚`）。
+**加一条准出条件**：往 `GATES[阶段]["checks"]` 加一行，用现有的十一种断言之一（例如 `artifact_contains:design.md:回滚`）。
 
 **加一种断言类型**：在 `run_check()` 里加一个 `if kind == "...":` 分支，返回 `(bool, 标签, 说明)`：
 

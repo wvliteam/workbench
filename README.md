@@ -145,14 +145,14 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 
 `PreToolUse` hook 拦以下几类，退出码 2 阻止调用并把原因回灌给模型（完整清单与边界见 AGENTS.md「权限守卫」）：
 
-1. 写出项目根之外
-2. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
-3. 角色越权写 —— `pm` 写代码、前端写 `migrations/`、`qa` 改 `requirements.md`（产物目录按阶段隔离）
-4. 角色跑特权 wb.py 子命令（`phase set`、`contract unlock|bump`、`config set`、`flow new/switch/remove` 等）
-5. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、`dd of=/dev/`、fork bomb）+ 提示级警告（`git reset --hard`、`git clean -fd`、`npm publish`）
-6. 未审核的 skill 调用 —— subagent 只能调 `allowed_skills` 白名单里的（主线程是审核者，不限）
+1. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
+2. 角色越权写**工作流核心路径** —— 受守前缀（`.workbench/`、`knowledge/`、`references/`、`.claude/` 等，多仓库布局下再加 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`）。**仓库代码、`/tmp`、项目根外不判角色**（2026-09-12 定调）
+3. 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`init --force`、`init --root`、`role set|clear`、`role scopes --reset`、`task skip`、`contract unlock|bump|consumers`、`config set`、`flow new/switch/remove` 等）
+4. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）+ 提示级警告（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish`）
+5. 敏感路径读取 —— `.env`、`*.pem`、`*.key`、`id_rsa*`、`secrets/**`，Read 工具与 shell 的 `cat` 两类调用都拦
+6. 未审核的 skill 调用与非主线程工具管控 —— **当前不生效（待恢复）**，见 AGENTS.md「权限守卫」
 
-第 2 条**同时覆盖 Bash 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `shred` `python3 -c` `node -e` `ln -sf` `cp` `mv` `install` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
+第 1 条**同时覆盖 Bash 与 Monitor 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `shred` `python3 -c` `node -e` `ln -sf` `cp` `mv` `install` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
 
 ```bash
 python3 .claude/hooks/wb.py role scopes         # 范围 + 冻结清单 + 解冻窗口

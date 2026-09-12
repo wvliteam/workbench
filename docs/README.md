@@ -10,7 +10,7 @@
 | --- | --- |
 | [architecture.md](architecture.md) | 分层、状态模型、外层唯一状态布局、数据流、设计取舍、已知边界与升级路径 |
 | [roles.md](roles.md) | 八个角色的矩阵与写入范围、协作协议、交接格式、定制与新增 |
-| [gates.md](gates.md) | 门禁引擎：八种断言（加 `artifacts` 键共九种准出条件）的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
+| [gates.md](gates.md) | 门禁引擎：十一种 `run_check()` 断言（加 `artifacts` 键共十二类准出条件）的语义与实现要点、六阶段准出条件、强推边界、扩展方式 |
 | [contracts.md](contracts.md) | 契约机制：哈希冻结 + 只读守卫、申报窗口、生命周期、`bump` 的影响面传播、失效模式 |
 | [permissions.md](permissions.md) | 权限模型：四层拦截、Bash 绕过检查、wb.py 特权子命令层、危险命令分级、hook 载荷与失败语义 |
 | [scheduling.md](scheduling.md) | 调度与 loop：就绪集合、并行派发协议、任务生命周期与租约、产物归属、停止条件与防失控 |

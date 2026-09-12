@@ -20,7 +20,8 @@ from wb_const import (
     WRITE_TOOL,
 )
 from wb_bash import (
-    _split_pipeline, _strip_wrappers, resolve, strip_heredocs,
+    WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command, resolve,
+    strip_heredocs,
 )
 from wb_core import (
     all_flows, close_unlock, contract_drift, die, find_contract, find_root, load_state,
@@ -65,6 +66,52 @@ def nested_roots(target: Path, session_root: Path) -> list[Path]:
         if (p / ".workbench").is_dir():
             out.append(p)
     return out
+
+
+# 敏感文件名（仓库内相对路径）。settings.json 的 Read deny 只覆盖 Read 工具，
+# Bash 的 `cat .env`、`Read` 之外的工具形态都绕过它 —— 这一层补的是同一件事。
+_SENSITIVE_NAMES = (".env",)
+
+
+def sensitive_read_target(cwd: Path, root: Path, raw: str) -> str | None:
+    """raw 指向敏感文件时返回仓库相对路径，否则 None。"""
+    token = str(raw).strip().strip("'\"")
+    if token.startswith("-") and "=" in token:
+        token = token.split("=", 1)[1]
+    token = token.rstrip(",)")
+    if not token:
+        return None
+    try:
+        rel = os.path.relpath(resolve_target(cwd, token), root).replace(os.sep, "/")
+    except ValueError:
+        return None
+    parts = Path(rel).parts
+    if not parts:
+        return None
+    name = parts[-1]
+    if ((len(parts) == 1 and (name == ".env" or name.startswith(".env."))) or
+            name.endswith((".pem", ".key")) or name.startswith("id_rsa") or
+            parts[0] == "secrets"):
+        return rel
+    return None
+
+
+def sensitive_shell_reads(cwd: Path, root: Path, command: str) -> list[str]:
+    """在 shell 载荷里找出静态命名的敏感路径。
+
+    只认能可靠切分的形态：命令替换之类的构造看不出来，交给 uncertain 分支的
+    保守判定。剥 heredoc 之后调用 —— 正文里的 `.env` 只是回显，不该拦整条命令。
+    """
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        tokens = re.findall(r"[^\s;|&<>]+", command)
+    found = []
+    for token in tokens:
+        hit = sensitive_read_target(cwd, root, token)
+        if hit and hit not in found:
+            found.append(hit)
+    return found
 
 
 def _is_dispute_exempt_bash(cmd: str, root: Path) -> bool:
@@ -521,6 +568,13 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
         elif sub_cmd == "init" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `init --force`：它清空阶段、契约基线、"
                        f"门禁记录与冻结清单。{hint}")
+        elif sub_cmd == "init" and "--root" in flags:
+            # `--root` 让 init 在任意路径建 .workbench 结构，写入发生在 wb.py 进程内部，
+            # Bash 层看不到目标 —— 项目外、`../outside`、甚至 .claude/ 下都能落地，
+            # 伪造工作台结构并干扰后续 find_root。不带 --root 的 init 只写会话根内，
+            # 不动这条。
+            out.append(f"角色 {role} 不能跑 `init --root`：它会在指定路径（项目外、"
+                       f"甚至 .claude/ 下）创建 .workbench 状态结构。{hint}")
         elif sub_cmd == "phase" and action == "advance" and "--force" in flags:
             out.append(f"角色 {role} 不能跑 `phase advance --force`：强推门禁前要先问"
                        f"用户（CLAUDE.md 硬规则 3）。{hint}")
@@ -603,6 +657,19 @@ def hook_pre_tool(data: dict) -> None:
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
         rootr = root.resolve()
+
+        # --- 灾难命令与敏感读取：扫剥壳后的命令 ---
+        # heredoc 正文不是命令的一部分（`cat <<EOF ... EOF` 只是回显），正文里的
+        # 灾难字面量（如文档里的 `git push --force`）不该误拦整条命令。真正经
+        # stdin 执行的形态由 uncertain 分支单独处理。
+        scan_cmd = strip_heredocs(cmd)
+        sensitive = sensitive_shell_reads(cwd, rootr, scan_cmd)
+        if sensitive:
+            hook_deny("禁止读取敏感路径：" + ", ".join(sensitive)
+                      + "。密钥与凭据不进上下文；需要值请让用户自己提供。")
+        why = catastrophic_command(scan_cmd)
+        if why:
+            hook_deny(f"{why}。命令：{cmd[:160]}")
 
         # --- wb.py 特权子命令：只有这里拿得到调用者身份 ---
         wb_role = current_role(rootr, data)
@@ -695,9 +762,19 @@ def hook_pre_tool(data: dict) -> None:
 
         for rel_tgt in sorted(all_targets):
             _check_write_target(rootr, root, rel_tgt, data)
+        # 放行但提示：这些命令确有正当用途（丢弃未提交改动、对外发布），
+        # 拦掉会很烦人；提示出现在 transcript 里模型能看见。
+        for pat, why in WARN_BASH:
+            if re.search(pat, cmd, re.IGNORECASE):
+                print(f"[工作台提示] {why}。确认这是你要的操作。")
         return
 
     if READ_TOOL.search(tool):
+        raw = ti.get("file_path") or ti.get("path") or ""
+        hit = sensitive_read_target(cwd, root.resolve(), raw) if raw else None
+        if hit:
+            hook_deny(f"禁止读取敏感路径：{hit}。密钥与凭据不进上下文"
+                      "（settings.json 的 Read deny 是同一层的兜底）。")
         return
 
     # apply_patch：Codex 的写入工具，目标藏在 *** Add/Update/Delete File: 标记里
