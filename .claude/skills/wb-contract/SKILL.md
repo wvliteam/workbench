@@ -101,7 +101,8 @@ python3 .claude/hooks/wb.py contract dispute --name user-api \
 | --- | --- |
 | `unlock --reason` 必填且必须先于改动 | 改动理由必须在改之前留痕；事后补理由不能替代申报 |
 | 窗口只对那一份契约生效 | 最小化可写范围；多份契约可以同时申报 |
-| `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` 永不可解冻 | 它们是机制本身的地基 |
+| 窗口按 flow 隔离，全工作区同一契约名只允许一个窗口 | 并行的两条需求线对同一份契约的改文本就要排队；`bump`/`lock` 只关本 flow 那一份，`SubagentStop` 在无 doing 任务时才收 |
+| `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` 永不可解冻 | 它们是机制本身的地基 |
 | 已锁契约内容变化时 `lock` 会拒绝 | 不能用 relock 覆盖漂移基线 |
 | `bump` 时内容没变会被拒绝 | 不能靠刷版本号消掉一次漂移 |
 | `bump` 必须消费修改前已经存在的 unlock | 命令行理由本身不能伪造变更授权 |
