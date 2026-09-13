@@ -117,6 +117,25 @@ def read_current_flow(root: Path) -> str:
     return pointer_flow(root)
 
 
+def attribution_flow(root: Path) -> str:
+    """归属记录（agent 绑定与改动流水账）该记的 flow 标签。
+
+    与 read_current_flow 分开，因为那个同时服务权限判定与归属，而两者对
+    WB_FLOW 的态度相反：权限是工作区级视角（读全部 flow 的并集，A flow 锁的
+    契约在 B 视角照样冻结，不能被某个会话的钉死改道），归属标签必须跟着
+    「这批改动属于哪条需求线」。hook 与 CLI 共享同一份会话环境，所以 WB_FLOW
+    是两者一致的那个来源；没钉时退回指针 —— 串行交错场景下指针本就是唯一
+    来源，两者天然一致。
+
+    读 os.environ 而不走 _FLOW_OVERRIDE：cmd_hook 会把 override 清空（那是给
+    权限判定用的），而这里恰恰要用会话钉死的那个值。
+    """
+    v = os.environ.get("WB_FLOW")
+    if v and _FLOW_NAME.fullmatch(v):
+        return v
+    return pointer_flow(root)
+
+
 def set_current_flow(root: Path, flow: str) -> None:
     flow_dir(root, flow)          # 先校验名字
     (wb_dir(root) / FLOW_PTR).write_text(flow + "\n", encoding="utf-8")
@@ -279,6 +298,21 @@ def load_state(root: Path, lock: bool = False) -> dict:
         return _load_state_uncached(p, flow)
     # lock=False 的读在 hook 热路径上（每个写入目标一次）可 memo；lock=True 是
     # 读-改-写临界区，必须读最新，永不 memo。
+    return _memo(("state", os.fspath(p)), lambda: _load_state_uncached(p, flow))
+
+
+def load_state_of(root: Path, flow: str) -> dict:
+    """指定 flow 的状态，只读不上锁；该 flow 还没有 state 时返回空 dict。
+
+    PreToolUse 写 agent 绑定时要按**归属 flow** 找任务表（见 attribution_flow），
+    而 load_state 按 read_current_flow 定位 —— 会话钉了 WB_FLOW 时那是另一条线
+    的表，按它匹配会把别的 flow 的同号任务当成自己人绑走。hook 热路径上的读，
+    与 load_state(lock=False) 同一条路径（memo + 字段补齐），只是 flow 由调用方
+    指定而不是从指针取。
+    """
+    p = state_path(root, flow)
+    if not p.is_file():
+        return {}
     return _memo(("state", os.fspath(p)), lambda: _load_state_uncached(p, flow))
 
 

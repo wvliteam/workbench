@@ -24,9 +24,10 @@ from wb_bash import (
     strip_heredocs,
 )
 from wb_core import (
-    all_flows, close_unlock, contract_drift, die, find_contract, find_root, load_state,
-    log, now, pointer_flow, read_current_flow, read_disputes, read_frozen, read_unlocks,
-    ready_tasks, save_state, set_flow_override, state_path, task_contract_errors, wb_dir,
+    all_flows, attribution_flow, close_unlock, contract_drift, die, find_contract,
+    find_root, load_state, load_state_of, log, now, pointer_flow, read_disputes,
+    read_frozen, read_unlocks, ready_tasks, save_state, set_flow_override, state_path,
+    task_contract_errors, wb_dir,
 )
 
 
@@ -703,13 +704,17 @@ def hook_pre_tool(data: dict) -> None:
             for raw in _patch_targets(cmd):
                 _check_write_target(cwd, root, raw, data)
         if data.get("agent_id"):
-            for t in load_state(root).get("tasks", []):
+            # 绑定环按归属 flow 的任务表匹配，不是指针的：任务 ID 每条 flow 独立
+            # 从 T1 编起，指针在 main 而会话钉了 WB_FLOW 时，按指针找会把 B 线的
+            # agent 绑到 main 的同号任务上 —— 比不写更坏，那是主动误认账。
+            attr = attribution_flow(root)
+            for t in load_state_of(root, attr).get("tasks", []):
                 if t.get("status") == "todo" and _is_task_start(cmd, t["id"]):
                     with (wb_dir(root) / "task-agents.jsonl").open("a", encoding="utf-8") as fh:
                         # flow 进绑定：任务 ID 每条 flow 独立从 T1 编起，绑定文件是
                         # 工作区共享的，不记 flow 时 A flow 的 T1 会认领 B flow 的 agent
                         entry = {"at": now(), "id": t["id"], "role": t["role"],
-                                 "flow": read_current_flow(root)}
+                                 "flow": attr}
                         for key in ("agent_id", "agent_type", "session_id", "turn_id"):
                             if data.get(key):
                                 entry[key] = data[key]
@@ -819,7 +824,7 @@ def hook_post_tool(data: dict) -> None:
         # flow 随行：归并侧（merge_artifacts）按任务所在 flow 过滤，没有这个字段
         # 时旧行视为本 flow，新行必须带，否则跨 flow 同名任务 ID 互相认领产物。
         entry = {"at": now(), "path": rel, "role": role,
-                 "flow": read_current_flow(root)}
+                 "flow": attribution_flow(root)}
         for key in ("agent_id", "agent_type", "session_id", "turn_id", "tool_use_id"):
             value = data.get(key)
             if value:

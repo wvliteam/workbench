@@ -28,7 +28,7 @@ python3 .claude/hooks/wb.py status
 新请求进入完整流程前，主 Agent 先判断它是当前 flow 的需求变更/续作，还是独立 Work Item：
 
 - **复用当前 flow**：仅限当前需求范围内的补充、纠正、返工或收尾。
-- **复用空白初始 flow**：仅限刚执行 `init` 后，当前 flow 尚无阶段产物、契约、任务、阶段推进历史或其他需求过程材料。
+- **复用空白初始 flow**：仅限刚执行 `init` 后，当前 flow 尚无阶段产物、契约、任务、阶段推进历史或其他需求过程材料。默认 `init` 下这就是 `main` —— 第一条需求落在它上面之后，`main` 即与别的需求线无异（不可删、不再收新需求），别盘算把它留空。
 - **新建 flow**：当前 flow 已承载其他需求的产物、契约、任务或阶段历史时，独立新需求必须由主 Agent 执行 `python3 .claude/hooks/wb.py flow new <语义化名称>`；不得覆盖、替换或混放到现有 flow。
 - **Conversation closure**：默认不创建流程材料；确需保留时使用独立 Work Item 或命名 flow，不得写入无关的活动 flow。
 

@@ -1801,6 +1801,41 @@ def cmd_selfcheck(args) -> None:
                            cwd=tmp, capture_output=True, text=True, env=env_bad)
         assert r.returncode == 1 and "WB_FLOW" in r.stderr, r.stderr
 
+        # --- 跨 flow 回归 4：归属记录跟会话钉死的 flow，不跟指针 ---
+        # 上面两条断言的是权限与展示视角（session-start 必须按指针走）；归属不是
+        # 那个视角 —— 改动属于哪条需求线由会话钉死决定。修复前归属行记的是指针
+        # flow：指针表里有同号 todo 任务时错绑到它（把 B 线的 agent 与产物记到
+        # main 的 T1 名下，比丢账更坏），没有时不写行（丢账）—— 两种都让 task done
+        # 的归并失效。判别条件同前：指针在 main、WB_FLOW=feature-b，两边各有一个
+        # T1，且两个 T1 的 role 不同（main 是 backend-developer、feature-b 是
+        # frontend-developer），role 是区分错绑的第二个证据。
+        attr_payload = json.dumps({
+            "cwd": str(tmp), "session_id": "s-attr", "tool_name": "Write",
+            "tool_input": {"file_path": str(tmp / "repos" / "b" / "attr.tsx")},
+            "agent_id": "fe-attr", "agent_type": "frontend-developer"})
+        r = subprocess.run([sys.executable, wb_path, "hook", "post-tool"],
+                           input=attr_payload, cwd=tmp, capture_output=True, text=True, env=env_b)
+        assert r.returncode == 0, f"post-tool 未放行：{r.stderr}"
+        rows = [json.loads(x) for x in
+                (wb_dir(tmp) / ARTIFACT_LOG).read_text(encoding="utf-8").splitlines()
+                if x.strip()]
+        assert rows[-1].get("flow") == "feature-b", \
+            f"改动流水账记到了指针 flow 上：{rows[-1]}"
+        bind_payload = json.dumps({
+            "cwd": str(tmp), "session_id": "s-attr", "tool_name": "Bash",
+            "tool_input": {"command": "python3 .claude/hooks/wb.py task start T1"},
+            "agent_id": "fe-attr", "agent_type": "frontend-developer"})
+        r = subprocess.run([sys.executable, wb_path, "hook", "pre-tool"],
+                           input=bind_payload, cwd=tmp, capture_output=True, text=True, env=env_b)
+        assert r.returncode == 0, f"pre-tool 未放行：{r.stderr}"
+        binds = [json.loads(x) for x in
+                 (wb_dir(tmp) / "task-agents.jsonl").read_text(encoding="utf-8").splitlines()
+                 if x.strip()]
+        assert binds[-1].get("flow") == "feature-b", \
+            f"agent 绑定落到指针 flow 的同号任务上：{binds[-1]}"
+        assert binds[-1].get("role") == "frontend-developer", \
+            f"绑定行的 role 取自指针 flow 的任务（错绑）：{binds[-1]}"
+
         # 切回 main：状态还在，没被 feature-b 的 init 覆盖
         code, out = quiet("flow", "switch", "main")
         assert code == 0, out
@@ -1970,6 +2005,19 @@ def cmd_selfcheck(args) -> None:
         assert "lease_until" not in s2, f"#2 done 未清租约：{s2}"
         assert s2.get("attempts") == 1 and not lease_expired(s2), "#2 done 后 attempts 应保留且不报过期"
 
+        # #11：init --force 是「重开这条线」，上一代需求的产物必须一起清掉 —— 不清的
+        # 话任务号从 T1 重编，develop/tasks/ 下的执行记录与上一代同名（wb-flow 要求
+        # 接续时先 glob 并读它，会把上一代的「已完成/已改/阻塞」当成本次的），阶段
+        # 产物还要求存在且非空 —— 新需求踩着旧需求的验收标准就能过门禁。
+        stale_art = (wb_dir(tmp2) / "artifacts" / "main" / "develop" / "tasks"
+                     / "T1-backend-developer.md")
+        stale_art.parent.mkdir(parents=True, exist_ok=True)
+        stale_art.write_text("上一代需求的执行记录\n", encoding="utf-8")
+        code, out = quiet("init", "--name", "demo-force", "--force")
+        assert code == 0, out
+        assert "已清理上一代产物" in out, f"#11 init --force 未提示清理：{out}"
+        assert not stale_art.exists(), "#11 init --force 未清掉上一代的产物文件"
+
         # #10：status 要能看出「守卫少了一道」。角色锁未设置时，主线程与非角色 agent
         # 不受 role_scopes 约束（harness 派不出角色 subagent 的降级模式下这是常态，
         # 见 wb-flow「派不出角色 subagent 时」）—— 只显示版本号没人知道守卫缺一层。
@@ -1990,4 +2038,5 @@ def cmd_selfcheck(args) -> None:
     print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / Workflow Guard / "
           "冻结状态 / 契约 owner / sed 目标 / "
           "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
-          "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / skills 双份同步")
+          "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / skills 双份同步 / "
+          "init 重建清理")

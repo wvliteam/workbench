@@ -119,12 +119,12 @@ python3 .claude/hooks/wb.py config set gate_commands.test \
 
 一份 `.workbench/` 可以同时跑多条流水线，每条一个 flow（需求线）：state、锁、门禁记录、产物目录都按 flow 隔离在 `.workbench/flows/<flow>/` 与 `.workbench/artifacts/<flow>/`。
 
-`main` 仅用于工作台初始化和基础配置，不承载具体用户指派的任务。每次接收任务时，先检查是否存在属于同一需求、可以继续复用的 flow：当前 flow 只承接该需求的补充、纠正、返工或收尾；有可复用的其他 flow 则切换到它；没有可复用 flow 时，由主线程执行 `wb.py flow new <语义化名称>` 创建新 flow。独立需求不得混入已有非空 flow。Conversation closure 默认不写流程材料；确需保留时用独立 Work Item 或命名 flow。
+`main` 是默认 flow，也是指针回退点与老布局兼容位。它只在工作台尚未承载需求时是「初始化与基础配置」的容器：`init` 之后第一条需求直接落在它上面（空白 flow 可复用），此后它与别的需求线无异 —— 不再接收新需求，也不可删除。每次接收任务时，先检查是否存在属于同一需求、可以继续复用的 flow：当前 flow 只承接该需求的补充、纠正、返工或收尾；有可复用的其他 flow 则切换到它；没有可复用 flow 时，由主线程执行 `wb.py flow new <语义化名称>` 创建新 flow。独立需求不得混入已有非空 flow。Conversation closure 默认不写流程材料；确需保留时用独立 Work Item 或命名 flow。
 
 ```bash
 python3 .claude/hooks/wb.py flow new feature-b   # 开一条新流水线并切换过去
 python3 .claude/hooks/wb.py flow list           # 全部 flow 与各自阶段
-python3 .claude/hooks/wb.py flow switch main   # 切回初始化 flow
+python3 .claude/hooks/wb.py flow switch main   # 切回默认 flow
 python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切走）
 ```
 

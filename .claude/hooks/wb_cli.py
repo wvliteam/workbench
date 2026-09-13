@@ -47,11 +47,20 @@ def cmd_init(args) -> None:
     fd.mkdir(parents=True, exist_ok=True)
     for sub in ("contracts", "artifacts"):
         (wb_dir(root) / sub).mkdir(parents=True, exist_ok=True)
-    for ph in PHASES:
-        (wb_dir(root) / "artifacts" / flow / ph).mkdir(parents=True, exist_ok=True)
     set_current_flow(root, flow)
     if state_path(root, flow).is_file() and not args.force:
         die(f"flow {flow} 已存在 state.json，如需重建请加 --force")
+    # --force 是「重开这条线」，上一代需求的产物必须一起清：任务号从 T1 重编，
+    # develop/tasks/ 下的执行记录会与上一代同名（wb-flow 要求接续时先读它），
+    # 阶段产物还要求存在且非空 —— 留着就是让新需求踩着旧需求的验收标准往下走。
+    purged = 0
+    if args.force:
+        ad = wb_dir(root) / "artifacts" / flow
+        if ad.is_dir():
+            purged = sum(1 for p in ad.rglob("*") if p.is_file())
+            shutil.rmtree(ad, ignore_errors=True)
+    for ph in PHASES:
+        (wb_dir(root) / "artifacts" / flow / ph).mkdir(parents=True, exist_ok=True)
     st = default_state(args.name or root.name)
     scopes = repo_layout_scopes(root)
     if scopes:
@@ -64,6 +73,9 @@ def cmd_init(args) -> None:
         **({"inherited_from": inherited} if inherited else {}))
     save_state(root, st)
     print(f"工作台已初始化：{root}")
+    if purged:
+        print(f"--force：已清理上一代产物 {purged} 个文件（.workbench/artifacts/{flow}/）"
+              f"—— 重开这条线不继承上一代的产物")
     print(f"项目：{st['project']}  flow：{flow}  当前阶段：clarify（需求澄清）")
     if inherited:
         print(f"工作区级配置（角色范围 / 门禁命令 / 并行度）已从 flow {inherited} 继承；"
