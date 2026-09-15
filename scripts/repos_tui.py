@@ -29,7 +29,7 @@ from pathlib import Path
 
 # 与 repos_apply.py 同目录，直接复用其校验与派生规则（单一来源）。
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from repos_apply import derive_name, load_config, validate_entries  # noqa: E402
+from repos_apply import derive_name, derive_project, load_config, validate_entries  # noqa: E402
 
 INIT_SCRIPT = Path(__file__).resolve().parent / "repos_apply.py"
 
@@ -70,7 +70,10 @@ def save_entries(cfg_path: Path, entries: list[dict]) -> None:
 
 
 def entry_name(e: dict) -> str:
-    return str(e.get("name") or derive_name(e.get("remote", "")))
+    """列表里显示的名字：`项目/仓库`（项目能推导出来时），否则只有仓库名。"""
+    repo = str(e.get("name") or derive_name(e.get("remote", "")))
+    project = str(e.get("project") or derive_project(str(e.get("remote") or "")))
+    return f"{project}/{repo}" if project else repo
 
 
 def entry_type(e: dict) -> str:
@@ -272,10 +275,16 @@ def flow_add(scr) -> tuple[dict | None, str]:
     name = modal_input(scr, "添加仓库 · 名称", "名称（回车 = 从地址末段派生）")
     if name is None:
         return None, "已取消"
+    project = modal_input(scr, "添加仓库 · 归属项目",
+                          "归属项目（回车 = 从远程地址推导；决定落点与角色认领）")
+    if project is None:
+        return None, "已取消"
     kind = modal_input(scr, "添加仓库 · 接入方式", "接入方式：1 = git clone，2 = 本地软链", "1")
     if kind is None:
         return None, "已取消"
     entry: dict = {}
+    if project:
+        entry["project"] = project
     if name:
         entry["name"] = name
     if kind == "2":
@@ -303,7 +312,8 @@ def flow_add(scr) -> tuple[dict | None, str]:
 def flow_edit(scr, cur: dict) -> tuple[dict, bool]:
     """逐字段编辑选中条目。返回 (patch, 是否取消)。回车保留原值，输入 - 清空字段。"""
     patch: dict = {}
-    labels = [("name", "名称"), ("remote", "远程地址"), ("link", "本地软链路径"), ("branch", "分支")]
+    labels = [("project", "归属项目"), ("name", "名称"), ("remote", "远程地址"),
+              ("link", "本地软链路径"), ("branch", "分支")]
     for key, label in labels:
         val = modal_input(scr, "编辑（- 清空）", f"{label}（回车保留）", str(cur.get(key) or ""))
         if val is None:
@@ -454,31 +464,34 @@ def tui(root: Path) -> int:
 def selftest() -> int:
     import tempfile
     # apply_add：合法
-    e, err = apply_add([], {"name": "frontend", "remote": "git@h:o/f.git"})
+    e, err = apply_add([], {"project": "x", "name": "frontend", "remote": "git@h:o/f.git"})
     assert err is None and len(e) == 1, e
-    # apply_add：派生名（无 name 有 remote）
+    # apply_add：派生名（无 name 有 remote；project 也从 URL 推导）
     e2, err = apply_add(e, {"remote": "https://x/backend.git"})
     assert err is None and len(e2) == 2, err
-    # apply_add：重名被拒
-    _, err = apply_add(e, {"name": "frontend", "remote": "x"})
+    # apply_add：重名被拒（project/name 两级判定）
+    _, err = apply_add(e, {"project": "x", "name": "frontend", "remote": "x"})
     assert err and "重复" in err, err
     # apply_add：name 非法（含 /）被拒
-    _, err = apply_add([], {"name": "a/b", "remote": "x"})
+    _, err = apply_add([], {"project": "x", "name": "a/b", "remote": "x"})
     assert err and "非法" in err, err
+    # apply_add：project 推不出又没填时被拒（不猜）
+    _, err = apply_add([], {"name": "noname"})
+    assert err and "project" in err, err
     # apply_add：remote 与 link 双填被拒
-    _, err = apply_add([], {"name": "c", "remote": "x", "link": "/p"})
+    _, err = apply_add([], {"project": "x", "name": "c", "remote": "x", "link": "/p"})
     assert err and "二选一" in err, err
     # apply_add：都空被拒
-    _, err = apply_add([], {"name": "d"})
+    _, err = apply_add([], {"project": "x", "name": "d"})
     assert err and "缺 remote" in err, err
     # apply_edit：改 remote
     e3, err = apply_edit(e2, 0, {"remote": "git@h:o/new.git"})
     assert err is None and e3[0]["remote"] == "git@h:o/new.git", (err, e3)
     # apply_edit：清空字段（branch）
-    with_branch = [{"name": "x", "remote": "r", "branch": "dev"}]
+    with_branch = [{"project": "x", "name": "x", "remote": "r", "branch": "dev"}]
     e4, err = apply_edit(with_branch, 0, {"branch": None})
     assert err is None and "branch" not in e4[0], e4
-    # apply_edit：改成重名被拒
+    # apply_edit：改成重名被拒（同项目内）
     _, err = apply_edit(e2, 1, {"name": "frontend"})
     assert err and "重复" in err, err
     # apply_edit：越界
@@ -490,7 +503,7 @@ def selftest() -> int:
     # fit 截断
     assert fit("abc", 5) == "abc" and fit("abcdef", 5) == "ab..."
     # entry 展示辅助
-    assert entry_name({"remote": "https://x/b.git"}) == "b"
+    assert entry_name({"remote": "https://x/b.git"}) == "x/b"
     assert entry_type({"link": "/p"}) == "link" and entry_type({"remote": "r"}) == "clone"
     assert entry_source({"name": "n", "branch": "d"}) == ""
     # 读写往返
@@ -518,8 +531,10 @@ def selftest() -> int:
     assert derive_name("git@gitlab.com:payments-core.git") == "payments-core"
     assert derive_name("git@host:org/repo.git") == "repo"
     assert derive_name("https://x/b.git") == "b"
-    # link 条目无 name 时从路径派生（flow_add 留空不再是死路）
-    assert validate_entries([{"link": "/Users/me/code/shared-libs"}]) is None
+    # link 条目无 name 时从路径派生名；project 必须显式给 —— 本地路径推不出归属项目，
+    # 这里不猜（猜错的项目会让仓库谁都认领不到）
+    assert validate_entries([{"project": "x", "link": "/Users/me/code/shared-libs"}]) is None
+    assert validate_entries([{"link": "/Users/me/code/shared-libs"}]) is not None
     print("selftest OK")
     return 0
 

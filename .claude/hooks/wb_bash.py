@@ -290,6 +290,85 @@ def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
     return all_targets, outside_targets, state["uncertain"]
 
 
+# 源码挂载点。本仓的业务源码不在工作区内，`repos/.source/<项目>/<仓库>` 是软链到
+# 项目根外真实 checkout 的入口。上游用 `Path.resolve()` 判越根，一 resolve 就落到
+# 根外，八个角色一行业务代码都写不了，且报错信息指向「越出项目根」，与真实原因
+# （软链）无关。见 docs/development/workbench-adaptation.md §2.1。
+#
+# 放在 wb_bash 而不是 wb_guard：依赖方向是 wb_guard -> wb_bash，放在上层会让
+# wb_bash 反向 import 成环；而路径解析本来就是这个模块的事。
+SOURCE_MOUNT = "repos/.source/"
+
+
+def _source_mounts(root: Path) -> list[tuple[str, str]]:
+    """真实 checkout 绝对路径 -> 挂载路径（`repos/.source/<项目>/<仓库>`）的反查表。
+
+    按两级 `repos/.source/*/*` 扫描，只收软链 —— 真目录不是挂载点。hook 进程短命，
+    这里每次判定扫一遍目录，比维护缓存失效便宜。
+    """
+    d = root / "repos" / ".source"
+    if not d.is_dir():
+        return []
+    out: list[tuple[str, str]] = []
+    try:
+        projects = sorted(d.iterdir())
+    except OSError:
+        return []
+    for proj in projects:
+        if not proj.is_dir() or proj.name.startswith("."):
+            continue
+        try:
+            repos = sorted(proj.iterdir())
+        except OSError:
+            continue
+        for repo in repos:
+            if repo.name.startswith(".") or not repo.is_symlink():
+                continue
+            try:
+                real = str(repo.resolve())
+            except OSError:
+                continue
+            out.append((real, f"{SOURCE_MOUNT}{proj.name}/{repo.name}"))
+    return out
+
+
+def keep_source_mount(root: Path, p: Path) -> Path | None:
+    """把落在源码挂载点上的路径归一到挂载形态；不在挂载点上返回 None。
+
+    两个方向都要成立 —— 检索纪律要求把路径指向真实 checkout，角色范围却按挂载路径
+    书写，两边坐标系必须对上：
+
+    - `repos/.source/<项目>/<仓库>/x.go`：词法上已在根内，不跟随软链即可；
+    - `/home/work/baidu/<项目>/<仓库>/x.go`：反查回挂载路径。
+
+    安全性：判定前先 `os.path.normpath` 消掉 `..`，所以
+    `repos/.source/../../../tmp/escape.go` 归一后不以挂载点开头，拿不到豁免。
+    """
+    norm = Path(os.path.normpath(str(p)))
+    rootr = Path(os.path.normpath(str(root)))
+    try:
+        rel = norm.relative_to(rootr).as_posix()
+    except ValueError:
+        rel = None
+    if rel is not None and rel.startswith(SOURCE_MOUNT):
+        return norm
+    s = str(norm)
+    for real, mount in _source_mounts(rootr):
+        if s == real or s.startswith(real + os.sep):
+            return rootr / (mount + s[len(real):])
+    return None
+
+
+def guarded_prefixes(root: Path) -> tuple[str, ...]:
+    """受守前缀全集：内核常量 + 工作区层（按布局）。
+
+    工作区层只在 workbench 布局（存在 `repos/`）下生效 —— 单仓库适配场景里
+    `scripts/` 是项目自己的目录，不归工作台管。
+    """
+    return GUARDED_PREFIXES + (
+        WORKSPACE_GUARDED_PREFIXES if (root / "repos").is_dir() else ())
+
+
 def _target_path(base: Path, rootr: Path, raw: str) -> Path:
     """把命令里的写入目标解析成绝对路径：相对路径按 base（当前段 cwd）拼接。
 
@@ -298,9 +377,13 @@ def _target_path(base: Path, rootr: Path, raw: str) -> Path:
     越根检查直接接住。
     """
     raw = os.path.expanduser(raw)
-    if raw.startswith("/"):
-        return Path(raw).resolve()
-    return (base / raw).resolve()
+    p = Path(raw) if raw.startswith("/") else base / raw
+    # 落在源码挂载点上的路径先归一到挂载形态：`.resolve()` 会跟随软链落到项目根外，
+    # 于是每条写源码的命令都被判越根（见 wb_guard.keep_source_mount）。
+    m = keep_source_mount(rootr, p)
+    if m is not None:
+        return m
+    return p.resolve()
 
 
 def _target_directory_flag(args: list[str]) -> tuple[str, list[str]] | None:
@@ -441,8 +524,7 @@ def _collect_ln_sources(args: list[str], all_targets: set[str],
     workspace 层）就一并进目标集，_check_write_target 会因前缀收窄而拒；指向共享
     目录的正当软链（`ln -s ../shared/lib.rs src/local.rs`）不在前缀下，不误拦。
     """
-    prefixes = GUARDED_PREFIXES + (
-        WORKSPACE_GUARDED_PREFIXES if (rootr / "repos").is_dir() else ())
+    prefixes = guarded_prefixes(rootr)
     for raw in _operands(args)[:-1]:
         p = _target_path(base, rootr, raw)
         rel = os.path.relpath(p, rootr).replace(os.sep, "/")
@@ -537,11 +619,19 @@ def _is_pathish(s: str) -> bool:
 
 
 def _resolve_token(cand: str, rootr: Path) -> Path:
-    """把候选路径解析成绝对路径：~ 与 $HOME 先展开，相对路径按项目根拼。"""
+    """把候选路径解析成绝对路径：~ 与 $HOME 先展开，相对路径按项目根拼。
+
+    这里刻意用词法规范化（normpath）而不是 Path.resolve()：resolve 会跟随软链，
+    而本工作区的源码入口 repos/.source/** 全是指向项目根外真实仓库的软链，跟随
+    软链会把合法的挂载路径误判成越根引用（`cd repos/.source/x && go test ./...`
+    这类门禁命令会被整条拒执行）。R4 要拦的是逃逸，不是挂载：`..` 在词法规范化
+    阶段就被折叠，`~/`、`$HOME` 由上面的 expanduser 展开，绝对路径原样保留，
+    这三种越根形态仍然拦得住。
+    """
     c = os.path.expanduser(cand.replace("$HOME", "~").replace("${HOME}", "~"))
-    if c.startswith("/"):
-        return Path(c).resolve()
-    return (rootr / c).resolve()
+    if not c.startswith("/"):
+        c = os.path.join(str(rootr), c)
+    return Path(os.path.normpath(c))
 
 
 def gate_command_references_outside(cmd: str, root: Path) -> str:

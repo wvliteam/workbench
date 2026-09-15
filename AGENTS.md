@@ -42,42 +42,36 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 └── scripts/            # repos_apply.py / repos_tui.py 等公共脚本
 ```
 
-clone 与 IDE 配置按清单自动化：工作区根放一份 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 按 清单 clone/软链到 `repos/`、生成 `.workbench/<工作区名>.code-workspace` 多根工作区与 `.vscode/settings.json` 的 git 发现配置（幂等，已存在的 checkout 不覆盖，clone 失败显式报错）。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与幂等边界见 `.claude/skills/wb-init/SKILL.md`。
+clone 与 IDE 配置按清单自动化：工作区根放一份 `repos.json`（`{"repos":[{"project":"bddev","name":"maphotel","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 按清单 clone/软链到 `repos/.source/<项目>/<仓库>`、生成 `.workbench/<工作区名>.code-workspace` 多根工作区与 `.vscode/settings.json` 的 git 发现配置（幂等，已存在的 checkout 不覆盖，clone 失败显式报错）。**`project` 是归属项目**（`bddev` / `map-cjh-hotel` / `map-hotel-fe` …），决定落点与角色认领；remote 是 `.../<org>/<项目>/<仓库>` 形态时可省（脚本会推导），推不出又没填会被拒绝 —— **不猜，猜错的项目会让该仓库谁都认领不到**。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与幂等边界见 `.claude/skills/wb-init/SKILL.md`。
 
 ### 仓库分工：谁写、干什么
 
+源码与画像是**两棵树**：`repos/.source/<项目>/<仓库>` 是代码（软链或 clone，整棵不进 git），`repos/<项目>/<仓库>/` 是画像（进 git）。
+
 编排者在多仓库里要回答两个问题，来源不同：
 
-- **谁写这个仓库** —— 从 `role_scopes` 现算，`status` 与 `role scopes` 直接给分工图（`frontend→frontend-developer`），认不出的仓库标 `⚠未认领` 并给认领命令。不建第二份存储，不会漂移。
-- **这个仓库是干什么的** —— 没有可派生的事实源，人手维护 `repos/index.md`（进 git，`repos/` 其余内容仍忽略）：
+- **谁写这个仓库** —— 从 `role_scopes` 现算，`status` 与 `role scopes` 直接给分工图（`bddev→backend-developer`），认不出的项目标 `⚠未认领` 并给认领命令。**认领单元是项目**，前后端边界正好落在这一级。不建第二份存储，不会漂移。
+- **这个仓库是干什么的** —— 没有可派生的事实源，人手维护 `repos/index.md`（进 git）。**列的位置不限，按列名定位** —— 只有含「仓库」列的那张表被当作仓库表：
 
 ```markdown
-| 仓库 | 职责 | 入口文档 |
-| --- | --- | --- |
-| frontend | 用户界面，React SPA | repos/notes/frontend.md |
-| payments-svc | 支付核心服务 | |
+| 仓库 | 源码入口 | 所属项目 | 主要职责 | 介绍文档 |
+| --- | --- | --- | --- | --- |
+| bddev/maphotel | .source/bddev/maphotel | 百度地图酒店业务 | 后端主服务… | [repos/bddev/maphotel/overview.md](bddev/maphotel/overview.md) |
 ```
 
-单仓的**稳定事实**写在 `repos/notes/<仓库>.md`（同样进 git），`analyst` 是作者 —— 它每次 analyze 都要把仓库摸一遍，摸到的「怎么跑起来、怎么测、坑在哪」与本次需求无关，跟着 flow 归档就白丢了：
+单仓的**画像三件套**写在 `repos/<项目>/<仓库>/`（同样进 git），`analyst` 是作者 —— 它每次 analyze 都要把仓库摸一遍，摸到的「怎么跑起来、怎么测、坑在哪」与本次需求无关，跟着 flow 归档就白丢了：
 
-```markdown
-# <仓库>
+| 文件 | 放什么 |
+| --- | --- |
+| `overview.md` | 职责、仓库关系、对外能力 |
+| `setup.md` | 依赖、启动命令、readiness 判据 |
+| `test.md` | 测试入口、命令、成功标准 |
 
-## 职责
-一句话说清它做什么。
+三份东西分工写死，避免退化成互相抄的副本：`index.md` 给编排者扫一眼分工；`repos/<项目>/<仓库>/` 放**下个需求还用得上**的客观事实；`current-state.md` 只放本次需求的现状（要动哪几处、撞什么风险），按 flow 隔离、过门禁即冻结。需求相关的别写进画像，仓库相关的别写进现状。
 
-## 启动
-依赖、启动命令、readiness 判据。
+`status` 与 `role scopes` 每次校验两处并点名：索引的缺行 / 死行 / 重复行 / 职责占位符 / 入口文档死链，画像的未建 / 空文件。**校验只报不改** —— 取不到证就写结构化「待补充」，交回编排者或派 `analyst` 补，不要猜。**不逐条查「待补充」**：画像是长文，局部未取证是合规写法，逐条点名只会把警告刷成噪音。
 
-## 测试
-测试入口、命令、成功标准。
-```
-
-三份东西分工写死，避免退化成互相抄的副本：`index.md` 给编排者扫一眼分工；`notes/<仓库>.md` 放**下个需求还用得上**的客观事实；`current-state.md` 只放本次需求的现状（要动哪几处、撞什么风险），按 flow 隔离、过门禁即冻结。需求相关的别写进笔记，仓库相关的别写进现状。
-
-`status` 与 `role scopes` 每次校验两处并点名：索引的缺行 / 死行 / 重复行 / 职责占位符 / 入口文档死链，笔记的未建 / 缺节（职责 / 启动 / 测试）/ 只剩占位符。**校验只报不改** —— 取不到证就写结构化「待补充」，交回编排者或派 `analyst` 补，不要猜。
-
-**画像任务与需求分析是两件事，别并成一件。** 需求驱动的 analyze 边界是「实现这个需求要动哪些地方」，取证跟着需求走 —— 一整仓的画像（怎么跑、怎么测、有哪些子模块、坑在哪）不会被它顺带产出。所以 `init` / `flow new` 会为每个还没有笔记的仓库建一个独立任务（`仓库画像：<仓库>`，`role=analyst`、`phase=analyze`、`write-scopes=repos/notes/<仓库>.md`），初始化后**先派这批**（可并行），派发方式与常规任务相同（`task start` → analyst → `task done`）。新增仓库后照上面那条命令补建。analyze 门禁 `repos_notes_exist` 兜底：任一仓库缺笔记或缺节，analyze 不准出。
+**画像任务与需求分析是两件事，别并成一件。** 需求驱动的 analyze 边界是「实现这个需求要动哪些地方」，取证跟着需求走 —— 一整仓的画像（怎么跑、怎么测、有哪些子模块、坑在哪）不会被它顺带产出。所以 `init` / `flow new` 会为每个还没有画像三件套的仓库建一个独立任务（`仓库画像：<项目>/<仓库>`，`role=analyst`、`phase=analyze`、`write-scopes=repos/<项目>/<仓库>/**`），初始化后**先派这批**（可并行），派发方式与常规任务相同（`task start` → analyst → `task done`）。新增仓库后照上面那条命令补建。analyze 门禁 `repos_notes_exist` 兜底：任一仓库缺画像或画像为空文件，analyze 不准出。
 
 在外层跑一次工作台 init（每个工作区一次，不是每个需求一次）：
 
@@ -87,15 +81,15 @@ python3 .claude/hooks/wb.py init --name <需求名>   # 只在外层
 
 `init` 之后必须调两处,否则会静默出错:
 
-**1. 角色范围按仓库前缀，不是按目录名。** `init` 看到 `repos/*` 会自己换成按仓库前缀，并在输出里说明 —— 但它只能按目录名猜（`frontend` / `web` / `client` / `ui` / `www` 归前端，`backend` / `server` / `api` / `service` / `svc` 归后端）。
+**1. 角色范围按项目实名，不是按目录名。** `init` 看到 `repos/.source/*` 会自己换成按项目认领，并在输出里说明 —— 认领单元是**项目**（`bddev`、`map-cjh-hotel`、`map-hotel-fe` …），前后端边界正好落在项目一级，新增仓库落进既有项目时不用改配置。项目白名单在 `wb_const.py` 的 `REPO_HINTS`，**只用实名、不留通用词**：上游按 `client` / `svc` 这类子串猜，实测 `client` 会命中 `mapclient`，让同一个项目被前后端双认领 —— 那个仓库上的角色隔离直接失效。
 
-**猜不出名字的仓库谁都写不了。** 只要有一个仓库被认领，认不出的那些（`shared`、`payments-core`）就落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。`init` 与 `role scopes` 会点名，照它给的命令认领：
+**认不出项目名的仓库谁都写不了。** 只要有一个项目被认领，认不出的那些就落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。`init` 与 `role scopes` 会点名，照它给的命令认领：
 
 ```bash
 python3 .claude/hooks/wb.py config set role_scopes.frontend-developer \
-  '["repos/frontend/**",".workbench/artifacts/*/develop/tasks/**"]'
+  '["repos/.source/map-hotel-fe/**",".workbench/artifacts/*/develop/tasks/**"]'
 python3 .claude/hooks/wb.py config set role_scopes.backend-developer \
-  '["repos/backend/**","repos/shared/**",".workbench/artifacts/*/develop/tasks/**"]'
+  '["repos/.source/bddev/**","repos/.source/map-cjh-hotel/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
 `config set` 是**整条覆盖不是追加** —— 漏抄一个前缀，那个仓库就换成没人认领，`role scopes` 下一次会点它的名。
@@ -188,7 +182,7 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 `PreToolUse` hook 的 matcher 是 catch-all（`.*`，见 `.claude/settings.json`），每次工具调用都过守卫 —— 逐个列工具名时没列进去的工具等于完全不设防。它拦以下几类：
 
 - 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash（含 `Monitor`，与 Bash 同一个 shell 环境跑 `tool_input.command`）的 `>` `tee` `sed -i` `python3 -c` 等写法都拦。**写出项目根之外不在此列**（2026-09-12 起不拦：根外写入不影响工作流推进，属常态动作）
-- 角色越权写**工作流核心路径** —— 受守前缀：`.workbench/`（状态、契约、阶段产物按阶段隔离）、`.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义）、`knowledge/`（专属 `knowledger`）、`references/`（公共规范只读，仅 `references/workspace/<自己的角色>/` 可改自己的），多仓库布局下再加工作区材料 `scripts/` `repos.json` `repos/index.md` `repos/notes/`（归 `analyst`）`.vscode/`。`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值。**核心路径之外一律不判角色**：仓库代码、`/tmp`、项目根之外 —— 在 `/tmp` 建测试脚本、跑根外脚本、跨目录搬文件都是开发常态，且不影响工作流推进；「谁该写哪块代码、别乱写文件乱执行脚本」属于 harness 与模型层面的规范，不是本工作台的职责。守卫管得越宽，越容易在正常动作上误拦，把防线变成流程阻力
+- 角色越权写**工作流核心路径** —— 受守前缀：`.workbench/`（状态、契约、阶段产物按阶段隔离）、`.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/`（权限引擎、hook 注册表、角色定义与 Skill 实体、业务插件与 MCP 源）、`knowledge/`（专属 `knowledger`）、`references/`（公共规范只读，仅 `references/workspace/<自己的角色>/` 可改自己的），多仓库布局下再加工作区材料 `scripts/`、`repos.json`、`repos/index.md` `.vscode/`（`repos/` 整体**不收窄** —— `repos/<名>/` 可能是自带 `.workbench/` 的嵌套项目根，整体收窄会误拦内层仓库的正常源码；画像的可写面由 `analyst` 的逐文件范围收窄）。`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值。**核心路径之外一律不判角色**：仓库代码、`/tmp`、项目根之外 —— 在 `/tmp` 建测试脚本、跑根外脚本、跨目录搬文件都是开发常态，且不影响工作流推进；「谁该写哪块代码、别乱写文件乱执行脚本」属于 harness 与模型层面的规范，不是本工作台的职责。守卫管得越宽，越容易在正常动作上误拦，把防线变成流程阻力
 - 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`init --root`（会在项目外甚至 `.claude/` 下建 `.workbench` 结构）、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
 - 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()` 与 `gate_command_references_outside()`（后者拒 `sh /tmp/x.sh`、`pytest --cov=/tmp/x` 这类项目根外的脚本与路径引用）
 - 非主线程调用会「把动作带出本会话权限边界」的工具（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）—— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，动作发生在守卫看不见的地方，拦不住第二次，所以门只能设在「调它」这一步。主线程是编排者，不受限。**⚠ 这层在 `d606944` 重构中被移除，尚未恢复 —— 当前不生效**（见 [draft/open-issues-2026-09-10.md](draft/open-issues-2026-09-10.md) 的 P0 条目）

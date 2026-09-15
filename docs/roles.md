@@ -19,12 +19,12 @@
 | 角色 | 阶段 | 产出 | 可写 | 模型 |
 | --- | --- | --- | --- | --- |
 | `pm` | clarify | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
-| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` + `repos/notes/<仓库>.md`（跨需求复用的稳定事实：职责 / 启动 / 测试） | `artifacts/*/analyze/**` / `repos/notes/**` | sonnet |
-| `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` / `docs/**` | opus |
+| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` + `repos/<项目>/<仓库>/{overview,setup,test}.md`（跨需求复用的稳定事实：职责 / 启动 / 测试） | `artifacts/*/analyze/**` / `repos/*/*/{overview,setup,test}.md`（**逐文件列** —— 写成 `repos/*/*/**` 会把 `repos/.source/` 下的源码一并放行） | sonnet |
+| `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` | opus |
 | `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
 | `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
 | `qa` | verify | `artifacts/<flow>/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
-| `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` / `docs/**` / `*.md` | opus |
+| `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` | opus |
 | `knowledger` | retro 沉淀 + 随时检索 | `knowledge/<类别>/` 下的经验条目与类别 `index.md` | `knowledge/**` | sonnet |
 
 **模型分配**：`architect` 与 `reviewer` 用 opus —— 方案取舍与复盘归因是判断密度最高的两件事，做错的成本由后面所有阶段承担。其余用 sonnet。
@@ -33,11 +33,11 @@
 
 | 加的 | 给谁 | 不加会怎样 |
 | --- | --- | --- |
-| `*.md` | 开发两个角色、`reviewer` | `docs/**` 原本只在 architect 名下，于是 develop 阶段开发碰 `README.md` 被拒 —— 而拒绝信息给的第一条出路「交给对应角色」那时不存在，architect 已经下场了 |
+| `*.md` | 开发两个角色 | `docs/**` 原本只在 architect 名下，于是 develop 阶段开发碰 `README.md` 被拒 —— 而拒绝信息给的第一条出路「交给对应角色」那时不存在，architect 已经下场了 |
 | `*.config.{ts,js,mjs}` 与 `pytest.ini` / `tox.ini` | `qa` | 测试框架配置按约定放仓库根，而 qa 原本只有四个测试**目录** —— 配 e2e 第一步就走不通。两族要一起给，否则 qa 配得了 vitest 配不了 pytest。`pyproject.toml` / `setup.cfg` 故意不给：那两个同时装着依赖与打包配置，不是测试专属文件 |
 | `components/ pages/ lib/ styles/` 与 `.js` `.jsx` `.vue` `.html` `.scss` | `frontend-developer` | 原列表默认了「源码在 `src/` 或 `web/` 下且用 TypeScript」，Next.js / Nuxt / Vite 的标准布局全在范围外 |
 
-放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。多仓库工作区布局（存在 `repos/`）下还叠加 `scripts/` `repos.json` `.vscode/` 三个工作区级前缀，同属「主线程维护、角色只读」。`knowledge/` 是第四处：reviewer 与两个开发都持有 `*.md`，不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。`references/` 是第五处：公共操作规范（全体角色必读的输出信封），任何角色只读 —— 改规范等于改角色定义，交回主线程。
+放宽的是**仓库内的文件，不是状态目录**。裸扩展名模式（`*.md` / `*.json`）在 `fnmatch` 下跨 `/`，所以守卫对 `.workbench/` 下的路径只认显式以 `.workbench/` 开头的模式 —— 否则 `*.md` 会匹配 `artifacts/main/clarify/requirements.md`、`*.json` 会匹配 `contracts/events.json`，把下面那两段的隔离整个绕开。这条收窄同时补掉了 `*.json` 一直存在的同类缺口。同样的收窄也覆盖 `.claude/` `.codex/` `.agents/` —— 那里装的是权限引擎、hook 注册表与角色定义，任何角色都写不到，要改交回主线程（见 [permissions.md](permissions.md#第四层角色写入范围)）。多仓库工作区布局（存在 `repos/`）下还叠加 `scripts/` `repos.json` `.vscode/` 三个工作区级前缀，同属「主线程维护、角色只读」。`knowledge/` 是第四处：两个开发持有 `*.md`，不收窄的话他们能写知识条目，「knowledger 角色对沉淀质量负责」就落空了（`reviewer` 原来也持有 `*.md`，已按同一理由从范围里移除）。`references/` 是第五处：公共操作规范（全体角色必读的输出信封），任何角色只读 —— 改规范等于改角色定义，交回主线程。
 
 **产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这挡的是下游角色去改上游产物 —— `qa` 发现需求写得不清楚，顺手把 `requirements.md` 改成自己理解的样子，之后就没人知道原始需求是什么了。改上游产物要走上游角色，或者报回主线程。
 
@@ -47,7 +47,7 @@
 
 `analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。`pm` 同样不含代码路径（它只能写自己的产物目录），只是它的本职是澄清需求而非触碰代码，不算一个「诱惑」。这不是疏忽：
 
-> 注（2026-09-12）：上表「可写」列是**范围表**，守卫只在工作流核心路径（受守前缀：`.workbench/` `knowledge/` `references/` `.claude/` 等 + 多仓库布局下的 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`）上强制执行它；仓库代码、`/tmp`、项目根外不做角色判定 —— 「谁写哪块代码」由 harness 与模型层面规范，不是工作台的职责。详见 [permissions.md](permissions.md#第四层角色写入范围)。
+> 注（2026-09-12，2026-09-14 更新）：上表「可写」列是**范围表**，守卫只在工作流核心路径（受守前缀：`.workbench/` `knowledge/` `references/` `.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/` 等 + 多仓库布局下的 `scripts/` `repos.json` `repos/index.md` `.vscode/`）上强制执行它；仓库代码、`/tmp`、项目根外不做角色判定 —— 「谁写哪块代码」由 harness 与模型层面规范，不是工作台的职责。注意 `repos/` 整体**不在**受守前缀里（`repos/<名>/` 可能是自带 `.workbench/` 的嵌套项目根），画像的可写面由 `analyst` 的逐文件范围收窄。详见 [permissions.md](permissions.md#第四层角色写入范围)。
 
 | 角色 | 为什么不许改代码 |
 | --- | --- |
@@ -56,7 +56,7 @@
 | `reviewer` | 评审者改代码就没人评审那次改动了 |
 | `knowledger` | 知识条目是它唯一的产出。让它顺手改别的，沉淀就从「专职判断」退化成「谁顺手谁写」，查找的人无从判断哪条可信 |
 
-`qa` 能写 `tests/` 与测试框架配置（`*.config.ts` / `pytest.ini` 之类）—— 搭测试与补测试是它的职责，改产品代码不是。`reviewer` 能写 `docs/**` 与 `*.md` 是同一个道理：落 ADR、补说明属于评审产出，动代码不属于。
+`qa` 能写 `tests/` 与测试框架配置（`*.config.ts` / `pytest.ini` 之类）—— 搭测试与补测试是它的职责，改产品代码不是。`reviewer` 的范围只剩自己阶段的 retro 产物；落 ADR、补交付报告写到 `docs/` 仍然可以（`docs/` 不是受守前缀，不判角色），但不再靠裸 `*.md` 授权 —— 那会在 `fnmatch` 下跨 `/` 漏进受守的 `knowledge/`。
 
 ## 每个角色的开工三步
 

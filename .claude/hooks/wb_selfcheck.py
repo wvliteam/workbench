@@ -20,13 +20,16 @@ try:
 except ImportError:  # pragma: no cover
     fcntl = None
 
-from wb_const import ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, STATE_SCHEMA, WB_VERSION
+from wb_const import (
+    ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, REPO_PROFILE_FILES, STATE_SCHEMA, WB_VERSION,
+)
 from wb_bash import MAX_LOG, resolve
 from wb_core import (
     INHERIT_KEYS, acquire_state_lock, artifact_path, close_unlock, find_contract,
     find_task, frozen_paths, gate_check, lease_expired, load_state, log, now,
     read_disputes, read_frozen, read_repos_manifest, read_unlock_records, read_unlocks,
-    ready_tasks, repo_claims, repo_index_issues, repo_layout_scopes, repo_names,
+    ready_tasks, repo_claims, repo_index_issues, repo_layout_scopes, source_projects,
+    source_repos, projects_missing_profiles,
     repo_note_issues, retro_enter_epoch, run_check, save_state, set_flow_override,
     select_task_batch, state_path, task_contract_errors, task_contract_names,
     task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
@@ -625,13 +628,12 @@ def cmd_selfcheck(args) -> None:
         # 该角色自己的活，而不是跨界 —— 误拦比漏拦更快让 agent 去想办法绕守卫。
         for agent, path, why in [
             ("backend-developer", "README.md", "开发更新文档"),
-            ("backend-developer", "docs/api-changes.md", "开发补接口说明"),
             ("frontend-developer", "components/Button.jsx", "根级布局 + JS 项目"),
             ("frontend-developer", "styles/main.scss", "同上"),
             ("qa", "vitest.config.ts", "qa 配置测试框架"),
             ("qa", "playwright.config.ts", "同上"),
             ("qa", "pytest.ini", "Python 测试框架的配置不叫 *.config.*"),
-            ("reviewer", "docs/adr/001-choice.md", "复盘落 ADR"),
+            ("knowledger", "knowledge/guides/new-entry.md", "知识沉淀是 knowledger 的本职"),
         ]:
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
                           "tool_input": {"file_path": path}}) == 0, f"{agent} 写 {path} 被误拦（{why}）"
@@ -642,6 +644,10 @@ def cmd_selfcheck(args) -> None:
             ("reviewer", ".workbench/artifacts/main/design/design.md"),
             ("backend-developer", ".workbench/contracts/user-api.json"),
             ("qa", ".workbench/artifacts/main/design/notes.config.ts"),
+            # 知识出口专属 knowledger：沉淀出口固定是 knowledge/（knowledge_written
+            # 门禁、GUARDED_PREFIXES 与 knowledger 范围都锚在它），别的角色写不进。
+            ("backend-developer", "knowledge/api-changes.md"),
+            ("reviewer", "knowledge/adr/001-choice.md"),
         ]:
             assert guard({"tool_name": "Write", "cwd": cw, "agent_type": agent,
                           "tool_input": {"file_path": path}}) == 2, \
@@ -866,57 +872,73 @@ def cmd_selfcheck(args) -> None:
         for r in DEFAULT_ROLE_SCOPES:
             assert f"\n  {r}\n" in out, f"role scopes 应按角色分节，{r} 独立成行：{out[:200]}"
 
-        # 跨仓库布局：默认范围静默错两个方向，init 要换成按仓库前缀
+        # 跨仓库布局：本仓的认领单元是 repos/.source/<项目>/（**项目实名**，前后端边界
+        # 正好落在项目一级），不再是上游假定的 repos/<仓库>/（workbench-adaptation.md §2.2）
         assert repo_layout_scopes(tmp) is None, "没有 repos/ 时不该动默认范围"
         assert unclaimed_repos(tmp, DEFAULT_ROLE_SCOPES) == [], "没有 repos/ 时无从认领"
-        for r in ("frontend", "backend", "payments-svc", "shared"):
-            (tmp / "repos" / r).mkdir(parents=True)
+        for p in ("bddev", "map-hotel-fe", "mapclient", "unknown-proj"):
+            (tmp / "repos" / ".source" / p).mkdir(parents=True)
+        # 两级结构：项目下才是仓库。index 的登记单元是 `项目/仓库`（见 source_repos）
+        for rel in ("bddev/maphotel", "map-hotel-fe/hotel-product",
+                    "mapclient/proto", "unknown-proj/x"):
+            (tmp / "repos" / ".source" / rel).mkdir()
         rs = repo_layout_scopes(tmp)
 
         def allowed(rel, role):
             return any(fnmatch.fnmatch(rel, g) for g in rs[role])
 
-        assert allowed("repos/backend/migrations/001.sql", "backend-developer"), \
-            "默认的 migrations/** 匹配不到 repos/backend/migrations/"
-        assert not allowed("repos/frontend/src/api.py", "backend-developer"), \
-            "裸 *.py 会放行别人仓库的同语言文件"
-        assert not allowed("repos/backend/package.json", "frontend-developer")
+        assert allowed("repos/.source/bddev/maphotel/migrations/001.sql", "backend-developer"), \
+            "默认的 migrations/** 匹配不到项目下的仓库"
+        assert not allowed("repos/.source/map-hotel-fe/hotel-product/src/api.py", "backend-developer"), \
+            "裸 *.py 会放行别人项目的同语言文件"
+        assert not allowed("repos/.source/bddev/maphotel/package.json", "frontend-developer")
         assert allowed(".workbench/artifacts/main/develop/tasks/T1.md", "backend-developer"), \
-            "产物目录在工作区根，不该被加仓库前缀"
+            "产物目录在工作区根，不该被加项目前缀"
         assert not allowed(".workbench/artifacts/main/develop/verification.md", "backend-developer"), \
             "verification.md 应从 developer 范围移出"
-        # qa 没有仓库提示词，永远走「任意仓库」分支 —— 裸扩展名模式不能在那个分支被
+        # qa 没有项目提示词，永远走「任意项目」分支 —— 裸扩展名模式不能在那个分支被
         # 丢掉，否则它只剩四个测试目录，配不了测试框架（与单仓库下同一个误拦）
-        assert allowed("repos/frontend/vitest.config.ts", "qa"), \
+        assert allowed("repos/.source/map-hotel-fe/hotel-product/vitest.config.ts", "qa"), \
             "qa 在跨仓库布局下配不了测试框架"
-        assert allowed("repos/backend/tests/test_api.py", "qa")
-        assert not allowed("repos/backend/src/app.py", "qa"), "qa 仍然不该碰产品代码"
-        # 知识库挂工作区根，与 .workbench/ 同免仓库前缀改写 —— 改写成
-        # repos/*/knowledge/** 会跟 knowledge_written 门禁的检查点（根 knowledge/）错位
+        assert allowed("repos/.source/bddev/maphotel/tests/test_api.py", "qa")
+        assert not allowed("repos/.source/bddev/maphotel/src/app.py", "qa"), "qa 仍然不该碰产品代码"
+        # 知识库挂工作区根，与 .workbench/ 同免项目前缀改写 —— 改写成
+        # repos/.source/*/knowledge/** 会跟 knowledge_written 门禁的检查点（根 knowledge/）错位
         assert rs["knowledger"] == ["knowledge/**"], \
             f"knowledger 范围被跨仓库改写：{rs['knowledger']}"
-        # 单仓笔记挂工作区根，与 knowledge/ 同免改写，且归 analyst（它才是摸仓库的人）
-        assert "repos/notes/**" in rs["analyst"], \
-            f"analyst 的单仓笔记范围被跨仓库改写：{rs['analyst']}"
-        assert allowed("repos/notes/frontend.md", "analyst")
-        assert not allowed("repos/notes/frontend.md", "backend-developer"), \
-            "单仓笔记不该是人人可写 —— 写的人多了就是第四个副本"
+        # 单仓画像三件套挂工作区根（`repos/<项目>/<仓库>/`），与知识出口同免改写，
+        # 且归 analyst（它才是摸仓库的人）
+        for f in REPO_PROFILE_FILES:
+            assert f"repos/*/*/{f}" in rs["analyst"], \
+                f"analyst 的画像范围被跨仓库改写：{rs['analyst']}"
+        assert allowed("repos/bddev/maphotel/overview.md", "analyst")
+        assert not allowed("repos/bddev/maphotel/overview.md", "backend-developer"), \
+            "画像不该是人人可写 —— 写的人多了就是第四个副本"
+        # 逐文件列而不是 `repos/*/*/**`：后者会把 .source 下的源码一并放行
+        assert not allowed("repos/.source/bddev/maphotel/main.go", "analyst"), \
+            "analyst 不该能写源码挂载点 —— 画像范围必须逐文件列"
         assert allowed("knowledge/x.md", "knowledger")
-        assert not allowed("docs/x.md", "knowledger"), "knowledger 角色不该能写 docs/"
-        # 认领靠目录名。认不出的仓库落在所有角色范围外 —— 是硬拦不是跨仓库放行，
-        # 所以必须点名，否则要到 develop 阶段才撞成一次权限拒绝
-        assert not allowed("repos/shared/src/x.py", "backend-developer"), \
-            "没被任何角色认领的仓库不该静默放行"
-        assert unclaimed_repos(tmp, rs) == ["shared"], \
+        assert not allowed("docs/x.md", "knowledger"), \
+            "knowledger 只能写知识出口 knowledge/，docs/ 不是沉淀出口"
+        # 认领靠**项目实名**，不认通用词。认不出的项目落在所有角色范围外 —— 是硬拦
+        # 不是跨仓库放行，所以必须点名，否则要到 develop 阶段才撞成一次权限拒绝。
+        # 这里也钉住上游通用词子串匹配的坑：`mapclient` 含 `client`，用子串会让它
+        # 同时落进 frontend 与 backend 的范围，该项目的角色隔离直接失效。
+        assert not allowed("repos/.source/unknown-proj/x/src/x.py", "backend-developer"), \
+            "没被任何角色认领的项目不该静默放行"
+        assert not allowed("repos/.source/mapclient/proto/src/x.ts", "frontend-developer"), \
+            "mapclient 是后端项目，不该被子串 client 误认领给前端"
+        assert unclaimed_repos(tmp, rs) == ["unknown-proj"], \
             f"认领判定不对：{unclaimed_repos(tmp, rs)}"
         # 手写认领之后不该再点名；而 config set 是整条覆盖，漏抄一个前缀就换成
-        # 那个仓库被点名 —— 这正是提示最后一行要说的
+        # 那个项目被点名 —— 这正是提示最后一行要说的
         claimed = dict(rs, **{"backend-developer": [
-            ".workbench/artifacts/*/develop/tasks/**", "repos/backend/**", "repos/shared/**"]})
-        assert unclaimed_repos(tmp, claimed) == ["payments-svc"], \
+            ".workbench/artifacts/*/develop/tasks/**", "repos/.source/bddev/**",
+            "repos/.source/mapclient/**"]})
+        assert unclaimed_repos(tmp, claimed) == ["unknown-proj"], \
             "整条覆盖漏抄的前缀没有被点名"
-        # 全都认不出名字时走「任意仓库」分支，探路径命中，不该误报点名
-        assert unclaimed_repos(tmp, {r: [f"repos/*/{p}" for p in ("src/**", "*.py")]
+        # 全都认不出名字时走「任意项目」分支，探路径命中，不该误报点名
+        assert unclaimed_repos(tmp, {r: [f"repos/.source/*/{p}" for p in ("src/**", "*.py")]
                                      for r in ("frontend-developer", "backend-developer")}) == [], \
             "回退分支下误报未认领"
         # --reset 必须跟 init 走同一条路径。只写 DEFAULT_ROLE_SCOPES 会把跨仓库项目
@@ -930,11 +952,11 @@ def cmd_selfcheck(args) -> None:
 
         # 仓库地图：认领从 role_scopes 现算（不建第二份存储），与 unclaimed_repos 同一判据
         claims = repo_claims(tmp, after)
-        assert claims["frontend"] == ["frontend-developer"], claims
-        assert claims["backend"] == ["backend-developer"], claims
-        assert claims["shared"] == [], f"认不出名字的仓库不该有角色：{claims}"
-        assert claims["payments-svc"] == ["backend-developer"], \
-            f"svc 提示词应认出 payments-svc：{claims}"
+        assert claims["map-hotel-fe"] == ["frontend-developer"], claims
+        assert claims["bddev"] == ["backend-developer"], claims
+        assert claims["mapclient"] == ["backend-developer"], \
+            f"mapclient 该只归后端（上游的通用词子串匹配会把它双认领）：{claims}"
+        assert claims["unknown-proj"] == [], f"认不出名字的项目不该有角色：{claims}"
 
         # 仓库索引：职责与入口文档没有可派生的事实源，护栏是机械校验 + 结构化占位符
         # （ROMA 的 check_repos.py 同一思路：报出来，不自动改文件）
@@ -943,72 +965,73 @@ def cmd_selfcheck(args) -> None:
         assert len(issues) == 1 and "未建 repos/index.md" in issues[0], issues
         (tmp / "repos" / "index.md").write_text(
             "# 仓库索引\n\n| 仓库 | 职责 | 入口文档 |\n| --- | --- | --- |\n"
-            "| frontend | 界面与交互 | |\n"
-            "| frontend | 重复登记 | |\n"
-            "| ghost | 已删掉的仓库 | |\n"
-            "| backend | TODO | docs/nope.md |\n",
+            "| bddev/maphotel | 酒店主服务 | |\n"
+            "| bddev/maphotel | 重复登记 | |\n"
+            "| bddev/ghost | 已删掉的仓库 | |\n"
+            "| map-hotel-fe/hotel-product | TODO | docs/nope.md |\n",
             encoding="utf-8")
         joined = " | ".join(repo_index_issues(tmp))
-        for frag in ("重复登记 frontend", "repos/ghost/ 不存在", "职责还是占位符",
-                     "docs/nope.md 不存在（死链）", "repos/payments-svc/ 未登记",
-                     "repos/shared/ 未登记"):
+        for frag in ("重复登记 bddev/maphotel", "repos/.source/bddev/ghost 不存在", "职责还是占位符",
+                     "docs/nope.md 不存在（死链）", "repos/.source/mapclient/proto 已挂载但未登记",
+                     "repos/.source/unknown-proj/x 已挂载但未登记"):
             assert frag in joined, f"{frag} 没被点名：{joined}"
         # 补齐后不再点名 —— 校验是为了可操作，不是制造每轮都忽略的噪音
         (tmp / "repos" / "index.md").write_text(
             "# 仓库索引\n\n| 仓库 | 职责 | 入口文档 |\n| --- | --- | --- |\n"
-            "| frontend | 界面与交互 | |\n| backend | API 服务 | |\n"
-            "| payments-svc | 支付核心 | |\n| shared | 共享库 | |\n",
+            "| bddev/maphotel | 酒店主服务 | |\n| map-hotel-fe/hotel-product | 界面 | |\n"
+            "| mapclient/proto | PB 契约 | |\n| unknown-proj/x | 共享库 | |\n",
             encoding="utf-8")
         assert repo_index_issues(tmp) == [], repo_index_issues(tmp)
 
-        # 单仓稳定事实（repos/notes/<仓库>.md）：跨需求复用的客观事实（怎么跑、怎么测、
-        # 坑在哪）。与本次需求的 current-state.md 分工不同 —— 后者按 flow 隔离、过门禁即
-        # 冻结、跟着需求归档；前者仓库不变它就不变。作者是 analyst，护栏同样只报不改。
+        # 单仓画像三件套（repos/<项目>/<仓库>/{overview,setup,test}.md）：跨需求复用的
+        # 客观事实（怎么跑、怎么测、坑在哪）。与本次需求的 current-state.md 分工不同 ——
+        # 后者按 flow 隔离、过门禁即冻结、跟着需求归档；前者仓库不变它就不变。
+        # 作者是 analyst，护栏同样只报不改。
         notes = repo_note_issues(tmp)
-        assert len(notes) == len(repo_names(tmp)) and \
-            all("未建 repos/notes/" in i for i in notes), notes
-        # analyze 准出兜底：画像与需求分析分开，缺笔记不许过门禁
+        assert len(notes) == len(source_repos(tmp)) and \
+            all("未建 repos/" in i for i in notes), notes
+        # analyze 准出兜底：画像与需求分析分开，缺画像不许过门禁
         ok, _, detail = run_check(tmp, load_state(tmp), "analyze", "repos_notes_exist")
-        assert not ok and "frontend" in detail, detail
-        (tmp / "repos" / "notes").mkdir(parents=True, exist_ok=True)
-        (tmp / "repos" / "notes" / "frontend.md").write_text(
-            "# frontend\n\n## 职责\n界面与交互\n\n## 启动\n待补充\n", encoding="utf-8")
-        joined = " | ".join(repo_note_issues(tmp))
-        assert "缺「## 测试」" in joined, joined
-        assert "「启动」还是占位符" in joined, joined
-        for n in ("frontend", "backend", "payments-svc", "shared"):
-            (tmp / "repos" / "notes" / f"{n}.md").write_text(
-                f"# {n}\n\n## 职责\n一句话\n\n## 启动\n跑起来的命令\n\n## 测试\n测试入口与判据\n",
-                encoding="utf-8")
+        assert not ok and "bddev/maphotel" in detail, detail
+        for rel in ("bddev/maphotel", "map-hotel-fe/hotel-product",
+                    "mapclient/proto", "unknown-proj/x"):
+            d = tmp / "repos" / rel
+            d.mkdir(parents=True, exist_ok=True)
+            for f in REPO_PROFILE_FILES:
+                (d / f).write_text(f"# {rel}\n\n内容\n", encoding="utf-8")
         assert repo_note_issues(tmp) == [], repo_note_issues(tmp)
         ok, _, detail = run_check(tmp, load_state(tmp), "analyze", "repos_notes_exist")
         assert ok, detail
+        # 空文件也算没产出
+        (tmp / "repos" / "bddev" / "maphotel" / "test.md").write_text("", encoding="utf-8")
+        assert any("是空文件" in i for i in repo_note_issues(tmp)), repo_note_issues(tmp)
+        (tmp / "repos" / "bddev" / "maphotel" / "test.md").write_text(
+            "# bddev/maphotel\n\n内容\n", encoding="utf-8")
 
         # 仓库画像任务：需求驱动的 analyze 只覆盖需求相关的那部分代码，整仓画像
         # （怎么跑、怎么测、坑在哪）产不出来 —— 所以它是**独立任务**，init 直接建。
         st2 = load_state(tmp)
         st2["tasks"] = []
-        assert ensure_repo_orientation_tasks(tmp, st2) == [], "已有笔记的仓库不该再建画像任务"
-        (tmp / "repos" / "notes" / "frontend.md").unlink()
+        assert ensure_repo_orientation_tasks(tmp, st2) == [], "已有画像的仓库不该再建画像任务"
+        (tmp / "repos" / "bddev" / "maphotel" / "test.md").unlink()
         made = ensure_repo_orientation_tasks(tmp, st2)
-        assert len(made) == 1 and made[0]["title"] == "仓库画像：frontend", made
+        assert len(made) == 1 and made[0]["title"] == "仓库画像：bddev/maphotel", made
         assert made[0]["role"] == "analyst" and made[0]["phase"] == "analyze", made
-        assert made[0]["write_scopes"] == ["repos/notes/frontend.md"], made
+        assert made[0]["write_scopes"] == ["repos/bddev/maphotel/**"], made
         assert ensure_repo_orientation_tasks(tmp, st2) == [], \
             "同一仓库重复建了画像任务（幂等要求：todo/doing/done 都不重复建）"
-        (tmp / "repos" / "notes" / "frontend.md").write_text(
-            "# frontend\n\n## 职责\n一句话\n\n## 启动\n跑起来的命令\n\n## 测试\n测试入口与判据\n",
-            encoding="utf-8")
+        (tmp / "repos" / "bddev" / "maphotel" / "test.md").write_text(
+            "# bddev/maphotel\n\n内容\n", encoding="utf-8")
         # 编排者每轮先看 status：分工图与未认领标记必须在那一行里
         (tmp / "repos.json").write_text(
-            '{"repos": [{"name": "frontend", "remote": "git@example:org/fe",'
+            '{"repos": [{"name": "map-hotel-fe", "remote": "git@example:org/fe",'
             ' "description": "界面与交互"}]}', encoding="utf-8")
-        assert read_repos_manifest(tmp)["frontend"] == "界面与交互"
+        assert read_repos_manifest(tmp)["map-hotel-fe"] == "界面与交互"
         code, out = quiet("status")
         assert code == 0, out
         assert "仓库：" in out, out
-        assert "frontend（界面与交互）→frontend-developer" in out, out
-        assert "shared→⚠未认领" in out, out
+        assert "map-hotel-fe（界面与交互）→frontend-developer" in out, out
+        assert "unknown-proj→⚠未认领" in out, out
         (tmp / "repos.json").unlink()
         shutil.rmtree(tmp / "repos")
         quiet("role", "scopes", "--reset")   # repos/ 已删，恢复裸默认值给后面的断言

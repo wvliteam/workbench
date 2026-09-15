@@ -17,7 +17,13 @@ description: 软件开发工作台主编排器。驱动需求澄清→现状分�
 python3 .claude/hooks/wb.py init --name <项目名>
 ```
 
-然后**每一轮都先看状态**，不要凭记忆推进：
+然后**每一轮先列出全部需求线**，不要把历史指针当成复用授权：
+
+```
+python3 .claude/hooks/wb.py flow list
+```
+
+根据请求与各 flow 的目标、产物和阶段判断是否完全匹配；完全匹配才执行 `flow switch <name>`，否则执行 `flow new <语义化名称>`。选定后再看状态：
 
 ```
 python3 .claude/hooks/wb.py status
@@ -25,14 +31,16 @@ python3 .claude/hooks/wb.py status
 
 ### 需求线隔离
 
-新请求进入完整流程前，主 Agent 先判断它是当前 flow 的需求变更/续作，还是独立 Work Item：
+新请求进入完整流程前，主 Agent 必须先 `flow list`，再判断它是已有 flow 的需求变更/续作，还是独立 Work Item：
 
-- **复用当前 flow**：仅限当前需求范围内的补充、纠正、返工或收尾。
+- **复用已有 flow**：仅限与该 flow 目标、影响范围和验收标准完全匹配，且只是当前需求范围内的补充、纠正、返工或收尾；先执行 `flow switch <name>`。
+- **判定依据**：按需求目标和验收标准归属，不能仅因修改同一函数、模块或产品能力就复用 flow；例如同属 `cancel_feedback` 的 errno 异常处理与 coupon 资格判断，目标不同，应拆为不同 flow。
 - **复用空白初始 flow**：仅限刚执行 `init` 后，当前 flow 尚无阶段产物、契约、任务、阶段推进历史或其他需求过程材料。默认 `init` 下这就是 `main` —— 第一条需求落在它上面之后，`main` 即与别的需求线无异（不可删、不再收新需求），别盘算把它留空。
-- **新建 flow**：当前 flow 已承载其他需求的产物、契约、任务或阶段历史时，独立新需求必须由主 Agent 执行 `python3 .claude/hooks/wb.py flow new <语义化名称>`；不得覆盖、替换或混放到现有 flow。
+- **新建 flow**：只要没有已有 flow 完全匹配，必须执行 `python3 .claude/hooks/wb.py flow new <语义化名称>`；不得因为 `status` 显示某个 current-flow 就直接复用。
+- **已收尾的 flow 不再收新需求**：当前 flow 的任务全部 done、或阶段已走完，即视为该需求线已结束；此时新需求一律 `flow new`，不得挂上去续写。
 - **Conversation closure**：默认不创建流程材料；确需保留时使用独立 Work Item 或命名 flow，不得写入无关的活动 flow。
 
-判断依据至少包括 `status`、当前 flow 阶段目录、契约列表和任务列表；只要任一处已有其他需求痕迹，该 flow 就不是空白。
+`status` 根行显示的 `<flow>` 只是 `current-flow` 指针的历史值，不会随新需求自动切换 —— **读到它不等于获得复用授权**。判断依据至少包括当前 flow 阶段目录、契约列表和任务列表；只要任一处已有其他需求痕迹，或该需求线已收尾，该 flow 就不能再收新需求。
 
 ## 阶段与角色对应
 
@@ -49,7 +57,7 @@ python3 .claude/hooks/wb.py status
 
 ## 每轮循环
 
-0. **工作区刚 init / 新增了仓库 -> 先跑仓库画像**。`init` 会为每个还没有 `repos/notes/<仓库>.md` 的仓库建一个 `仓库画像：<仓库>` 任务（analyst，analyze 阶段）。这批与任何需求无关，**初始化后先派**（可并行），别把它并进需求的 analyze —— 需求驱动的分析只覆盖需求相关的那部分代码，产不出整仓画像。analyze 门禁 `repos_notes_exist` 会兜底点名漏掉的仓库。
+0. **工作区刚 init / 新增了仓库 -> 先跑仓库画像**。`init` 会为每个还没有画像三件套（`repos/<项目>/<仓库>/{overview,setup,test}.md`）的仓库建一个 `仓库画像：<项目>/<仓库>` 任务（analyst，analyze 阶段）。这批与任何需求无关，**初始化后先派**（可并行），别把它并进需求的 analyze —— 需求驱动的分析只覆盖需求相关的那部分代码，产不出整仓画像。analyze 门禁 `repos_notes_exist` 会兜底点名漏掉的仓库。
 1. `status` 看当前阶段、就绪任务、阻塞、stale 任务、契约漂移和开放窗口。
 2. 有阻塞或 stale 任务 -> **先解阻塞**。契约变化时不要让旧实现继续推进。
 3. 该阶段有就绪任务 -> 派发（见「派发」）。

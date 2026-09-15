@@ -70,7 +70,7 @@ python3 .claude/hooks/wb.py init --name <需求名>
 
 上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
 
-仓库分工两个来源分开：**谁写**从 `role_scopes` 现算（`status` 给分工图，认不出的标 `⚠未认领`）；**干什么**写进 `repos/index.md`，**怎么跑、怎么测、坑在哪**写进 `repos/notes/<仓库>.md`（`analyst` 维护）—— 两者都进 git，`status` 与 `role scopes` 每次点名缺失（缺行、死链、缺节、占位符），校验只报不改。格式与取舍见 [CLAUDE.md](CLAUDE.md#仓库分工谁写干什么)。
+仓库分工两个来源分开：**谁写**从 `role_scopes` 现算（`status` 给分工图，认不出的标 `⚠未认领`；认领单元是**项目**）；**干什么**写进 `repos/index.md`，**怎么跑、怎么测、坑在哪**写进 `repos/<项目>/<仓库>/` 的画像三件套（`overview` / `setup` / `test`，`analyst` 维护）—— 索引与画像都进 git，`status` 与 `role scopes` 每次点名缺失（缺行、死链、画像未建或空文件），校验只报不改。格式与取舍见 [CLAUDE.md](CLAUDE.md#仓库分工谁写干什么)。
 
 之后正常用全部命令 —— `wb.py` 向上查找最近的 `.workbench/`，hook 用绝对路径注册，都不受 cwd 影响；在各仓库子目录里跑命令，状态仍归属外层。
 
@@ -146,7 +146,7 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 `PreToolUse` hook 拦以下几类，退出码 2 阻止调用并把原因回灌给模型（完整清单与边界见 AGENTS.md「权限守卫」）：
 
 1. 写冻结文件 —— `state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约（含 `design.md` 与各阶段过门禁后的产物）
-2. 角色越权写**工作流核心路径** —— 受守前缀（`.workbench/`、`knowledge/`、`references/`、`.claude/` 等，多仓库布局下再加 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`）。**仓库代码、`/tmp`、项目根外不判角色**（2026-09-12 定调）
+2. 角色越权写**工作流核心路径** —— 受守前缀（`.workbench/`、`knowledge/`、`references/`、`.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/` 等，多仓库布局下再加 `scripts/` `repos.json` `repos/index.md` `.vscode/`）。**仓库代码、`/tmp`、项目根外不判角色**（2026-09-12 定调）
 3. 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`init --force`、`init --root`、`role set|clear`、`role scopes --reset`、`task skip`、`contract unlock|bump|consumers`、`config set`、`flow new/switch/remove` 等）
 4. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）+ 提示级警告（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish`）
 5. 敏感路径读取 —— `.env`、`*.pem`、`*.key`、`id_rsa*`、`secrets/**`，Read 工具与 shell 的 `cat` 两类调用都拦

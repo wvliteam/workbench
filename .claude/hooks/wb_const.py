@@ -126,6 +126,18 @@ PHASE_ARTIFACT_CONTRACTS = {
     "retro": ("reviewer", []),
 }
 
+# 单仓画像三件套：挂在工作区里（`repos/<项目>/<仓库>/`），与源码入口
+# （`repos/.source/<项目>/<仓库>`，指向根外 checkout 的软链）**分开** —— 画像是进 git
+# 的工作区材料，跟着工作区走；源码跟着 checkout 走。一件一个文件，对应上游单文件笔记
+# 的「职责 / 启动 / 测试」三个章节（ROMA repo-management 的 overview / setup / test）。
+#
+# 注意：画像目录**不在** `GUARDED_PREFIXES` 里。收窄它要写 `repos/`，而 `repos/<名>/`
+# 在本仓同时是「嵌套项目根」的形态（自带 `.workbench/` 的内层工作台），整体收窄会让内层
+# 仓库的正常源码被外层会话误拦（selfcheck 的「嵌套检查误拦了内层仓库的正常文件」钉这条）。
+# 画像的可写面改由 `analyst` 的逐文件范围收窄，见 DEFAULT_ROLE_SCOPES。
+REPO_PROFILE_DIR = "repos"
+REPO_PROFILE_FILES = ("overview.md", "setup.md", "test.md")
+
 # 角色默认可写范围（相对项目根的 fnmatch 模式）。
 # 产物目录带 flow 维度：`.workbench/artifacts/<flow>/<phase>/`，模式中间一层用 `*`
 # 通配（照 ROMA 的 `[^/]+` 写法），规则对所有需求一视同仁，不为每个需求改配置。
@@ -150,11 +162,17 @@ PHASE_ARTIFACT_CONTRACTS = {
 # 原来的列表默认了「源码在 src/ 或 web/ 下且用 TypeScript」。
 DEFAULT_ROLE_SCOPES = {
     "pm": [".workbench/artifacts/*/clarify/**"],
-    # 单仓稳定事实（`repos/notes/<仓库>.md`）归 analyst：它是唯一在 analyze 阶段把仓库
-    # 摸透的角色，摸到的跨需求事实（怎么跑、怎么测、坑在哪）顺手落这里，别跟着 flow 归档。
-    "analyst": [".workbench/artifacts/*/analyze/**", "repos/notes/**"],
+    # 单仓画像三件套（`repos/<项目>/<仓库>/{overview,setup,test}.md`）归 analyst：它是
+    # 唯一在 analyze 阶段把仓库摸透的角色，摸到的跨需求事实（怎么跑、怎么测、坑在哪）
+    # 顺手落这里，别跟着 flow 的产物一起归档。
+    #
+    # 逐个文件列而不是写 `repos/*/*/**`：`fnmatch` 的 `*` 跨 `/`，后者会把
+    # `repos/.source/<项目>/<仓库>/` 下的**源码**一并放行 —— 那是根外 checkout 的软链，
+    # 不该是 analyst 的写入面。
+    "analyst": ([".workbench/artifacts/*/analyze/**"]
+                + [f"repos/*/*/{f}" for f in REPO_PROFILE_FILES]),
     "architect": [
-        ".workbench/artifacts/*/design/**", ".workbench/contracts/**", "docs/**",
+        ".workbench/artifacts/*/design/**", ".workbench/contracts/**",
     ],
     "frontend-developer": [
         ".workbench/artifacts/*/develop/tasks/**",
@@ -173,18 +191,33 @@ DEFAULT_ROLE_SCOPES = {
         "tests/**", "test/**", "e2e/**", "spec/**",
         "*.config.ts", "*.config.js", "*.config.mjs", "pytest.ini", "tox.ini",
     ],
-    "reviewer": [".workbench/artifacts/*/retro/**", "docs/**", "*.md"],
+    "reviewer": [".workbench/artifacts/*/retro/**"],
     # 知识库写权限专属（ROMA 对比第八节的沉淀出口）。knowledge/ 在 GUARDED_PREFIXES
-    # 里，别的角色（含持有 *.md 的 reviewer 与开发）写不进 —— 否则沉淀会退化成
-    # 「谁顺手谁写」，查找的人不知道哪条可信。
+    # 里，别的角色写不进 —— 否则沉淀会退化成「谁顺手谁写」，查找的人不知道哪条可信。
+    # 上游这里给 reviewer 的裸 `*.md` 同样移除：`fnmatch` 的 `*` 跨 `/`，留着它等于把
+    # 知识出口的收窄整个抵消掉。
     "knowledger": ["knowledge/**"],
 }
 
 # 跨仓库布局下按目录名认领仓库。只用于生成默认范围，认领不到的仓库谁都写不了 ——
 # init 与 `role scopes` 会点名让你手写前缀，见 unclaimed_repos()。
+#
+# 本仓改为**项目实名**（workbench-adaptation.md §2.2）。上游这里是通用词
+# （`frontend` / `web` / `client` / `ui` / `www` …）并做子串匹配，在本仓会重复认领：
+# 实测 `client` 命中 `mapclient`，让 PB 契约仓同时落进 frontend-developer 与
+# backend-developer 的范围，那个仓库上的角色隔离直接失效。同时上游按 `repos/` 的
+# **仓库**目录认领，而本仓 `repos/.source/<项目>/<仓库>` 多一层项目目录 —— 前后端
+# 边界正好落在项目一级（`bddev` 是后端、`map-hotel-fe` 是前端），所以认领单元取项目，
+# 新增仓库落进既有项目时不用改配置。
+#
+# **只用项目实名，不留通用词**：不在这里的项目不会被任何开发角色认领，
+# `unclaimed_repos()` 会在 init 与 `role scopes` 时硬拦点名，要求手写前缀 ——
+# 这比静默双认领安全。
 REPO_HINTS = {
-    "frontend-developer": ("frontend", "web", "client", "ui", "www"),
-    "backend-developer": ("backend", "server", "api", "service", "svc"),
+    "frontend-developer": ("map-hotel-fe",),
+    "backend-developer": ("bddev", "map-aiad", "map-cjh-hotel",
+                          "map-living-services", "mapclient", "mapsearch",
+                          "mapx", "skills"),
 }
 
 # 产物流水账。post-tool 只往这里追加，由 task done 归并进任务的 artifacts ——
@@ -203,24 +236,38 @@ ARTIFACT_LOG = "artifacts.jsonl"
 # `.claude/hooks/wb.py`、frontend-developer 能写 `.claude/settings.json`，两者都不在
 # 任何哈希基线里，改完 `contract verify` 也发现不了。防线保护 state，却不保护防线自己。
 #
-# `knowledge/` 不是守卫本体，是沉淀知识库（ROMA 对比第八节的沉淀出口）：同样的
-# 前缀收窄解决同一类问题 —— reviewer 与两个开发都持有 `*.md`，裸扩展名跨 `/`，
-# 不收窄的话谁都能写知识条目，「knowledger 角色对沉淀质量负责」就落空了。它的
-# 拒绝话术与守卫本体不同，见 _check_write_target。
+# 知识出口（沉淀知识库）在本表里，目录名 `knowledge/`：同样的前缀收窄解决同一类
+# 问题 —— 两个开发都持有 `*.md`，裸扩展名跨 `/`，不收窄的话谁都能写知识条目，
+# 「knowledger 角色对沉淀质量负责」就落空了。它的拒绝话术与守卫本体不同，
+# 见 _check_write_target。
+#
+# 本仓另补 6 项（workbench-adaptation.md §2.3）。上游只做 Claude + Codex 两端，
+# 且有若干实体目录挂在工作区根、经软链投到各端，上游的前缀表都没覆盖：
+# `.comate/` 第三端的 hook 注册表；`agents/` `skills/` 角色定义与 Skill 实体
+# （三端 `.{claude,codex,comate}/agents` 只是软链，真正的文件在工作区根）；
+# `plugins/` `mcps/` 业务插件与 MCP 原生源，应由主 Agent 维护。不收窄的后果与
+# 上面 `.claude/` 那条同型：开发的裸 `*.md` / `*.json` / `*.py` 能改**自己的角色
+# 定义**和插件注册，改完 `contract verify` 也发现不了。
+# `repos/` 本来也在本仓这层（上游假定 `repos/<名>/` 是代码 clone，所以范围里天然带
+# `repos/` 前缀），但**没有采用**：`repos/<名>/` 在本仓同时是「嵌套项目根」的形态
+# （`repos/foo/` 自己带 `.workbench/`，是个内层工作台），把 `repos/` 整体收窄会让
+# 内层仓库的正常源码（`repos/foo/server/api.py`）被外层会话误拦 —— selfcheck 的
+# 「嵌套检查误拦了内层仓库的正常文件」正是钉这一条。索引与笔记两处的保护改由
+# `WORKSPACE_GUARDED_PREFIXES` 提供（`repos/index.md`、`repos/notes/`），已覆盖
+# 「裸 `*.md` 改坏仓库路由」这一实际风险；仓库画像 `repos/<项目>/<仓库>/overview.md`
+# 暂不在收窄范围内，属于已知取舍。
+#
 # `references/` 是公共操作规范层（ROMA references 借鉴，见 docs/references-extraction.md）：
 # 性质等同角色定义 —— 规范由主线程维护、角色只读，reviewer 的裸 `*.md` 不收窄就能写它。
 # `scripts/` 是工作区级公共脚本（repos_apply.py / repos_tui.py 等）与 `repos.json` 清单：
 # 不收窄的话 backend-developer 的裸 `*.py` 能改 init 脚本、frontend-developer 的裸
-# `*.json` 能改清单 —— 都是初始化流程被静默改坏的形态。守卫本体在 `.claude/`，这层
-# 只是「公共脚本与清单同样由主线程维护、角色只读」的收窄。`.vscode/` 同理：机器本地
-# 的 IDE 配置由 repos_apply.py 生成，裸 `*.json` 一样跨得进去。`repos/index.md` 与
-# `repos/notes/` 是仓库分工与单仓稳定事实（进 git 的工作区材料），性质与清单相同。
-# 这几条只在 workbench 布局（存在 repos/）下生效：README「适配到自己的项目」的单仓库
+# 跨仓库布局下不参与仓库前缀改写的路径（`repo_layout_scopes` 用）。
+# 这几条只在 workbench 布局（存在 `repos/`）下生效：README「适配到自己的项目」的单仓库
 # 场景里 scripts/ 是项目自己的代码目录、.vscode/ 是项目自己的配置，不归工作台管。
-GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/",
+GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/", ".comate/",
+                    "agents/", "skills/", "plugins/", "mcps/",
                     "knowledge/", "references/")
-WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", "repos/index.md",
-                              "repos/notes/", ".vscode/")
+WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", "repos/index.md", ".vscode/")
 
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——

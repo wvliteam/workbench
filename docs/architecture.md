@@ -140,13 +140,17 @@ wb.py role scopes --reset    # 刷成当前默认值，顺带重写冻结清单�
 
 ```
 workbench/
-├── .claude/            # 工作台本体，唯一一份
-├── .workbench/         # 唯一的状态、契约、流水线（init 就 init 在这里）
-├── repos/foo/          # 纯代码目录，不 init；在里面跑命令状态归属外层
-├── repos/index.md      # 仓库索引（进 git）：每仓一行职责与入口文档，status 校验
-├── repos/notes/<仓库>.md  # 单仓稳定事实（进 git）：职责 / 启动 / 测试，analyst 维护
-└── scripts/            # 工作区级公共脚本（repos_apply.py / repos_tui.py）
+├── .claude/               # 工作台本体，唯一一份
+├── .workbench/            # 唯一的状态、契约、流水线（init 就 init 在这里）
+├── repos/index.md         # 仓库索引（进 git）：每仓一行源码入口 / 职责 / 入口文档，status 校验
+├── repos/.source/<项目>/<仓库>/   # 纯代码挂载点（软链或 clone，整棵不进 git）：不 init，在里面跑命令状态归属外层
+├── repos/<项目>/<仓库>/    # 画像三件套（进 git）：overview / setup / test，analyst 维护
+└── scripts/               # 工作区级公共脚本（repos_apply.py / repos_tui.py）
 ```
+
+源码与画像**分成两棵树**：`repos/.source/<项目>/<仓库>/` 是代码（跟着 checkout 走），
+`repos/<项目>/<仓库>/` 是画像（跟着工作区走 git）。分成两棵而不是塞进同一个目录，是因为
+两者的生命周期不同 —— 换 checkout、换分支不该动画像，而画像的改动要进版本。
 
 三件事让它成立，都不需要额外代码：
 

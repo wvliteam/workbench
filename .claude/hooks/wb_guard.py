@@ -20,8 +20,8 @@ from wb_const import (
     WRITE_TOOL,
 )
 from wb_bash import (
-    WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command, resolve,
-    strip_heredocs,
+    WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command,
+    guarded_prefixes, keep_source_mount, resolve, strip_heredocs,
 )
 from wb_core import (
     all_flows, attribution_flow, close_unlock, contract_drift, die, find_contract,
@@ -41,10 +41,14 @@ def hook_deny(reason: str) -> "None":
     sys.exit(2)
 
 
-def resolve_target(cwd: Path, raw: str) -> Path:
+def resolve_target(cwd: Path, raw: str, root: Path | None = None) -> Path:
     p = Path(raw)
     if not p.is_absolute():
         p = cwd / p
+    if root is not None:
+        m = keep_source_mount(root, p)
+        if m is not None:
+            return m
     try:
         return p.resolve()
     except OSError:
@@ -83,7 +87,7 @@ def sensitive_read_target(cwd: Path, root: Path, raw: str) -> str | None:
     if not token:
         return None
     try:
-        rel = os.path.relpath(resolve_target(cwd, token), root).replace(os.sep, "/")
+        rel = os.path.relpath(resolve_target(cwd, token, root), root).replace(os.sep, "/")
     except ValueError:
         return None
     parts = Path(rel).parts
@@ -249,7 +253,12 @@ BUILTIN_AGENT_TYPES = ("Explore", "general-purpose", "Plan")
 UNKNOWN_ROLE = "__unknown__"
 
 # 装守卫本体的前缀，拒绝话术要单独说明（交回主线程，别给角色开范围）。
-GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/")
+# 本仓补 `.comate/` `agents/` `skills/`（workbench-adaptation.md §2.3）：第三端的
+# hook 注册表，以及工作区根的角色定义与 Skill 实体 —— 三端 `.{claude,codex,comate}/agents`
+# 与 `.{claude,codex,comate}/skills` 都只是软链，真正的文件在两个根目录下。性质与
+# `.claude/` 同为「守卫本体」，走同一条拒绝话术。
+GUARD_BODY_PREFIXES = (".claude/", ".codex/", ".agents/", ".comate/",
+                       "agents/", "skills/")
 
 # 契约管理员。接口契约由 architect 定义，但 `--owner` 填的是实现方
 # （architect.md 里就是 `--owner backend-developer`），所以 owner 校验必须放它一条路，
@@ -319,8 +328,7 @@ def _guarded_prefix(root: Path, rel: str) -> str:
     workspace 层条目（`scripts/` `repos.json` `.vscode/`）只在 workbench 布局（存在
     `repos/`）下生效 —— 单仓库适配场景里它们是项目自己的目录，见 wb_const 的说明。
     """
-    prefixes = GUARDED_PREFIXES + (
-        WORKSPACE_GUARDED_PREFIXES if (root / "repos").is_dir() else ())
+    prefixes = guarded_prefixes(root)
     for g in prefixes:
         if g.endswith("/"):
             if rel.startswith(g):
@@ -381,7 +389,7 @@ def _guarded_script_exec(cmd: str) -> bool:
 
 def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> None:
     """检查单个写入目标：活动契约 → 争议 → 冻结 → 工作流核心路径的角色范围。"""
-    target = resolve_target(cwd, raw_path)
+    target = resolve_target(cwd, raw_path, root)
     rootr = root.resolve()
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
 
@@ -470,6 +478,9 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
         elif guarded in GUARD_BODY_PREFIXES:
             extra = (f"（{guarded} 装的是守卫本体：权限引擎、hook 注册表与角色定义。"
                      "要改它交回主线程，别给角色开范围。）")
+        elif guarded in ("plugins/", "mcps/"):
+            extra = (f"（{guarded} 装的是本仓业务插件与 MCP 的原生源，由主 Agent 维护。"
+                     "要改它交回主线程。）")
         elif guarded == ".workbench/":
             extra = ("（产物目录按阶段隔离：只能写自己阶段的产物，上游文档要改走 "
                      "contract unlock / 派对应角色。）")
@@ -841,7 +852,7 @@ def hook_post_tool(data: dict) -> None:
             for raw in _patch_targets(cmd):
                 try:
                     rel = os.path.relpath(
-                        resolve_target(cwd, raw), rootr).replace(os.sep, "/")
+                        resolve_target(cwd, raw, rootr), rootr).replace(os.sep, "/")
                     targets.add(rel)
                 except ValueError:
                     pass
@@ -859,7 +870,7 @@ def hook_post_tool(data: dict) -> None:
         for raw in _patch_targets(cmd_text):
             try:
                 rel = os.path.relpath(
-                    resolve_target(cwd, raw), rootr).replace(os.sep, "/")
+                    resolve_target(cwd, raw, rootr), rootr).replace(os.sep, "/")
                 append_entry(rel)
             except ValueError:
                 pass
@@ -869,7 +880,7 @@ def hook_post_tool(data: dict) -> None:
     if not raw:
         return
     try:
-        rel = os.path.relpath(resolve_target(cwd, str(raw)), rootr).replace(os.sep, "/")
+        rel = os.path.relpath(resolve_target(cwd, str(raw), rootr), rootr).replace(os.sep, "/")
     except ValueError:
         return
     append_entry(rel)
@@ -881,14 +892,35 @@ def hook_session_start(data: dict) -> None:
         print("工作台未初始化。要走全链路流程，先运行 /wb-flow 或 "
               "`python3 .claude/hooks/wb.py init --name <项目名>`。")
         return
+    cur_flow = pointer_flow(root)
+    lines = ["## 工作台状态", ""]
+
+    # 全部需求线清单：先让 agent 看到有哪些 flow，避免把「指针所在 flow」
+    # 误当成「本轮任务就该落的 flow」而跳过归属判断。
+    lines.append("### 需求线（flow）清单")
+    for f in all_flows(root):
+        try:
+            fst = json.loads(state_path(root, f).read_text(encoding="utf-8"))
+            ph = fst.get("phase", "?")
+            fdone = sum(1 for t in fst.get("tasks", []) if t.get("status") == "done")
+            desc = f"{ph}（{PHASE_CN.get(ph, ph)}）任务 {fdone}/{len(fst.get('tasks', []))}"
+        except (OSError, json.JSONDecodeError, KeyError):
+            desc = "（未初始化）"
+        lines.append(f"- {f}：{desc}" + ("  ← 指针当前" if f == cur_flow else ""))
+    lines.append(
+        "开工前先做 flow 归属：按用户目标 / 影响仓库 / 验收标准判断本轮任务属于哪条"
+        "需求线——完全匹配才 `wb.py flow switch <名>` 复用，否则 `wb.py flow new <语义名>` "
+        "新建，低风险单次改动可 Conversation closure 并说明理由。指针只是历史位置，"
+        "别因为上面某条 flow 显示了进度就默认在它里面继续；拿不准先 `/wb-flow`。")
+    lines.append("")
+
+    # 指针当前 flow 明细
     st = load_state(root)
     cur = st["phase"]
     done = sum(1 for t in st["tasks"] if t["status"] == "done")
-    lines = [
-        "## 工作台状态",
-        f"项目 {st['project']}｜阶段 {cur}（{PHASE_CN.get(cur, cur)}）｜任务 {done}/{len(st['tasks'])} 完成",
-        f"根 {root}",
-    ]
+    lines.append(f"### 指针 flow：{cur_flow}｜项目 {st['project']}｜阶段 {cur}（{PHASE_CN.get(cur, cur)}）｜"
+                 f"任务 {done}/{len(st['tasks'])} 完成")
+    lines.append(f"根 {root}")
     doing = [t["id"] for t in st["tasks"] if t["status"] == "doing"]
     blocked = [f"{t['id']}({t['notes'][:30]})" for t in st["tasks"] if t["status"] == "blocked"]
     stale = [t["id"] for t in st["tasks"] if t["status"] == "stale"]
@@ -905,7 +937,7 @@ def hook_session_start(data: dict) -> None:
     if rt:
         lines.append("就绪：" + ", ".join(f"{t['id']}/{t['role']}" for t in rt[: st["max_parallel"]]))
     elif not doing and not blocked:
-        lines.append(f"本阶段无待办，可跑门禁：`wb.py gate check`")
+        lines.append("本阶段无待办，可跑门禁：`wb.py gate check`")
     lines.append("推进流程用 /wb-flow，自动排空任务用 /wb-loop。")
     print("\n".join(lines))
 

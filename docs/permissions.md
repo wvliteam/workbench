@@ -73,7 +73,7 @@ def unlocked_paths(root):
 
 ### 第四层：角色写入范围
 
-**这一层只覆盖工作流核心路径** —— 受守前缀下的东西：`.workbench/`（状态、契约、阶段产物）、`knowledge/`、`references/`、`.claude/` `.codex/` `.agents/`（守卫本体），以及多仓库布局下的工作区材料 `scripts/` `repos.json` `repos/index.md` `repos/notes/` `.vscode/`。这些文件坏了，工作流本身就跑不下去：改状态能伪造门禁、改契约能让并行开发失准、改守卫本体能让防线整体失效。
+**这一层只覆盖工作流核心路径** —— 受守前缀下的东西：`.workbench/`（状态、契约、阶段产物）、`knowledge/`、`references/`、`.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/`（守卫本体、角色定义与 Skill 实体、业务插件与 MCP 源），以及多仓库布局下的工作区材料 `scripts/` `repos.json` `repos/index.md` `.vscode/`。这些文件坏了，工作流本身就跑不下去：改状态能伪造门禁、改契约能让并行开发失准、改守卫本体能让防线整体失效。
 
 核心路径之外**一律不判角色**：仓库代码（`server/` `web/` `src/` `migrations/` …）、`/tmp`、项目根之外。理由有两条，都是实测出来的：
 
@@ -95,7 +95,9 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 **角色取自本次调用的载荷，不是那个会被并行 subagent 互相覆盖的单文件。** subagent 的载荷带 `agent_type`（值等于 agent 定义 frontmatter 的 `name`，与 `ROLES` 同名），主线程不带。所以并行 develop 下前后端各自判定，与谁后启动无关（[architecture.md](architecture.md#角色锁曾经也是单文件已解决记录一次纠错)）。
 
-**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `knowledge/` `references/`）。多仓库工作区布局（存在 `repos/`）下再叠加工作区级前缀：`scripts/`、`repos.json`、`repos/index.md`、`repos/notes/`、`.vscode/` —— 公共脚本、仓库清单、仓库分工与单仓事实、本机 IDE 配置由主线程与对应角色维护（`repos/notes/` 归 `analyst`），其余角色只读。范围里没有以该前缀打头的模式，就是谁都不能写。
+**`GUARDED_PREFIXES` 下的路径只认显式以该前缀开头的模式**（`.workbench/` `.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/` `knowledge/` `references/`）。多仓库工作区布局（存在 `repos/`）下再叠加工作区级前缀：`scripts/`、`repos.json`、`repos/index.md`、`.vscode/` —— 公共脚本、仓库清单、仓库分工与本机 IDE 配置由主线程与对应角色维护，其余角色只读。范围里没有以该前缀打头的模式，就是谁都不能写。
+
+**`repos/` 整体不在受守前缀里**，这是个刻意的取舍：`repos/<名>/` 同时是「嵌套项目根」的形态（自带 `.workbench/` 的内层工作台），把 `repos/` 整体收窄会让内层仓库的正常源码（`repos/foo/server/api.py`）被外层会话误拦。索引与画像的可写面改由角色范围收窄：`repos/index.md` 进工作区级前缀，画像三件套写进 `analyst` 的逐文件范围（`repos/*/*/{overview,setup,test}.md`）—— 写成 `repos/*/*/**` 会把 `repos/.source/` 下的源码一并放行。代价是画像目录本身不设角色隔离，属于已知取舍。
 
 没有这一条时裸扩展名模式会跨进状态目录 —— `fnmatch` 的 `*` 跨 `/`（见 [architecture.md](architecture.md#路径匹配偏宽松)），所以 `*.md` 匹配 `.workbench/artifacts/main/clarify/requirements.md`，`*.json` 匹配 `.workbench/contracts/events.json`。两者都绕开本层的设计意图：产物目录按阶段隔离、契约只有 architect 能写。
 
