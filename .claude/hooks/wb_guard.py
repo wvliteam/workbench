@@ -20,14 +20,14 @@ from wb_const import (
     SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES, WRITE_TOOL,
 )
 from wb_bash import (
-    WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command,
+    SOURCE_MOUNT, WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command,
     guarded_prefixes, keep_source_mount, resolve, strip_heredocs,
 )
 from wb_core import (
-    all_flows, attribution_flow, close_unlock, contract_drift, die, find_contract,
-    find_root, load_state, load_state_of, log, now, pointer_flow, read_disputes,
-    read_frozen, read_unlocks, ready_tasks, save_state, set_flow_override, state_path,
-    task_contract_errors, wb_dir,
+    _FLOW_NAME, all_flows, attribution_flow, close_unlock, contract_drift, die,
+    find_contract, find_root, load_state, load_state_of, log, now, pointer_flow,
+    read_disputes, read_frozen, read_unlocks, ready_tasks, save_state,
+    set_flow_override, state_path, task_contract_errors, wb_dir,
 )
 
 
@@ -39,6 +39,69 @@ def hook_deny(reason: str) -> "None":
     """PreToolUse：退出码 2 = 阻止调用，stderr 回灌给模型。"""
     print(f"[工作台 Workflow Guard] 拒绝：{reason}", file=sys.stderr)
     sys.exit(2)
+
+
+# flow 归属首写闸门 -----------------------------------------------------------
+# 主线程（编排者）在没做任何 flow 归属决定的情况下直接改产品源码，是「不按 flow
+# 规划执行 / 误复用指针停留的旧 flow」的根源。SessionStart 只是文字规劝，拦不住。
+# 这里把归属做成硬前置：主线程首次写 repos/.source/** 前，本会话必须已通过
+# `wb.py flow switch/new`、`flow attribute --adhoc`（记账豁免）或钉死 WB_FLOW
+# 明确表态。判据只对主线程生效（subagent 归任务绑定管），且以会话级 session_id
+# 隔离——与跨终端并行的 WB_FLOW 机制正交，互不影响。
+_ATTR_FLOW_CMD = re.compile(r"\bwb\.py\s+flow\s+(?:switch|new|attribute)\b")
+
+
+def _session_dir(root: Path) -> Path:
+    return wb_dir(root) / "sessions"
+
+
+def mark_session_attributed(root: Path, session_id: str) -> None:
+    """记下「本会话已做过一次 flow 归属决定」。由 hook 写：只有 hook 载荷里才有
+    稳定的 session_id，CLI（Bash 里跑）拿不到，所以标记统一由 hook 落盘。"""
+    if not session_id:
+        return
+    try:
+        d = _session_dir(root)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / session_id).write_text(now(), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _session_attributed(root: Path, data: dict) -> bool:
+    # WB_FLOW 显式钉死 = 已归属（跨终端并行走这条，与本闸门正交）。
+    v = os.environ.get("WB_FLOW")
+    if v and _FLOW_NAME.fullmatch(v):
+        return True
+    sid = data.get("session_id")
+    return bool(sid) and (_session_dir(root) / sid).is_file()
+
+
+def _attribution_gate(root: Path, rel: str, data: dict) -> None:
+    """主线程首次写产品源码前，强制本会话已做 flow 归属。"""
+    # 只管主线程：subagent（带 agent_id/agent_type）由任务绑定与契约约束。
+    if data.get("agent_id") or data.get("agent_type"):
+        return
+    # 只管产品源码写入：repos/.source/**（keep_source_mount 已把真实路径反查回挂载形态）。
+    if not rel.startswith(SOURCE_MOUNT):
+        return
+    # 工作台没初始化就没有 flow 概念，不拦。
+    if not state_path(root).is_file():
+        return
+    # session_id 缺失时无法可靠追踪归属——退回放行，绝不把无 escape 的死锁塞给用户。
+    if not data.get("session_id"):
+        return
+    if _session_attributed(root, data):
+        return
+    hook_deny(
+        f"本会话还没做 flow 归属，先别写产品源码 {rel}。按需求目标 / 影响仓库 / "
+        f"验收标准判断本轮属于哪条需求线：\n"
+        f"  · 盘点：wb.py flow list\n"
+        f"  · 复用已有：wb.py flow switch <名>\n"
+        f"  · 新需求：wb.py flow new <语义名>\n"
+        f"  · 低风险单次改动（记账豁免）：wb.py flow attribute --adhoc --reason '<为什么不建 flow>'\n"
+        f"（并行会话用启动级 WB_FLOW=<名> 亦可。归属只需本会话做一次。）"
+    )
 
 
 def resolve_target(cwd: Path, raw: str, root: Path | None = None) -> Path:
@@ -393,6 +456,9 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
     rootr = root.resolve()
     rel = os.path.relpath(target, rootr).replace(os.sep, "/")
 
+    # flow 归属首写闸门：主线程未归属就写产品源码时拦下（见 _attribution_gate）。
+    _attribution_gate(rootr, rel, data)
+
     # 活动任务的旧契约先阻止产品代码继续写入；执行记录仍可写。
     active_errors = active_task_contract_errors(rootr, rel)
     if active_errors:
@@ -717,6 +783,11 @@ def hook_pre_tool(data: dict) -> None:
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):
         rootr = root.resolve()
+
+        # 本会话跑了 flow 归属命令（switch/new/attribute）→ 记下会话已表态，
+        # 解锁后续产品源码写入。hook 手里才有稳定 session_id，标记只能这里落。
+        if _ATTR_FLOW_CMD.search(cmd):
+            mark_session_attributed(root, data.get("session_id", ""))
 
         # --- 灾难命令与敏感读取：扫剥壳后的命令 ---
         # heredoc 正文不是命令的一部分（`cat <<EOF ... EOF` 只是回显），正文里的

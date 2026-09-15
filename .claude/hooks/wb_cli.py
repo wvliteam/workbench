@@ -1052,6 +1052,20 @@ def cmd_flow(args) -> None:
             print(f"注意：本会话 WB_FLOW={ov} 生效中，状态命令仍作用于 "
                   f"{ov}；要先解除再操作。")
         return
+    if args.action == "attribute":
+        if not args.adhoc:
+            die("flow attribute 目前只支持 --adhoc（低风险单次改动的记账豁免）；"
+                "要归属到具体需求线用 flow switch / flow new。")
+        if not args.reason:
+            die("flow attribute --adhoc 需要 --reason '<为什么不建 flow>'")
+        # 解锁本会话产品源码写入的会话标记由 hook 见到本命令时写（那里才有 session_id）。
+        # 这里把豁免理由记进当前 flow 的流水账——让「低风险豁免」成为可审计的显式动作。
+        st = load_state(root, lock=True)
+        log(st, "flow_attribute_adhoc", flow=pointer_flow(root), reason=args.reason)
+        save_state(root, st)
+        print(f"已登记本会话为 ad-hoc 归属（不建 flow）：{args.reason}")
+        print("低风险单次改动可继续；跨仓 / 改线上行为 / 存疑的改动请改用 flow switch / new。")
+        return
     if args.action == "remove":
         flow = args.name
         if not flow:
@@ -1178,10 +1192,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("flow", help="需求线管理：list / new / switch / remove")
-    p.add_argument("action", choices=["list", "new", "switch", "remove"])
+    p = sub.add_parser("flow", help="需求线管理：list / new / switch / remove / attribute")
+    p.add_argument("action", choices=["list", "new", "switch", "remove", "attribute"])
     p.add_argument("name", nargs="?")
     p.add_argument("--force", action="store_true", help="remove 的确认开关")
+    p.add_argument("--adhoc", action="store_true",
+                   help="attribute：声明本轮为低风险单次改动、不建 flow（记账豁免）")
+    p.add_argument("--reason", help="attribute --adhoc 必填：为什么不建 flow")
     p.set_defaults(func=cmd_flow)
 
     p = sub.add_parser("status", help="总览：阶段 / 任务 / 契约 / 就绪队列")

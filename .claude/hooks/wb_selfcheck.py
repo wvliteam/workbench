@@ -48,10 +48,14 @@ def cmd_selfcheck(args) -> None:
     """在临时目录跑一遍全链路，断言状态机 / 门禁 / 契约 / Workflow Guard 都还活着。"""
     # wb.py 只是入口，实现在同目录 wb_* 模块里：漏拷任何一个，对端 hook 都会在
     # import 时崩溃退出（harness 按非阻塞错误放行，等于守卫静默失效）。
-    # 自检必须与调用方 shell 残留的 WB_FLOW 无关。quiet() 在进程内反复走 main()，
+    # 自检必须与调用方 shell 残留的环境无关。quiet() 在进程内反复走 main()，
     # 只清全局不够 —— 每次都会从环境重读；摘掉环境变量才断得干净（selfcheck 是
     # CLI 的最后一条命令，进程随后退出，不恢复）。
-    os.environ.pop("WB_FLOW", None)
+    # WB_ROOT / CLAUDE_PROJECT_DIR 比 WB_FLOW 更要命：find_root 优先认这俩，一旦被设
+    # （在真实 Claude 会话里 CLAUDE_PROJECT_DIR 恒被注入），quiet() 的 find_root 会
+    # 定位到会话工作区而不是自检的 mkdtemp，整套 tmp 隔离失效、门禁断言假红。
+    for _var in ("WB_FLOW", "WB_ROOT", "CLAUDE_PROJECT_DIR"):
+        os.environ.pop(_var, None)
     set_flow_override(None)
     import io
     from contextlib import redirect_stdout, redirect_stderr
@@ -528,6 +532,20 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
             "repos/.source 外部真实路径不应被 Workflow Guard 拦截"
+        # flow 归属首写闸门：主线程未归属写产品源码要拦；session_id 缺失时退回放行
+        # （不制造无 escape 的死锁）；本会话跑过 flow 归属命令后同会话解锁。
+        _sid = "sess-selfcheck-attr"
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+            "未归属的主线程写产品源码应被首写闸门拦下"
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
+            "session_id 缺失时首写闸门应退回放行（无 escape 死锁不可接受）"
+        guard({"tool_name": "Bash", "cwd": cw, "session_id": _sid,
+               "tool_input": {"command": "python3 wb.py flow attribute --adhoc --reason x"}})
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
+            "本会话归属后主线程产品源码写入应放行"
         shutil.rmtree(source_root)
         source_link.unlink()
         assert guard({"tool_name": "Write", "cwd": cw,
