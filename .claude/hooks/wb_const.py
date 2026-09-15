@@ -269,6 +269,17 @@ GUARDED_PREFIXES = (".workbench/", ".claude/", ".codex/", ".agents/", ".comate/"
                     "knowledge/", "references/")
 WORKSPACE_GUARDED_PREFIXES = ("scripts/", "repos.json", "repos/index.md", ".vscode/")
 
+# 非主线程（有 agent_id 或 agent_type 的调用者）禁用的工具。主线程是编排者，只有它能用。
+# 这些工具把动作带出本会话的权限边界：排定的 prompt 以主线程身份执行、派生 worker、
+# 跨会话传话、对外发布与远端写。判定在「调它」这一步（hook 看得见），动作却发生在守卫
+# 看不见的地方（主线程身份 / 另一个会话 / 远端），拦不住第二次 —— 门只能设在调用处。
+# 角色 subagent 的工具清单里没有它们，但 general-purpose worker 有，而 worker 正是
+# 角色隔离降级模式下会被派活的身份。见 hook_pre_tool 的对应分支。
+NON_MAIN_THREAD_DENIED_TOOLS = (
+    "CronCreate", "ScheduleWakeup", "Workflow", "Agent", "Task",
+    "SendMessage", "Artifact", "DesignSync",
+)
+
 # 冻结文件：任何角色（含主线程、含 owner）都不能用工具直接写，只能经 wb.py 命令改。
 # `.workbench/frozen` 由 save_state 生成，是这份清单的落盘缓存 ——
 # hook 每次工具调用都要读它，读一个纯文本列表比解析整个 state.json 便宜一个量级。

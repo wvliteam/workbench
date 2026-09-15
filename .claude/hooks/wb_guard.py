@@ -16,8 +16,8 @@ from pathlib import Path
 
 from wb_const import (
     ARTIFACT_LOG, BASH_WRITE, DEFAULT_ROLE_SCOPES, DEVELOPER_ROLES, FROZEN_ALWAYS,
-    GUARDED_PREFIXES, PHASE_CN, READ_TOOL, ROLES, SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES,
-    WRITE_TOOL,
+    GUARDED_PREFIXES, NON_MAIN_THREAD_DENIED_TOOLS, PHASE_CN, READ_TOOL, ROLES,
+    SHELL_TOOL, WORKSPACE_GUARDED_PREFIXES, WRITE_TOOL,
 )
 from wb_bash import (
     WARN_BASH, _split_pipeline, _strip_wrappers, catastrophic_command,
@@ -660,11 +660,59 @@ def _is_task_start(cmd: str, task_id: str) -> bool:
     return False
 
 
+def load_allowed_skills(root: Path) -> list:
+    """审核过、允许 subagent 调用的 skill 名单（`*` = 全部放行）。
+
+    `config set` 在 privileged_wb_calls 里对角色一律拦，所以这个键只有主线程能写 ——
+    「哪些 skill 能用」是编排者的审核决定。缺键/空表 = 一个都不放行：subagent 拿到
+    Skill 工具但默认调不动，要用先审核。
+    """
+    sp = state_path(root)
+    if not sp.is_file():
+        return []
+    try:
+        v = json.loads(sp.read_text(encoding="utf-8")).get("allowed_skills")
+    except (OSError, json.JSONDecodeError):
+        return []
+    return v if isinstance(v, list) else []
+
+
 def hook_pre_tool(data: dict) -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input") or {}
     cwd = Path(data.get("cwd") or os.getcwd())
     root = find_root(cwd)
+
+    # --- 非主线程禁用工具 ---
+    # 这些工具把动作带出本会话的权限边界：排定的 prompt 以主线程身份执行、派生 worker、
+    # 跨会话传话、对外发布与远端写。判定在这里，动作却发生在守卫看不见的地方（主线程
+    # 身份 / 另一个会话 / 远端），拦不住第二次 —— 门只能设在「调它」这一步。角色 subagent
+    # 的工具清单里没有它们，但 general-purpose worker 有，而 worker 正是角色隔离降级模式
+    # 下会被派活的身份。主线程是编排者（载荷无 agent_id / agent_type），不受限。
+    if tool in NON_MAIN_THREAD_DENIED_TOOLS and (data.get("agent_id") or data.get("agent_type")):
+        hook_deny(
+            f"{tool} 会把动作带出本会话的权限边界（排定的 prompt 以主线程身份执行、"
+            f"派生 worker、跨会话传话、对外发布或远端写），subagent 不能调。"
+            f"要做什么报回编排者，由主线程执行。"
+        )
+
+    # --- Skill 审核 ---
+    # Skill 工具不属于 WRITE/SHELL/READ，本会落到末尾放行分支；这里先截。非主线程调用者
+    # （有 agent_id 或 agent_type）只能调审核过的 skill；主线程（两者都无）是审核者，不限。
+    # 门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来，那条 spawn 出的
+    # worker 顶 general-purpose 身份降级越权的路子也就无从触发。
+    if tool == "Skill":
+        if data.get("agent_id") or data.get("agent_type"):
+            name = str(ti.get("skill") or "").strip()
+            allowed = load_allowed_skills(root)
+            if "*" not in allowed and name not in allowed:
+                hook_deny(
+                    f"skill `{name or '(缺名)'}` 不在工作台审核白名单内，subagent 不能调。"
+                    f"已审核：{', '.join(allowed) or '（空）'}。批准由主线程跑 "
+                    f"`wb.py config set allowed_skills '[\"{name}\"]'`（整表覆盖，已有的"
+                    f"一起写上；config set 只有主线程能跑）。`[\"*\"]`=全放行，仅在已审阅"
+                    f"所有已装 skill 时用。")
+        return
 
     cmd = ti.get("command", "") or ""
     if SHELL_TOOL.search(tool):

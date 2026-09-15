@@ -1219,7 +1219,15 @@ def print_gate(phase: str, results: list[tuple[bool, str, str]]) -> bool:
     # 这里不重复解析，只是让路径本身单独成行，方便脚本 grep。
     print(f"门禁 · {phase}（{PHASE_CN.get(phase, phase)}）")
     for ok, label, detail in results:
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label} — {detail}")
+        # 未配置的命令门禁通过但不代表安全 —— 它是「全套里最容易静默失效的一环」。
+        # 渲染成 [WARN] 而非 [PASS]，让「没配 = 隐形绿灯」在 gate check 输出里显形；
+        # 不改 passed 逻辑（仍不阻断纯文档项目），只改视觉标记。已豁免（gate_waivers）
+        # 是明确决定，仍算 PASS。
+        if ok and detail.startswith("未配置，跳过"):
+            mark = "WARN"
+        else:
+            mark = "PASS" if ok else "FAIL"
+        print(f"  [{mark}] {label} — {detail}")
     passed = all(ok for ok, _, _ in results)
     print(f"结论：{'通过' if passed else '未通过'}")
     return passed

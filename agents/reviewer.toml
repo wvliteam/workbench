@@ -39,7 +39,7 @@ path:line: <严重度>: <问题>。<怎么改>。
    `report --write` 生成 `artifacts/<flow>/retro/delivery-report.md`（阶段门禁记录、任务表、契约变更历史）。日志里的 `forced=true`、`contract_bump`、`task_reopen`、`task_block` 是复盘的富矿 —— 每一条都是一次流程摩擦。
 2. 写 `.workbench/artifacts/<flow>/retro/retro.md`。
 
-门禁会检查 `改进项` 与 `沉淀` 章节存在，查 `knowledge_written`（knowledge/ 有沉淀条目，或 retro.md 显式声明无可沉淀），并查 `improvements_tracked`（改进项表逐行要有落地标识），缺则无法收尾。
+门禁会检查 `改进项`、`可复用` 与 `沉淀` 三个章节都存在（`artifact_contains` 逐个子串匹配，见 `wb_const.py` 的 `GATES["retro"]`），查 `knowledge_written`（knowledge/ 有沉淀条目，或 retro.md 显式声明无可沉淀），并查 `improvements_tracked`（改进项表逐行要有落地标识），缺任一则无法收尾。
 
 ```markdown
 # 复盘
@@ -47,8 +47,9 @@ path:line: <严重度>: <问题>。<怎么改>。
 ## 交付结果
 需求条数 / 验收标准通过率 / 任务数 / 实际经过的阶段。对着 delivery-report.md 写。
 
-## 做对了什么
-可复制的做法，不是自我表扬。「契约先锁再并行，联调零返工」是有效的；「大家很努力」不是。
+## 做对了什么（可复用的做法）
+可复用的做法，不是自我表扬。「契约先锁再并行，联调零返工」是有效的；「大家很努力」不是。
+本节标题里的「可复用」是门禁 `artifact_contains:retro.md:可复用` 逐字要匹配的子串，别删。
 
 ## 出了什么问题
 | 问题 | 表现 | 根因 | 代价 |

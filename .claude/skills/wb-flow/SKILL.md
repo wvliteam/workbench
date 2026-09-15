@@ -127,6 +127,12 @@ python3 .claude/hooks/wb.py task add --title "注册路由并联调" \
 后面的不冲突任务，并在 JSON 中返回 `deferred_write_scope_conflicts`；未声明范围的历史任务保持
 旧行为，不参与冲突判定。
 
+**派发对象必须是 ROLES 里的角色 agent**（`pm` / `analyst` / `architect` / `frontend-developer` /
+`backend-developer` / `qa` / `reviewer` / `knowledger`），不要用 `general-purpose` / `Explore` /
+`Plan` 这类非角色 agent 干开发或写产物：它们的 `agent_type` 不在 ROLES 里，守卫对核心路径会判
+`UNKNOWN_ROLE` 拒写、对非核心路径则完全不做角色隔离 —— 两种都会让「谁能写哪块」的约束静默失效。
+只读的探查（大范围搜索、读代码）才可以派非角色 agent。
+
 每个 subagent 的 prompt 里明确给出：任务 ID、标题、要读的契约文件路径、任务绑定的完整 `{name,version,revision,sha}` 快照、验收标准里相关的那几条、以及要求运行 `task check <ID>` 的时机。
 
 一批回来后，先确认产物和契约检查，再由编排者独立复核后 `task done`；不要只依据 subagent 的自报结果标记完成。

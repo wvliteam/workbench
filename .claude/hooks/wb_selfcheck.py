@@ -464,6 +464,30 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw,
                       "tool_input": {"file_path": "scripts/deploy.py"}}) == 0, \
             "主线程维护公共脚本被误拦"
+
+        # 工具层两层守卫（d606944 曾删除，防再次静默丢失）：
+        # ① 非主线程禁用工具 —— spawn / 排程 / 对外发布类，只有主线程能调。
+        assert guard({"tool_name": "Agent", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {}}) == 2, "角色调 Agent（spawn worker）未被拦"
+        assert guard({"tool_name": "Task", "cwd": cw, "agent_id": "a1",
+                      "tool_input": {}}) == 2, "有 agent_id 的调用者调 Task 未被拦"
+        assert guard({"tool_name": "Agent", "cwd": cw, "tool_input": {}}) == 0, \
+            "主线程（编排者）调 Agent 被误拦"
+        # ② Skill 审核白名单 —— 非主线程只能调审核过的 skill；主线程是审核者不限。
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"skill": "未审核skill"}}) == 2, \
+            "角色调白名单外 skill 未被拦"
+        assert guard({"tool_name": "Skill", "cwd": cw,
+                      "tool_input": {"skill": "未审核skill"}}) == 0, \
+            "主线程调 skill 被误拦"
+        quiet("config", "set", "allowed_skills", '["批准的skill"]')
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"skill": "批准的skill"}}) == 0, \
+            "角色调白名单内 skill 被误拦"
+        assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "qa",
+                      "tool_input": {"skill": "未审核skill"}}) == 2, \
+            "白名单启用后角色调白名单外 skill 未被拦"
+        quiet("config", "set", "allowed_skills", "[]")
         # 活动任务一旦看到开放契约窗口，产品代码写入必须停下；执行记录仍可落盘。
         quiet("task", "add", "--title", "活动契约实现", "--role", "backend-developer",
               "--phase", "develop", "--contracts", "user-api")
@@ -545,10 +569,11 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": ".workbench/artifacts/main/design/notes.md"}}) == 2, \
             "下游角色写上游阶段产物目录应被阶段隔离拦住"
 
-        # skill 调用不属于 Workflow Guard 的职责（白名单层不在这里）。
+        # skill 审核白名单已恢复：非主线程调白名单外 skill 被拦（详细正/负例见上方
+        # 「工具层两层守卫」块）。这里保留一条守着「有 agent_id + agent_type 的组合」也拦。
         assert guard({"tool_name": "Skill", "cwd": cw, "agent_type": "backend-developer",
-                      "agent_id": "be-1", "tool_input": {"skill": "unreviewed-skill"}}) == 0, \
-            "skill 审核不应由 Workflow Guard 拦截"
+                      "agent_id": "be-1", "tool_input": {"skill": "unreviewed-skill"}}) == 2, \
+            "skill 审核白名单未拦住 subagent 调未审核 skill"
 
         # 并行 develop：角色按载荷的 agent_type 判定，不看那个被互相覆盖的单文件。
         # role 文件此刻是 frontend-developer —— 相当于后启动的前端 subagent 刚 role set 过。
