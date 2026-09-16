@@ -1314,8 +1314,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_report)
 
     p = sub.add_parser("hook", help="hook 入口，从 stdin 读 JSON")
-    p.add_argument("event", choices=["pre-tool", "post-tool", "session-start", "subagent-stop"])
-    p.add_argument("--format", choices=["claude", "codex"], default="claude",
+    p.add_argument("event", choices=["pre-tool", "post-tool", "session-start", "user-prompt", "subagent-stop"])
+    p.add_argument("--format", choices=["claude", "codex", "comate"], default="claude",
                    help="调用端格式（claude 默认，codex 走 apply_patch 等差异）")
     p.set_defaults(func=cmd_hook)
 

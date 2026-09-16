@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import json
 from pathlib import Path
 
 
@@ -21,6 +22,25 @@ def check_static_layout(real_root: Path) -> None:
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
         assert tracked.returncode == 0, f"{codex_hook} 未跟踪 —— 干净 checkout 上 Codex 守卫会静默失效"
+
+    codex_hooks = real_root / ".codex" / "hooks.json"
+    if codex_hooks.is_file():
+        hooks = json.loads(codex_hooks.read_text(encoding="utf-8")).get("hooks", {})
+        for event, hook_name in {
+            "PreToolUse": "pre-tool",
+            "PostToolUse": "post-tool",
+            "UserPromptSubmit": "user-prompt",
+            "SubagentStop": "subagent-stop",
+        }.items():
+            assert event in hooks, f".codex/hooks.json 缺少 {event}，Codex 端工作台守卫会漂移"
+            entries = hooks[event]
+            assert entries and entries[0].get("hooks"), f".codex/hooks.json 的 {event} 未配置命令"
+            cmd = entries[0]["hooks"][0].get("command", "")
+            assert f"hook {hook_name} --format codex" in cmd, \
+                f".codex/hooks.json 的 {event} 未走 Codex 格式 {hook_name}"
+        for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit"):
+            assert hooks[event][0].get("matcher") == ".*", \
+                f".codex/hooks.json 的 {event} 必须 catch-all，枚举工具名会漏掉新写入工具"
 
     claude_skills = real_root / ".claude" / "skills"
     agents_skills = real_root / ".agents" / "skills"

@@ -786,6 +786,19 @@ def _is_apply_patch(cmd: str) -> bool:
     return bool(tokens) and Path(tokens[0]).name == "apply_patch"
 
 
+_UNKNOWN_WRITE_TOOL = re.compile(r"write|edit|patch|delete|move|rename|create|update|replace", re.I)
+_PATH_FIELDS = ("file_path", "notebook_path", "path", "target_path", "target", "dest", "destination")
+
+
+def _tool_path_values(tool_input: dict) -> list[str]:
+    values = []
+    for key in _PATH_FIELDS:
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            values.append(value)
+    return values
+
+
 def _is_task_start(cmd: str, task_id: str) -> bool:
     """Return whether a shell command invokes wb.py task start <ID>."""
     for seg in _split_pipeline(strip_heredocs(cmd)):
@@ -1002,12 +1015,13 @@ def hook_pre_tool(data: dict) -> None:
         return
 
     if not WRITE_TOOL.search(tool):
+        if _UNKNOWN_WRITE_TOOL.search(tool):
+            for raw in _tool_path_values(ti):
+                _check_write_target(cwd, root, raw, data)
         return
 
-    raw = ti.get("file_path") or ti.get("notebook_path")
-    if not raw:
-        return
-    _check_write_target(cwd, root, str(raw), data)
+    for raw in _tool_path_values(ti):
+        _check_write_target(cwd, root, raw, data)
 
 
 def hook_post_tool(data: dict) -> None:
@@ -1112,7 +1126,10 @@ def hook_session_start(data: dict) -> None:
         "开工前先做 flow 归属：按用户目标 / 影响仓库 / 验收标准判断本轮任务属于哪条"
         "需求线——完全匹配才 `wb.py flow switch <名>` 复用，否则 `wb.py flow new <语义名>` "
         "新建，低风险单次改动可 Conversation closure 并说明理由。指针只是历史位置，"
-        "别因为上面某条 flow 显示了进度就默认在它里面继续；拿不准先 `/wb-flow`。")
+        "别因为上面某条 flow 显示了进度就默认在它里面继续；拿不准先 `/wb-flow`。"
+        "首次写产品源码（`repos/.source/**`）前请确认**本会话已归属**：归属标记按"
+        "会话记账，别的对话或更早轮次的归属不算数。被闸门拦时就在**当轮**重跑归属命令"
+        "再紧接着写，仍被拦就同轮再跑一次，切勿绕过。")
     lines.append("")
 
     # 指针当前 flow 明细
@@ -1192,6 +1209,31 @@ def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
         print(msg)
 
 
+def hook_user_prompt(data: dict) -> None:
+    """UserPromptSubmit：本会话尚未做 flow 归属时，每轮用户发话主动推送一条提醒；
+    已归属则静默。归属本质是任务级判断，SessionStart 时任务未知（那时提醒必然显示
+    「未归属」且无的放矢），所以把「是否已归属」放到用户每次发话时推——此时任务已知。
+
+    全程 fail-silent：任何异常都吞掉返回，绝不阻断用户的 prompt。UserPromptSubmit
+    退出码 2 会拦下整条 prompt，一个「提醒」功能绝不能有这种副作用；session_id 缺失
+    时同样静默（与归属闸门 fail-open 同策，无法追踪归属就不误报）。"""
+    try:
+        root = find_root(Path(data.get("cwd") or os.getcwd()))
+        if not state_path(root).is_file():
+            return
+        if not data.get("session_id"):
+            return
+        if _session_attributed(root, data):
+            return
+        print(
+            "[工作台] 本会话尚未做 flow 归属。若本轮涉及实现/修复/接口/跨模块/验证/留痕，"
+            "先按用户目标·影响仓库·验收标准判断归属：完全匹配 `wb.py flow switch <名>` 复用，"
+            "否则 `wb.py flow new <语义名>`；纯只读或低风险单次改动可跳过并说明理由。"
+            "查全部需求线：`wb.py flow list`。")
+    except Exception:
+        return
+
+
 def cmd_hook(args) -> None:
     set_flow_override(None)   # 守卫与 hook 是工作区级视角，不跟调用方 shell 的 WB_FLOW 走
     raw = sys.stdin.read() if not sys.stdin.isatty() else "{}"
@@ -1204,6 +1246,7 @@ def cmd_hook(args) -> None:
             "pre-tool": lambda d: hook_pre_tool(d),
             "post-tool": lambda d: hook_post_tool(d),
             "session-start": lambda d: hook_session_start(d),
+            "user-prompt": lambda d: hook_user_prompt(d),
             "subagent-stop": lambda d: hook_subagent_stop(d, fmt=args.format),
         }[args.event](data)
     except KeyError:

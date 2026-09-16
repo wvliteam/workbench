@@ -1403,6 +1403,12 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "apply_patch", "cwd": cw,
                       "tool_input": {"command": "*** Add File: web/new.tsx\n---\nconsole.log(1)\n"}}) == 0, \
             "apply_patch 正常写入被误拦"
+        assert guard({"tool_name": "replace_file", "cwd": cw,
+                      "tool_input": {"path": ".workbench/state.json"}}) == 2, \
+            "未知写入工具的路径字段未走守卫"
+        assert guard({"tool_name": "inspect_file", "cwd": cw,
+                      "tool_input": {"path": ".workbench/state.json"}}) == 0, \
+            "未知只读工具不应因路径字段被误拦"
         shell_patch = "apply_patch <<'PATCH'\n*** Add File: web/new.tsx\n+1\n*** End Patch: 0 lines had values out of range\nPATCH"
         assert guard({"tool_name": "exec_command", "cwd": cw,
                       "tool_input": {"command": shell_patch}}) == 0, \
@@ -1411,6 +1417,11 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "exec_command", "cwd": cw,
                       "tool_input": {"command": frozen_shell_patch}}) == 2, \
             "shell apply_patch 删除冻结文件未被拦"
+        assert resolve("patch .claude/hooks/wb.py < /tmp/p.diff", tmp)[0] == {".claude/hooks/wb.py"}, \
+            "patch 命令目标未解析出来"
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "patch .claude/hooks/wb.py < /tmp/p.diff"}}) == 2, \
+            "patch 命令改守卫本体未被拦"
 
         # --- SHELL_TOOL 覆盖 Codex shell 工具 ---
         assert guard({"tool_name": "shell", "cwd": cw,

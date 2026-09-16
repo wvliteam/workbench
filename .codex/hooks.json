@@ -15,7 +15,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Bash|shell|exec_command|unified_exec|apply_patch|Write|Edit|NotebookEdit|MultiEdit|write_file|edit_file|Read|read_file|file_read)$",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
@@ -27,11 +27,23 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "^(Bash|shell|exec_command|unified_exec|apply_patch|Write|Edit|NotebookEdit|MultiEdit|write_file|edit_file)$",
+        "matcher": ".*",
         "hooks": [
           {
             "type": "command",
             "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook post-tool --format codex; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=\"$PWD\"; while [ \"$root\" != \"/\" ] && { [ ! -f \"$root/.codex/hooks/wb.py\" ] || [ ! -f \"$root/.codex/hooks.json\" ]; }; do root=\"$(dirname \"$root\")\"; done; if [ -f \"$root/.codex/hooks/wb.py\" ] && [ -f \"$root/.codex/hooks.json\" ]; then python3 \"$root/.codex/hooks/wb.py\" hook user-prompt --format codex; fi",
             "timeout": 30
           }
         ]
