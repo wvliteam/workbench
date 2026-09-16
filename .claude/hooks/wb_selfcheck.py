@@ -35,7 +35,7 @@ from wb_core import (
     task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
     ensure_repo_orientation_tasks,
 )
-from wb_guard import frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop
+from wb_guard import frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop, mark_session_attributed
 from wb_cli import cmd_task, main, merge_artifacts
 from wb_selfcheck_static import check_static_layout
 
@@ -572,10 +572,30 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
                       "tool_input": {"command": "python3 wb.py flow attribute --adhoc --reason y"}}) == 2, \
             "角色 subagent 跑 flow attribute 应被特权层拦下"
-        # 回归（评审 §4）：session_id 含路径穿越不应被当成有效归属标记。
+        # 回归（评审 §4）：路径穿越形态的 session_id 经哈希落盘后不越出 sessions/，
+        # 且未跑归属命令的会话不解锁。
         assert guard({"tool_name": "Write", "cwd": cw, "session_id": "../flows/main/state.json",
                       "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
-            "穿越形态的 session_id 不应解锁（路径校验回归）"
+            "未归属会话（穿越形态 session_id）不应解锁"
+        # 回归（评审二轮）：session_id 含特殊字符（@ : 空格 非 ASCII，harness 给的、
+        # 用户改不了）经哈希落盘后，归属应能解锁 —— 早期白名单 fail-closed 会在这里
+        # 死锁（标记写不进 + 闸门 escape 只覆盖 session_id 缺失、不覆盖格式不符）。
+        _sid_weird = "sess@host:1234 会话-1"
+        guard({"tool_name": "Bash", "cwd": cw, "session_id": _sid_weird,
+               "tool_input": {"command": "python3 wb.py flow attribute --adhoc --reason z"}})
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid_weird,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
+            "特殊字符 session_id 归属后应能解锁（哈希文件名，不 fail-closed 死锁）"
+        # 回归（评审三轮）：session_id 主/子共享，下游角色跑归属命令（会被特权层拦掉）
+        # 不该替主线程解开闸门 —— 落标记只认主线程（无 agent_id/agent_type）。
+        _sid_shared = "sess-shared-mainsub"
+        assert guard({"tool_name": "Bash", "cwd": cw, "session_id": _sid_shared,
+                      "agent_type": "backend-developer",
+                      "tool_input": {"command": "python3 wb.py flow new sneaky"}}) == 2, \
+            "角色跑 flow new 应被特权层拦下"
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid_shared,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+            "下游角色的（被拒）归属命令不应替主线程解锁闸门（session_id 主/子共享）"
         # 回归（评审 §6 / Option B）：WB_FLOW 是 CLI 路由变量，不解锁闸门 —— 守卫工作区级，
         # 不跟会话钉死的 shell env 走（与下方「hook 路径不该被 WB_FLOW 改道」同一不变量）。
         os.environ["WB_FLOW"] = "main"
@@ -585,6 +605,20 @@ def cmd_selfcheck(args) -> None:
                 "WB_FLOW 不应解锁归属闸门（守卫不跟 shell 钉死走）"
         finally:
             os.environ.pop("WB_FLOW", None)
+        # 回归（R2a）：.workbench/sessions/ 并入 FROZEN_ALWAYS，工具层伪造归属标记被拦
+        # （hook 的 Python 直写不走 _check_write_target，不受影响）。
+        assert guard({"tool_name": "Write", "cwd": cw,
+                      "tool_input": {"file_path": ".workbench/sessions/forged"}}) == 2, \
+            "sessions/ 应冻结：工具写入应被拦（防伪造归属标记）"
+        # 回归（R2b）：陈旧会话标记按 mtime 回收 —— 落新标记时顺带删 30 天前的。
+        _sess = wb_dir(tmp) / "sessions"
+        _sess.mkdir(parents=True, exist_ok=True)
+        _old = _sess / "stalemarkxxxxxxx"
+        _old.write_text("x", encoding="utf-8")
+        _ago = time.time() - 40 * 86400
+        os.utime(_old, (_ago, _ago))
+        mark_session_attributed(tmp, "sess-prune-trigger")
+        assert not _old.exists(), "陈旧会话标记（40 天前）应在落新标记时被回收"
         shutil.rmtree(source_root)
         source_link.unlink()
         assert guard({"tool_name": "Write", "cwd": cw,
@@ -1883,6 +1917,19 @@ def cmd_selfcheck(args) -> None:
         merge_artifacts(tmp, t_b, "feature-b")
         assert t_b["artifacts"] == ["repos/b/feat.tsx"], \
             f"feature-b 的 T1 没拿到自己 agent 的产物：{t_b['artifacts']}"
+
+        # --- R3：flow attribute --flow <名> 诚实归属，校验存在性 / 不移动共享指针 / 互斥 ---
+        _ptr_f = wb_dir(tmp) / "current-flow"
+        _ptr_before = _ptr_f.read_text().strip() if _ptr_f.is_file() else ""
+        code, _ = quiet("flow", "attribute", "--flow", "no-such-flow")
+        assert code != 0, "flow attribute --flow 指向不存在的需求线应报错"
+        code, out = quiet("flow", "attribute", "--flow", "feature-b")
+        assert code == 0, f"flow attribute --flow feature-b 应成功：{out}"
+        _ptr_after = _ptr_f.read_text().strip() if _ptr_f.is_file() else ""
+        assert _ptr_before == _ptr_after, \
+            f"flow attribute --flow 不应移动共享指针（{_ptr_before} → {_ptr_after}）"
+        code, _ = quiet("flow", "attribute", "--flow", "feature-b", "--adhoc", "--reason", "x")
+        assert code != 0, "flow attribute 的 --flow 与 --adhoc 应互斥"
 
         # --- 跨 flow 回归 3：WB_FLOW 钉 CLI，不钉 hook ---
         # 指针是全部会话共享的一份文件，两个终端并行推两条 flow 时状态命令会被

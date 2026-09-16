@@ -1053,15 +1053,32 @@ def cmd_flow(args) -> None:
                   f"{ov}；要先解除再操作。")
         return
     if args.action == "attribute":
+        # 两种归属，二选一：
+        #   --flow <名>：按会话诚实归属到已存在需求线，**不移动共享指针** current-flow
+        #     —— 给钉了 WB_FLOW 的并行会话用（flow switch 会移动指针、扰动对方；--adhoc
+        #     则是「不建 flow」的假声明）。
+        #   --adhoc：不建 flow 的低风险单次改动的记账豁免。
+        # 解锁本会话产品源码写入的会话标记由 hook 见到本命令时落（那里才有 session_id），
+        # CLI 自己拿不到 session_id、落不了标记；这里只做审计记账。
+        if args.attr_flow and args.adhoc:
+            die("flow attribute 的 --flow 与 --adhoc 二选一。")
+        if args.attr_flow:
+            if not flow_dir(root, args.attr_flow).is_dir():
+                die(f"flow attribute --flow：需求线 {args.attr_flow} 不存在。先 `flow list` "
+                    "看实名，或 `flow new <名>` 新建。")
+            st = load_state(root, lock=True)
+            log(st, "flow_attribute", flow=args.attr_flow)
+            save_state(root, st)
+            print(f"已按会话归属到需求线 {args.attr_flow}（不移动共享指针 current-flow）。")
+            print("解锁在 AI 经会话内工具执行本命令时由 hook 落标记生效。")
+            return
         if not args.adhoc:
-            die("flow attribute 目前只支持 --adhoc（低风险单次改动的记账豁免）；"
-                "要归属到具体需求线用 flow switch / flow new。")
+            die("flow attribute 需要 --flow <已存在需求线>（诚实归属、不动指针）"
+                "或 --adhoc（不建 flow 的记账豁免）。")
         if not args.reason:
             die("flow attribute --adhoc 需要 --reason '<为什么不建 flow>'")
-        # 解锁本会话产品源码写入的会话标记由 hook 见到本命令时写（那里才有 session_id）——
-        # CLI 自己拿不到 session_id，落不了标记。这里只做审计记账：把豁免理由记成显式可审计
-        # 动作。pointer_at 只留「声明时指针停在哪」供取证，不用 flow= 以免把「不建 flow」的
-        # 豁免伪装成某条需求线的活动（评审 §3：审计不自相矛盾）。
+        # pointer_at 只留「声明时指针停在哪」供取证，不用 flow= 以免把「不建 flow」的豁免
+        # 伪装成某条需求线的活动（评审 §3：审计不自相矛盾）。
         st = load_state(root, lock=True)
         log(st, "flow_attribute_adhoc", pointer_at=pointer_flow(root), reason=args.reason)
         save_state(root, st)
@@ -1202,6 +1219,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true", help="remove 的确认开关")
     p.add_argument("--adhoc", action="store_true",
                    help="attribute：声明本轮为低风险单次改动、不建 flow（记账豁免）")
+    p.add_argument("--flow", dest="attr_flow",
+                   help="attribute：按会话诚实归属到某条已存在需求线，不移动共享指针")
     p.add_argument("--reason", help="attribute --adhoc 必填：为什么不建 flow")
     p.set_defaults(func=cmd_flow)
 

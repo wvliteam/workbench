@@ -285,7 +285,10 @@ NON_MAIN_THREAD_DENIED_TOOLS = (
 # hook 每次工具调用都要读它，读一个纯文本列表比解析整个 state.json 便宜一个量级。
 # 流水账在列表里是因为归属判定读它：能追加一行就能把别人的改动记到自己名下。
 # wb.py 自己写它不受影响 —— 守卫只拦工具调用，不拦这个进程内的文件写。
-FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG, "audit.jsonl"]
+# sessions/（归属首写闸门的会话标记目录）同理：hook 用 Python 直写，冻结只挡工具层
+# 伪造标记，把它并入「状态只能经 wb.py 改」的硬规则 1，堵住之前的直写例外。
+FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG, "audit.jsonl",
+                 "sessions"]
 
 # 写入型 shell 动作。仍保留用于 uncertain=True 时的兜底匹配。
 BASH_WRITE = re.compile(

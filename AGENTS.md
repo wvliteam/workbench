@@ -28,6 +28,8 @@ python3 .claude/hooks/wb.py selfcheck       # 改过 wb.py 后必须跑
 
 把六阶段套在一行改动上是纯开销。小改动不必套完整六阶段，但仍须遵守与当前职责相关的冻结文件、契约和状态保护。
 
+**产品源码写入有机制闸门。** 主线程首次写 `repos/.source/**` 前，本会话必须已做 flow 归属（`flow switch`/`new`，或低风险单次改动用 `flow attribute --adhoc`）——归属是机制硬前置，不是 SessionStart 的文字规劝（详见「权限守卫」）。
+
 ## 多仓库工作区
 
 代码库直接 clone 到本工作区里,不要把 `.claude/` 拷到别处。**工作台只用一种布局:外层根一份状态,各仓库里都不要 init** —— 项目根 = 整个工作区,一份 state、一份契约、一条流水线,前后端对着同一份锁定契约并行开发,天然支持跨仓库需求。
@@ -129,7 +131,7 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 - 解冻窗口按 flow 生命周期隔离：SubagentStop 与 `contract lock` / `bump` 只关**本 flow** 的窗口，别的 flow 正在使用的窗口不会被顺带拆掉。同一契约名全工作区同时只允许一个窗口（`unlock` 聚合查重），A flow 开窗期间 B flow 对同名契约的 `unlock` 会被拒 —— 共享同一份契约文件的两条 flow，变更本来就要排队。
 - 产物归属（`task-agents.jsonl` / `artifacts.jsonl`）带 flow 字段：任务 ID 每条 flow 独立从 T1 编起，归属按任务所在 flow 过滤，跨 flow 同名任务不会互相认领对方的 agent 与产物。
 - 角色范围模式带 flow 通配（`.workbench/artifacts/*/clarify/**`），不用为每条需求改配置。
-- flow new/switch/remove 是编排者的调度决定，角色 subagent 跑不了（守卫特权层拦截）。
+- flow new/switch/remove/attribute 是编排者的调度决定，角色 subagent 跑不了（守卫特权层拦截）。
 - 同一仓库要并行第二个需求、又要代码也物理隔离时，仍可叠加 `git worktree`；只隔离状态时用 flow 就够。
 
 ### 注意
@@ -183,7 +185,8 @@ python3 .claude/hooks/wb.py config set gate_commands.build 'npm run build'
 
 - 写冻结文件（`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / 所有已锁定的契约，含 `design.md` 与各阶段过门禁后的产物）—— Write/Edit 与 Bash（含 `Monitor`，与 Bash 同一个 shell 环境跑 `tool_input.command`）的 `>` `tee` `sed -i` `python3 -c` 等写法都拦。**写出项目根之外不在此列**（2026-09-12 起不拦：根外写入不影响工作流推进，属常态动作）
 - 角色越权写**工作流核心路径** —— 受守前缀：`.workbench/`（状态、契约、阶段产物按阶段隔离）、`.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/`（权限引擎、hook 注册表、角色定义与 Skill 实体、业务插件与 MCP 源）、`knowledge/`（专属 `knowledger`）、`references/`（公共规范只读，仅 `references/workspace/<自己的角色>/` 可改自己的），多仓库布局下再加工作区材料 `scripts/`、`repos.json`、`repos/index.md` `.vscode/`（`repos/` 整体**不收窄** —— `repos/<名>/` 可能是自带 `.workbench/` 的嵌套项目根，整体收窄会误拦内层仓库的正常源码；画像的可写面由 `analyst` 的逐文件范围收窄）。`role_scopes` 里显式的 `[]` 是「什么都不能写」，缺 key 才回落默认值。**核心路径之外一律不判角色**：仓库代码、`/tmp`、项目根之外 —— 在 `/tmp` 建测试脚本、跑根外脚本、跨目录搬文件都是开发常态，且不影响工作流推进；「谁该写哪块代码、别乱写文件乱执行脚本」属于 harness 与模型层面的规范，不是本工作台的职责。守卫管得越宽，越容易在正常动作上误拦，把防线变成流程阻力
-- 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`task skip`、`init --force`、`init --root`（会在项目外甚至 `.claude/` 下建 `.workbench` 结构）、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
+- 主线程未归属就写产品源码 —— **`repos/.source/**` 首写归属闸门**：本会话须先 `flow switch`/`new`/`attribute` 表态（经会话内 Bash 工具执行时由 hook 按 session_id 落标记）。只拦主线程（subagent 归任务绑定管）、只拦产品源码；session_id 缺失时放行（不制造无 escape 死锁）。WB_FLOW 只钉 CLI 路由、**不解锁本闸门**——并行会话仍需在会话内跑一次归属命令（`flow attribute --flow <已存在需求线>` 可诚实归属、不移动共享指针；低风险单次改动用 `flow attribute --adhoc --reason`）
+- 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`role set|clear`、`role scopes --reset`、`flow new|switch|remove|attribute`、`task skip`、`init --force`、`init --root`（会在项目外甚至 `.claude/` 下建 `.workbench` 结构）、`contract dispute --clear`、非 owner 的 `contract unlock|bump|consumers`、`config set`）—— 只有 qa 能设 `gate_commands.*`，契约的 `unlock`/`bump`/`consumers` 只认 owner 与 architect。被拦就报回编排者，别换写法
 - 灾难性命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）—— 门禁命令同样被筛：`config set gate_commands.*` 的值在写入与执行时各过一遍 `catastrophic_command()` 与 `gate_command_references_outside()`（后者拒 `sh /tmp/x.sh`、`pytest --cov=/tmp/x` 这类项目根外的脚本与路径引用）
 - 非主线程调用会「把动作带出本会话权限边界」的工具（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）—— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，动作发生在守卫看不见的地方，拦不住第二次，所以门只能设在「调它」这一步。主线程是编排者，不受限。**⚠ 这层在 `d606944` 重构中被移除，尚未恢复 —— 当前不生效**（见 [draft/open-issues-2026-09-10.md](draft/open-issues-2026-09-10.md) 的 P0 条目）
 - 未审核的 skill 调用 —— 角色 subagent 都带了 `Skill` 工具，但只能调 `allowed_skills` 白名单里的 skill。**⚠ 同上，这层当前也不生效**（`allowed_skills` 仍是 state 里的配置项，但没有执行点）。被拦的 skill 报回主线程审核，别绕

@@ -208,3 +208,29 @@
 - 任务租约（`lease_until`）、`owner`、`attempts`、`start → doing → done/blocked` 状态机、自依赖拒绝、门禁豁免三态雏形 → 已在 `92b6dfb` 落地
 - `state.json` schema version 校验（拒绝比代码更新的 state） → 已加 `STATE_SCHEMA`（`wb_const.py`）
 - `next` 停机判定未纳入 stale 任务 → 已在 `17f6d1b` 修复
+
+---
+
+## P3（2026-09-16，bc9446b 归属闸门评审残余）—— ✅ 两项均已修复（2026-09-16）
+
+评审 P0–P3 六项 + 二三轮（session_id 哈希、落标记仅限主线程）已修复合入 `main`。下列两项**初判为可接受、记账不阻塞，随后按低成本方案一并落地**。威胁模型不变（假定 subagent 可执行 CLI、不完全可信）。
+
+### R2：`.workbench/sessions/` 治理 —— ✅ 已修复
+
+**代码事实**：`_attribution_gate` 的归属标记落在 `.workbench/sessions/<sha256(session_id)[:16]>`，由 hook（`mark_session_attributed`）用 Python 直写。这是「状态只能经 wb.py 改」（硬规则 1）之外的一个例外目录：(a) **不在 `FROZEN_ALWAYS`**；(b) **无回收策略**，一会话一文件、只存时间戳，长期只增不删（体积极小，非紧迫）。
+
+**为什么可接受**：标记只被主线程首写闸门消费，fail-open 设计保证坏了不死锁；文件哈希命名无穿越面。伪造标记需要能算出 `sha256(session_id)` 且 session_id 未必对模型可见，攻击面窄。
+
+**将来收严**：把 `sessions`（或 `sessions/`）并入 `FROZEN_ALWAYS`——挡工具层伪造标记，不影响 hook 的 Python 直写（`_check_write_target` 只判工具/Bash 写目标）；并加过期清理（如 `mark` 时顺带删 N 天前的标记，或 `init`/维护命令清）。约数行。
+
+**处理结果（2026-09-16）**：已落地。`FROZEN_ALWAYS` 加 `"sessions"`（`wb_const.py`）——`frozen_paths` 随之覆盖 `.workbench/sessions`，工具/Bash 写被拦，hook 的 Python 直写不走 `_check_write_target`、不受影响，纳入硬规则 1。`_prune_session_marks`（`wb_guard.py`）在 `mark_session_attributed` 落新标记时按 mtime 删 30 天前的旧标记。selfcheck 加断言：工具写 `sessions/` 被拦（==2）、40 天前的标记落新标记时被回收。
+
+### R3：并行 WB_FLOW 会话被迫用 `flow attribute --adhoc` 过闸门 —— ✅ 已修复
+
+**代码事实**：Option B 后 WB_FLOW 不解锁闸门；会话标记只存时间戳、**不记 flow**。于是钉了 `WB_FLOW=feature-b` 的并行会话要过闸门只有三条路：`flow new`（多建一条 flow，不对）、`flow switch feature-b`（移动**共享指针** `.workbench/current-flow`，与「并行各自钉 WB_FLOW 避免指针竞争」的初衷冲突）、`flow attribute --adhoc`（能过，但语义是「不建 flow 的低风险单次改动」，对正在做 feature-b 的会话是**假声明**，还把记账落进指针 flow 的审计）。
+
+**为什么可接受**：不是安全洞也不死锁，只是并行编排场景的语义别扭 + 审计噪声；单终端（绝大多数）不受影响。
+
+**将来的正解**：让会话标记记录归属的 flow，并给一条「按会话归属到某条已存在 flow、不移动共享指针」的命令（如 `flow attribute --flow <名>` 或 `flow switch --session-only`）。届时并行会话可诚实归属到 feature-b，闸门读标记里的 flow。属小功能，非本轮范围。
+
+**处理结果（2026-09-16）**：已落地 `flow attribute --flow <已存在需求线>`（`wb_cli.py`）：校验 flow 存在、**不移动共享指针** `current-flow`、与 `--adhoc` 互斥、审计记 `flow_attribute`（honest，非 `flow_attribute_adhoc`）。unlock 仍走既有 hook 落标记路径（`_is_attribution_cmd` 认 `flow attribute`）。并行 WB_FLOW 会话现在有诚实出口，不必再用「不建 flow」的 `--adhoc` 假声明。selfcheck 加断言：不存在需求线报错 / 成功 / 指针不动 / 与 `--adhoc` 互斥。**取舍**：会话标记仍是「存在即已归属」的判定，未把 flow 名写进标记内容——归属的诚实记录落在审计流水（`flow_attribute` 事件带 `flow=`），闸门只需存在性，够用。

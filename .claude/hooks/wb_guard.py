@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import fnmatch
+import hashlib
 import os
 import re
 import shlex
 import sys
+import time
 from pathlib import Path
 
 from wb_const import (
@@ -45,32 +47,57 @@ def hook_deny(reason: str) -> "None":
 # 主线程（编排者）在没做任何 flow 归属决定的情况下直接改产品源码，是「不按 flow
 # 规划执行 / 误复用指针停留的旧 flow」的根源。SessionStart 只是文字规劝，拦不住。
 # 这里把归属做成硬前置：主线程首次写 repos/.source/** 前，本会话必须已通过
-# `wb.py flow switch/new`、`flow attribute --adhoc`（记账豁免）或钉死 WB_FLOW
-# 明确表态。判据只对主线程生效（subagent 归任务绑定管），且以会话级 session_id
-# 隔离——与跨终端并行的 WB_FLOW 机制正交，互不影响。
+# `wb.py flow switch/new` 或 `flow attribute --adhoc`（记账豁免）明确表态。判据只对
+# 主线程生效（subagent 归任务绑定管），以会话级 session_id 隔离。WB_FLOW 不解锁本
+# 闸门（Option B：守卫工作区级，不跟 shell 钉死走）。
 # 归属命令的 action（配合 _is_attribution_cmd 的词法判定，替代早期裸正则）。
 _ATTR_ACTIONS = frozenset({"switch", "new", "attribute"})
-# 会话 id 当作 sessions/ 下的文件名落盘，先过白名单防路径穿越（评审 §4）：只允许
-# 字母数字与 . _ -，且不以点/斜杠开头 —— `../flows/main/state.json`、`a/b` 都不匹配。
-# 不复用 _FLOW_NAME（仅小写）：真实 session_id 可能含大写，误拒会让归属无法解锁。
-_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _session_dir(root: Path) -> Path:
     return wb_dir(root) / "sessions"
 
 
+def _session_key(session_id: str) -> str:
+    """会话标记文件名：sha256 前 16 位 hex。哈希而非原样落盘，一举解决两件事——
+    ① 路径穿越从根上消失：hex 只含 [0-9a-f]，`../flows/main/state.json`、`a/b`
+       都映射成安全文件名，不必再靠白名单去挡（白名单还漏掉写侧 except OSError）。
+    ② 不再 fail-closed 死锁：白名单是「格式不符即拒」，而闸门逃生口只覆盖
+       session_id 缺失、不覆盖「存在但不符格式」。harness 给个 `sess@host:1234`
+       这类带特殊字符的 id（用户与模型都改不了），白名单会让标记写不进、之后每次
+       产品源码写入都 exit 2 且无 escape（评审二轮）。哈希后任何 id 都能落标记。"""
+    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:16]
+
+
 def mark_session_attributed(root: Path, session_id: str) -> None:
     """记下「本会话已做过一次 flow 归属决定」。由 hook 写：只有 hook 载荷里才有
     稳定的 session_id，CLI（Bash 里跑）拿不到，所以标记统一由 hook 落盘。"""
-    if not session_id or not _SESSION_ID.fullmatch(session_id):
+    if not session_id:
         return
     try:
         d = _session_dir(root)
         d.mkdir(parents=True, exist_ok=True)
-        (d / session_id).write_text(now(), encoding="utf-8")
+        (d / _session_key(session_id)).write_text(now(), encoding="utf-8")
+        _prune_session_marks(d)
     except OSError:
         pass
+
+
+def _prune_session_marks(d: Path, keep_days: int = 30) -> None:
+    """回收陈旧会话标记：一会话一文件、只增不删会无界增长。落新标记时顺带按 mtime 删
+    keep_days 天前的旧标记（归属命令很少跑，这点扫描不在热路径上）。逐个吞 OSError：
+    单文件竞态删除 / 权限问题不该打断回收，更不该冒泡打断落标记本身。"""
+    cutoff = time.time() - keep_days * 86400
+    try:
+        entries = list(d.iterdir())
+    except OSError:
+        return
+    for f in entries:
+        try:
+            if f.is_file() and f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
 
 
 def _session_attributed(root: Path, data: dict) -> bool:
@@ -80,9 +107,14 @@ def _session_attributed(root: Path, data: dict) -> bool:
     # (None)，selfcheck「hook 路径不该被 WB_FLOW 改道」同此不变量）。并行会话即便钉了
     # WB_FLOW，本会话仍需跑一次 flow switch/new/attribute 确认归属（每会话一次，非阻塞）。
     sid = data.get("session_id")
-    if not sid or not _SESSION_ID.fullmatch(sid):
+    if not sid:
         return False
-    return (_session_dir(root) / sid).is_file()
+    d = _session_dir(root)
+    # sessions/ 被占成普通文件（mkdir 失败被 except OSError 吞掉）→ 标记永远写不进，
+    # 闸门会无 escape 死锁。按逃生原则 fail-open：宁可少拦一次，不锁死用户。
+    if d.exists() and not d.is_dir():
+        return True
+    return (d / _session_key(sid)).is_file()
 
 
 def _attribution_gate(root: Path, rel: str, data: dict) -> None:
@@ -107,6 +139,7 @@ def _attribution_gate(root: Path, rel: str, data: dict) -> None:
         f"  · 盘点：wb.py flow list\n"
         f"  · 复用已有：wb.py flow switch <名>\n"
         f"  · 新需求：wb.py flow new <语义名>\n"
+        f"  · 并行会话诚实归属（不动共享指针）：wb.py flow attribute --flow <已存在需求线>\n"
         f"  · 低风险单次改动（记账豁免）：wb.py flow attribute --adhoc --reason '<为什么不建 flow>'\n"
         f"（已 export WB_FLOW=<名> 的并行会话，本会话仍需跑一次上面任一命令确认归属；"
         f"WB_FLOW 只钉 CLI 路由、不解锁守卫。归属只需本会话做一次。）"
@@ -824,7 +857,10 @@ def hook_pre_tool(data: dict) -> None:
 
         # 本会话跑了 flow 归属命令（switch/new/attribute）→ 记下会话已表态，
         # 解锁后续产品源码写入。hook 手里才有稳定 session_id，标记只能这里落。
-        if _is_attribution_cmd(cmd):
+        # 只认主线程（无 agent_id/agent_type）：session_id 是主/子共享的（不能区分调用者，
+        # 见 docs/permissions.md），而闸门只拦主线程。下游角色跑归属命令（且随后会被特权层
+        # 拦掉）不该替编排者解开闸门 —— 否则「硬前置」被单方面绕过（评审三轮）。
+        if _is_attribution_cmd(cmd) and not (data.get("agent_id") or data.get("agent_type")):
             mark_session_attributed(root, data.get("session_id", ""))
 
         # --- 灾难命令与敏感读取：扫剥壳后的命令 ---

@@ -139,6 +139,17 @@ wb.py config set role_scopes.backend-developer \
 
 **`Skill` 审核门**（`allowed_skills`，**待恢复**）：非主线程调用者只能调白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来。
 
+### 归属首写闸门与 `.workbench/sessions/`
+
+主线程首次写产品源码 `repos/.source/**` 前，本会话必须已做 flow 归属（`_attribution_gate`）。归属信号是会话标记文件 `.workbench/sessions/<sha256(session_id)[:16]>`，由 hook 在本会话执行 `flow switch`/`new`/`attribute` 时落盘（`_is_attribution_cmd` 词法判定）。要点：
+
+- **只对主线程落标记**：session_id 主/子共享（见下「载荷」节），下游角色跑归属命令（且随后被特权层拦掉）不该替编排者解开闸门，所以 `mark_session_attributed` 只在无 `agent_id`/`agent_type` 时写。
+- **只拦主线程、只拦产品源码**：subagent 归任务绑定与契约管；`repos/.source/**` 之外不受本闸门管。
+- **fail-open 不死锁**：session_id 缺失、或 `sessions/` 被占成普通文件时放行 —— 逃生口优先于拦截。文件名哈希而非原样落盘：任何 session_id 格式（含 `@` `:` 空格、非 ASCII）都映射成安全名，路径穿越从根上消失，也不再因格式白名单 fail-closed 死锁。
+- **WB_FLOW 不解锁本闸门**：守卫工作区级（`cmd_hook` 已 `set_flow_override(None)`）。并行会话即便钉了 WB_FLOW，本会话仍需跑一次归属命令 —— `flow attribute --flow <已存在需求线>` 可诚实归属、**不移动共享指针** `current-flow`（`flow switch` 会移动指针、扰动并行的对方；`--adhoc` 则是「不建 flow」的记账豁免）。
+
+**治理**：`.workbench/sessions/` 是 hook 用 Python 直写的状态目录。已并入 `FROZEN_ALWAYS`（工具层伪造标记被拦，hook 的进程内写不走 `_check_write_target`、不受影响），纳入「状态只能经 wb.py 改」（硬规则 1）；`mark_session_attributed` 落新标记时按 mtime 回收 30 天前的旧标记，避免一会话一文件无界增长。
+
 ### 拒绝信息要可操作
 
 ```
