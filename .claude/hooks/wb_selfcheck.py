@@ -547,8 +547,9 @@ def cmd_selfcheck(args) -> None:
                       "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
             "本会话归属后主线程产品源码写入应放行"
         # 回归（评审 §1）：cwd 经软链传入时 root 已 resolve、cwd 未 resolve，坐标系错位
-        # 会让 keep_source_mount 落空、跟随 .source 出根 → 归属闸门 fail-open。本机 /var
-        # 非软链，故造一个指向 tmp 的软链当 cwd 复现；resolve_target 解析基目录后应仍拦。
+        # 会让 keep_source_mount 落空、跟随 .source 出根 → 归属闸门 fail-open。不依赖本机
+        # TMPDIR 是否含软链分量（macOS /var→/private/var 才天然触发）——显式造一个指向
+        # tmp 的软链当 cwd 复现；resolve_target 解析基目录后应仍拦。
         cw_link = tmp.parent / f"{tmp.name}-lnk"
         cw_link.symlink_to(tmp, target_is_directory=True)
         assert guard({"tool_name": "Write", "cwd": str(cw_link), "session_id": "sess-symlink-cwd",
@@ -1919,15 +1920,20 @@ def cmd_selfcheck(args) -> None:
             f"feature-b 的 T1 没拿到自己 agent 的产物：{t_b['artifacts']}"
 
         # --- R3：flow attribute --flow <名> 诚实归属，校验存在性 / 不移动共享指针 / 互斥 ---
+        # 指针先停 main、归属目标取 feature-b（与指针不同）——这样「指针不动」才是真断言：
+        # 若实现顺手 set_current_flow，指针会 main→feature-b，断言即失败（评审四轮 R1）。
+        quiet("flow", "switch", "main")
         _ptr_f = wb_dir(tmp) / "current-flow"
-        _ptr_before = _ptr_f.read_text().strip() if _ptr_f.is_file() else ""
         code, _ = quiet("flow", "attribute", "--flow", "no-such-flow")
         assert code != 0, "flow attribute --flow 指向不存在的需求线应报错"
         code, out = quiet("flow", "attribute", "--flow", "feature-b")
         assert code == 0, f"flow attribute --flow feature-b 应成功：{out}"
-        _ptr_after = _ptr_f.read_text().strip() if _ptr_f.is_file() else ""
-        assert _ptr_before == _ptr_after, \
-            f"flow attribute --flow 不应移动共享指针（{_ptr_before} → {_ptr_after}）"
+        assert _ptr_f.read_text().strip() == "main", \
+            "flow attribute --flow 不应移动共享指针（应仍停在 main）"
+        # R4：审计落在归属 flow（feature-b）的账上，不是指针 flow（main）。
+        _fb_audit = wb_dir(tmp) / "flows" / "feature-b" / "audit.jsonl"
+        assert _fb_audit.is_file() and '"flow_attribute"' in _fb_audit.read_text(), \
+            "flow attribute --flow 的审计应落在归属 flow 的 audit.jsonl（R4）"
         code, _ = quiet("flow", "attribute", "--flow", "feature-b", "--adhoc", "--reason", "x")
         assert code != 0, "flow attribute 的 --flow 与 --adhoc 应互斥"
 

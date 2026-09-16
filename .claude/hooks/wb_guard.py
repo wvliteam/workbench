@@ -74,6 +74,11 @@ def mark_session_attributed(root: Path, session_id: str) -> None:
     稳定的 session_id，CLI（Bash 里跑）拿不到，所以标记统一由 hook 落盘。"""
     if not session_id:
         return
+    # 未初始化工作台里没有 flow 概念，闸门本就早退放行 —— 别在空目录里凭空 mkdir 出
+    # .workbench/（纯副作用，且与「repos/ 下冒出自带 .workbench」同类污染 find_root，
+    # 评审四轮 R2）。有 state 文件才落标记。
+    if not state_path(root).is_file():
+        return
     try:
         d = _session_dir(root)
         d.mkdir(parents=True, exist_ok=True)
@@ -112,6 +117,9 @@ def _session_attributed(root: Path, data: dict) -> bool:
     d = _session_dir(root)
     # sessions/ 被占成普通文件（mkdir 失败被 except OSError 吞掉）→ 标记永远写不进，
     # 闸门会无 escape 死锁。按逃生原则 fail-open：宁可少拦一次，不锁死用户。
+    # 说明（评审四轮 R5）：sessions 已进 FROZEN_ALWAYS，把它改成普通文件的三种造法
+    # （rm+touch / rmdir+touch / ln -sf）经工具/Bash 全被冻结拦（exit 2），此分支当前
+    # 从工具面不可达，留作纵深 —— 挡 hook 之外（手工、别的进程）弄坏 sessions/ 的情形。
     if d.exists() and not d.is_dir():
         return True
     return (d / _session_key(sid)).is_file()

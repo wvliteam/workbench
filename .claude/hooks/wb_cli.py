@@ -1066,7 +1066,9 @@ def cmd_flow(args) -> None:
             if not flow_dir(root, args.attr_flow).is_dir():
                 die(f"flow attribute --flow：需求线 {args.attr_flow} 不存在。先 `flow list` "
                     "看实名，或 `flow new <名>` 新建。")
-            st = load_state(root, lock=True)
+            # 审计落到归属的那条线（--flow 服务的正是「指针不在自己这条线」的并行会话），
+            # 不落指针 flow（评审四轮 R4）。
+            st = load_state(root, lock=True, flow=args.attr_flow)
             log(st, "flow_attribute", flow=args.attr_flow)
             save_state(root, st)
             print(f"已按会话归属到需求线 {args.attr_flow}（不移动共享指针 current-flow）。")

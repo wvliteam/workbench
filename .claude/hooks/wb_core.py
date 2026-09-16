@@ -276,7 +276,7 @@ def release_state_lock() -> None:
         fh.close()
 
 
-def load_state(root: Path, lock: bool = False) -> dict:
+def load_state(root: Path, lock: bool = False, flow: str | None = None) -> dict:
     """lock=True 进入「读-改-写」临界区，由 save_state 出锁。**所有会改状态的命令都要 lock=True。**
 
     并行 develop 下每个 subagent 各自跑 wb.py，无锁的读改写会让先落盘的 task done
@@ -284,12 +284,13 @@ def load_state(root: Path, lock: bool = False) -> dict:
     顺手重写的 .workbench/frozen 会一起退回旧版 —— 刚锁的契约的两条防线同时失效。
     锁不能跨门禁命令持有，phase advance 因此先在锁外算门禁再入锁落记录。
 
-    flow 定点：读哪个文件在这里定，写回哪个文件由 st["_flow"] 决定 —— 中途
-    `flow switch` 切了指针也不会把 A flow 的状态写进 B flow 的 state.json
+    flow 定点：默认读指针 flow；显式传 flow 时读那一条（flow attribute --flow 要把
+    审计落到归属的那条线，而不是指针那条）。写回哪个文件由 st["_flow"] 决定 ——
+    中途 `flow switch` 切了指针也不会把 A flow 的状态写进 B flow 的 state.json
     （还持着 A 的锁，连锁都错位）。_flow 以下划线开头，不参与 default_state
     的字段补齐，也不会被 save_state 写进 JSON。
     """
-    flow = read_current_flow(root)
+    flow = flow or read_current_flow(root)
     p = state_path(root, flow)
     if not p.is_file():
         die(f"未初始化工作台（flow={flow}）。先运行："

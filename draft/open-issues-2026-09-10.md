@@ -174,7 +174,7 @@
 
 ---
 
-## P0（新发现，2026-09-12）：角色写入范围层曾被重构删掉，现已恢复 —— 仍有两层未恢复
+## P0（新发现，2026-09-12）：角色写入范围层曾被重构删掉 —— 已恢复，另两层也已恢复（2026-09-16）
 
 **代码事实**：`d606944`（refactor: unify workbench sources and preserve local guard）从 `wb_guard.py` 删掉 536 行、`wb_selfcheck.py` 删掉 770 行，`role_scopes` 从此只被计算与展示，不再参与任何写入判定；selfcheck 当时改成断言这层不存在（`"角色范围不应由 Workflow Guard 拦截"`）。实测复核过：模拟载荷 `agent_type=pm` 写 `server/x.py`，退出码 0。
 
@@ -187,12 +187,12 @@
 - **越根写 / 越根执行**：`_check_write_target` 不再判「目标是否在项目根内」，`_exec_script_targets` / `_check_script_exec`（按位置收严脚本执行）整体移除，`uncertain` 的动态命令也不再对 subagent 一律拒绝。
 - **仓库代码的角色判定**：`pm` 写 `server/x.py`、后端写前端仓库这类不拦（`repo_layout_scopes` 的按仓库认领仍然生成范围表、仍供 `unclaimed_repos` 提示认领，但不再是写入门槛）。
 
-**仍未恢复的两层**（同样被 `d606944` 删掉，需要单独决定）：
+**两层已恢复（`29f9255`，2026-09-16 复核确认）**：
 
-- **skill 白名单**（`allowed_skills`）：角色当前可以调任意 skill。
-- **非主线程工具管控**（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）：角色当前可以自己排任务、派生 worker、对外发布。
+- **skill 白名单**（`allowed_skills`）：`hook_pre_tool` 的 `Skill` 分支已恢复执行点（`load_allowed_skills` + 白名单校验），非主线程调白名单外 skill → exit 2；selfcheck 有正/负例断言。
+- **非主线程工具管控**（`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）：`NON_MAIN_THREAD_DENIED_TOOLS` 分支已恢复，非主线程调这些工具 → exit 2；selfcheck 有断言。
 
-**与文档的冲突面**：`AGENTS.md`「权限守卫」节、`docs/permissions.md`（第四层已按新边界重写；skill 审核门与非主线程工具节标了「待恢复」）、`docs/roles.md` 的角色矩阵（已加边界注）、`docs/architecture.md`「三件事让它成立」表 —— 角色范围那层已与代码一致。
+**处理结果（2026-09-16）**：上述两层的「待恢复」声明已从 `AGENTS.md`（权限守卫节）、`docs/permissions.md`（工具层边界节的状态说明与两处小节标记）清除 —— 那些过期声明会让读者误以为这两层不执法（评审四轮 R3）。`docs/roles.md`、`docs/architecture.md` 的角色范围层此前已与代码一致。
 
 ## 已确认修复、无需再跟踪的项（供交叉核对）
 
@@ -234,3 +234,22 @@
 **将来的正解**：让会话标记记录归属的 flow，并给一条「按会话归属到某条已存在 flow、不移动共享指针」的命令（如 `flow attribute --flow <名>` 或 `flow switch --session-only`）。届时并行会话可诚实归属到 feature-b，闸门读标记里的 flow。属小功能，非本轮范围。
 
 **处理结果（2026-09-16）**：已落地 `flow attribute --flow <已存在需求线>`（`wb_cli.py`）：校验 flow 存在、**不移动共享指针** `current-flow`、与 `--adhoc` 互斥、审计记 `flow_attribute`（honest，非 `flow_attribute_adhoc`）。unlock 仍走既有 hook 落标记路径（`_is_attribution_cmd` 认 `flow attribute`）。并行 WB_FLOW 会话现在有诚实出口，不必再用「不建 flow」的 `--adhoc` 假声明。selfcheck 加断言：不存在需求线报错 / 成功 / 指针不动 / 与 `--adhoc` 互斥。**取舍**：会话标记仍是「存在即已归属」的判定，未把 flow 名写进标记内容——归属的诚实记录落在审计流水（`flow_attribute` 事件带 `flow=`），闸门只需存在性，够用。
+
+---
+
+## 四轮评审（2026-09-16，评审我方修复后的遗留）
+
+### ✅ 已修复
+
+- **R1（测试空转）**：`--flow` 的「指针不动」断言原本恒真（断言前指针已在 feature-b、归属目标也是 feature-b）。改成先 `flow switch main` 再 `flow attribute --flow feature-b`，断言指针仍 `main` —— 变异（顺手 set_current_flow）现在会被断住。
+- **R2（空目录里凭空造 `.workbench/`）**：`mark_session_attributed` 开头加 `if not state_path(root).is_file(): return`。未初始化目录里跑归属命令不再 mkdir 出 `.workbench/sessions/`（闸门本就早退放行，标记是纯副作用，且同类污染 find_root）。
+- **R3（文档说工具层两层守卫「不生效」，实际已生效）**：见上「P0…两层也已恢复」条 —— `AGENTS.md`、`docs/permissions.md` 五处过期声明已清除。
+- **R4（`--flow` 审计落指针 flow）**：`load_state` 加可选 `flow=` 参数；`cmd_flow` 的 `--flow` 分支用 `load_state(root, lock=True, flow=args.attr_flow)`，审计落归属 flow 的 `audit.jsonl`。selfcheck 加断言。
+- **R5（fail-open 分支无断言、不可达）**：`_session_attributed` 的「sessions 被占成普通文件 → 放行」分支加注释说明：sessions 已进 `FROZEN_ALWAYS`，三种把它变普通文件的造法经工具/Bash 全被冻结拦，此分支从工具面不可达，留作纵深（挡 hook 之外弄坏 sessions/ 的情形）。
+- **R6（错误注释）**：selfcheck `cw_link` 断言的注释去掉「本机 /var 非软链」的机器相关断言，改为「不依赖本机 TMPDIR 是否含软链分量，显式造软链复现」。
+
+### 记账（暂不修）
+
+- **R7：挂载点创建/删除被闸门拦**（二轮 §7 延续）。未归属会话下 `ln -s` / `mkdir` / `rm -rf` 到 `repos/.source/**` 均 exit 2（`git clone` 仍 0），拒绝话术说「先别写**产品源码**」对「正在做挂载初始化」的用户误导。需设计决定：要么放行 Bash 路径的挂载形态（区分挂载操作与源码文件写），要么把话术改成「挂载点操作也算归属前置」。挂载通常经 `repos_apply.py` 或在 flow 工作之前完成，非紧迫。
+- **P4：标记按 mtime 30 天回收、不随活动刷新 → 超长会话可能被重锁**。`_prune_session_marks` 按标记文件 mtime 删，而标记只在归属命令时写一次。会话若活过 30 天，其标记会被另一会话的归属触发回收 → 该会话再写产品码被拦（**可自愈**：重跑一次归属即可，非死锁）。真实会话极少活过 30 天；要彻底可在闸门放行时 touch 刷新标记 mtime，但那是每次源码写的额外写，权衡后暂不做。
+- **P4：判定「发起过」而非「成功」**：`_is_attribution_cmd` 在 PreToolUse 落标记，`flow switch <不存在>`（CLI exit 1）仍解锁。已用 `ponytail:` 注释标注上限与升级路径（挪 PostToolUse 只看 exit 0）。

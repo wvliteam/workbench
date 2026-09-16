@@ -129,15 +129,15 @@ wb.py config set role_scopes.backend-developer \
 
 前四层判的都是**写入目标**（在哪写、写什么）；下面三处判的是**工具与执行形态**。
 
-> **2026-09-12 状态说明**：这一节的三条里，只有**受守卫公共脚本的硬拒**当前在本地内核中生效；**非主线程禁用工具**与 **`Skill` 审核门**在 `d606944` 的重构中被移除，尚未恢复（记录在 `draft/open-issues-2026-09-10.md` 的 P0 条目）。**执行脚本按位置收严**是**有意不做**的 —— 见下。
+> **状态说明（2026-09-16 复核）**：这一节三条现在都在本地内核中生效——**受守卫公共脚本的硬拒**一直在；**非主线程禁用工具**与 **`Skill` 审核门**曾在 `d606944` 重构中被删，已于 `29f9255` 恢复并有 selfcheck 断言覆盖。**执行脚本按位置收严**是**有意不做**的 —— 见下。
 
 **受守卫公共脚本**（`_guarded_script_exec`，`GUARDED_SCRIPTS` = `repos_apply.py` / `repos_tui.py`）：非主线程执行即拒。它们的写入目标是 `scripts/`、`repos.json`、`.vscode/`，正是角色只读的那几个前缀，而 `python3 x.py` 这种形态 Bash 解析不出写目标。`python3 .claude/hooks/wb.py ...` 不走这条 —— 它是受控状态接口，子命令由下面的特权层把关。
 
 **执行其它脚本不做管控**（2026-09-12 定调）。曾经按位置收严（项目根内且在该角色写入范围内才放行，`/tmp` 与根外一律拒），现已移除：在 `/tmp` 建测试脚本、跑根外的临时脚本、`python3 -c` 这类动态写入，都是开发过程中的常态动作，一律判定等于把守卫变成流程阻力。**「别乱执行脚本、别乱写文件」属于 harness 层与模型层的规范，不是本工作台的职责** —— 工作台只保证自己的流程（状态、契约、阶段产物、守卫本体、工作区材料）不被写坏。
 
-**非主线程禁用工具**（`NON_MAIN_THREAD_DENIED_TOOLS`：`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`，**待恢复**）。判定在这里，动作却发生在守卫看不见的地方 —— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，第二次拦不住，所以门只能设在「调它」这一步。主线程是编排者，不受限。
+**非主线程禁用工具**（`NON_MAIN_THREAD_DENIED_TOOLS`：`CronCreate` / `ScheduleWakeup` / `Workflow` / `Agent` / `Task` / `SendMessage` / `Artifact` / `DesignSync`）。判定在这里，动作却发生在守卫看不见的地方 —— 排定的 prompt 以主线程身份执行、派生 worker、跨会话传话、对外发布或远端写，第二次拦不住，所以门只能设在「调它」这一步。主线程是编排者，不受限。
 
-**`Skill` 审核门**（`allowed_skills`，**待恢复**）：非主线程调用者只能调白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来。
+**`Skill` 审核门**（`allowed_skills`）：非主线程调用者只能调白名单里的 skill（主线程是审核者，不限）。门设在「调 skill」这一步：会 spawn 子 agent 的 skill 未获批就起不来。
 
 ### 归属首写闸门与 `.workbench/sessions/`
 
