@@ -546,6 +546,45 @@ def cmd_selfcheck(args) -> None:
         assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid,
                       "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
             "本会话归属后主线程产品源码写入应放行"
+        # 回归（评审 §1）：cwd 经软链传入时 root 已 resolve、cwd 未 resolve，坐标系错位
+        # 会让 keep_source_mount 落空、跟随 .source 出根 → 归属闸门 fail-open。本机 /var
+        # 非软链，故造一个指向 tmp 的软链当 cwd 复现；resolve_target 解析基目录后应仍拦。
+        cw_link = tmp.parent / f"{tmp.name}-lnk"
+        cw_link.symlink_to(tmp, target_is_directory=True)
+        assert guard({"tool_name": "Write", "cwd": str(cw_link), "session_id": "sess-symlink-cwd",
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+            "根路径含软链分量时未归属写产品源码应仍被拦（坐标系 fail-open 回归）"
+        cw_link.unlink()
+        # 回归（评审 §2）：纯文本提及归属命令不该解锁；wb 软链名应能解锁。
+        _sid_echo = "sess-echo-mention"
+        guard({"tool_name": "Bash", "cwd": cw, "session_id": _sid_echo,
+               "tool_input": {"command": "echo 'run: wb.py flow new x'"}})
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid_echo,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+            "纯 echo 提及归属命令不应解锁产品源码写入"
+        _sid_wb = "sess-wb-alias"
+        guard({"tool_name": "Bash", "cwd": cw, "session_id": _sid_wb,
+               "tool_input": {"command": "wb flow new some-feature"}})
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": _sid_wb,
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 0, \
+            "wb 软链名的归属命令应能解锁（词法判定认 wb 别名）"
+        # 回归（评审 §5）：flow attribute 与 flow new/switch 同为调度豁免，角色不该跑。
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",
+                      "tool_input": {"command": "python3 wb.py flow attribute --adhoc --reason y"}}) == 2, \
+            "角色 subagent 跑 flow attribute 应被特权层拦下"
+        # 回归（评审 §4）：session_id 含路径穿越不应被当成有效归属标记。
+        assert guard({"tool_name": "Write", "cwd": cw, "session_id": "../flows/main/state.json",
+                      "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+            "穿越形态的 session_id 不应解锁（路径校验回归）"
+        # 回归（评审 §6 / Option B）：WB_FLOW 是 CLI 路由变量，不解锁闸门 —— 守卫工作区级，
+        # 不跟会话钉死的 shell env 走（与下方「hook 路径不该被 WB_FLOW 改道」同一不变量）。
+        os.environ["WB_FLOW"] = "main"
+        try:
+            assert guard({"tool_name": "Write", "cwd": cw, "session_id": "sess-wbflow-noattr",
+                          "tool_input": {"file_path": "repos/.source/project/main.py"}}) == 2, \
+                "WB_FLOW 不应解锁归属闸门（守卫不跟 shell 钉死走）"
+        finally:
+            os.environ.pop("WB_FLOW", None)
         shutil.rmtree(source_root)
         source_link.unlink()
         assert guard({"tool_name": "Write", "cwd": cw,

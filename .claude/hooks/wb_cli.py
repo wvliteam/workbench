@@ -1058,13 +1058,17 @@ def cmd_flow(args) -> None:
                 "要归属到具体需求线用 flow switch / flow new。")
         if not args.reason:
             die("flow attribute --adhoc 需要 --reason '<为什么不建 flow>'")
-        # 解锁本会话产品源码写入的会话标记由 hook 见到本命令时写（那里才有 session_id）。
-        # 这里把豁免理由记进当前 flow 的流水账——让「低风险豁免」成为可审计的显式动作。
+        # 解锁本会话产品源码写入的会话标记由 hook 见到本命令时写（那里才有 session_id）——
+        # CLI 自己拿不到 session_id，落不了标记。这里只做审计记账：把豁免理由记成显式可审计
+        # 动作。pointer_at 只留「声明时指针停在哪」供取证，不用 flow= 以免把「不建 flow」的
+        # 豁免伪装成某条需求线的活动（评审 §3：审计不自相矛盾）。
         st = load_state(root, lock=True)
-        log(st, "flow_attribute_adhoc", flow=pointer_flow(root), reason=args.reason)
+        log(st, "flow_attribute_adhoc", pointer_at=pointer_flow(root), reason=args.reason)
         save_state(root, st)
-        print(f"已登记本会话为 ad-hoc 归属（不建 flow）：{args.reason}")
-        print("低风险单次改动可继续；跨仓 / 改线上行为 / 存疑的改动请改用 flow switch / new。")
+        print(f"已记账 ad-hoc 归属（不建 flow）：{args.reason}")
+        print("解锁在 AI 经会话内工具执行本命令时由 hook 落标记生效；在终端手动直跑只记账、"
+              "不解锁（也无 AI 会话可解锁）。低风险单次改动可继续；跨仓 / 改线上行为 / "
+              "存疑的改动请改用 flow switch / flow new。")
         return
     if args.action == "remove":
         flow = args.name

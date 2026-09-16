@@ -24,7 +24,7 @@ from wb_bash import (
     guarded_prefixes, keep_source_mount, resolve, strip_heredocs,
 )
 from wb_core import (
-    _FLOW_NAME, all_flows, attribution_flow, close_unlock, contract_drift, die,
+    all_flows, attribution_flow, close_unlock, contract_drift, die,
     find_contract, find_root, load_state, load_state_of, log, now, pointer_flow,
     read_disputes, read_frozen, read_unlocks, ready_tasks, save_state,
     set_flow_override, state_path, task_contract_errors, wb_dir,
@@ -48,7 +48,12 @@ def hook_deny(reason: str) -> "None":
 # `wb.py flow switch/new`、`flow attribute --adhoc`（记账豁免）或钉死 WB_FLOW
 # 明确表态。判据只对主线程生效（subagent 归任务绑定管），且以会话级 session_id
 # 隔离——与跨终端并行的 WB_FLOW 机制正交，互不影响。
-_ATTR_FLOW_CMD = re.compile(r"\bwb\.py\s+flow\s+(?:switch|new|attribute)\b")
+# 归属命令的 action（配合 _is_attribution_cmd 的词法判定，替代早期裸正则）。
+_ATTR_ACTIONS = frozenset({"switch", "new", "attribute"})
+# 会话 id 当作 sessions/ 下的文件名落盘，先过白名单防路径穿越（评审 §4）：只允许
+# 字母数字与 . _ -，且不以点/斜杠开头 —— `../flows/main/state.json`、`a/b` 都不匹配。
+# 不复用 _FLOW_NAME（仅小写）：真实 session_id 可能含大写，误拒会让归属无法解锁。
+_SESSION_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 def _session_dir(root: Path) -> Path:
@@ -58,7 +63,7 @@ def _session_dir(root: Path) -> Path:
 def mark_session_attributed(root: Path, session_id: str) -> None:
     """记下「本会话已做过一次 flow 归属决定」。由 hook 写：只有 hook 载荷里才有
     稳定的 session_id，CLI（Bash 里跑）拿不到，所以标记统一由 hook 落盘。"""
-    if not session_id:
+    if not session_id or not _SESSION_ID.fullmatch(session_id):
         return
     try:
         d = _session_dir(root)
@@ -69,12 +74,15 @@ def mark_session_attributed(root: Path, session_id: str) -> None:
 
 
 def _session_attributed(root: Path, data: dict) -> bool:
-    # WB_FLOW 显式钉死 = 已归属（跨终端并行走这条，与本闸门正交）。
-    v = os.environ.get("WB_FLOW")
-    if v and _FLOW_NAME.fullmatch(v):
-        return True
+    # 只认会话内显式归属标记（flow switch/new/attribute 经 hook 落盘）。WB_FLOW 是
+    # shell 级常驻的 CLI 路由变量，不作数：它证明不了「本会话刚做过决定」，残留的旧
+    # WB_FLOW 正是闸门要拦的陈旧归属；且守卫本就工作区级（cmd_hook 已 set_flow_override
+    # (None)，selfcheck「hook 路径不该被 WB_FLOW 改道」同此不变量）。并行会话即便钉了
+    # WB_FLOW，本会话仍需跑一次 flow switch/new/attribute 确认归属（每会话一次，非阻塞）。
     sid = data.get("session_id")
-    return bool(sid) and (_session_dir(root) / sid).is_file()
+    if not sid or not _SESSION_ID.fullmatch(sid):
+        return False
+    return (_session_dir(root) / sid).is_file()
 
 
 def _attribution_gate(root: Path, rel: str, data: dict) -> None:
@@ -100,13 +108,23 @@ def _attribution_gate(root: Path, rel: str, data: dict) -> None:
         f"  · 复用已有：wb.py flow switch <名>\n"
         f"  · 新需求：wb.py flow new <语义名>\n"
         f"  · 低风险单次改动（记账豁免）：wb.py flow attribute --adhoc --reason '<为什么不建 flow>'\n"
-        f"（并行会话用启动级 WB_FLOW=<名> 亦可。归属只需本会话做一次。）"
+        f"（已 export WB_FLOW=<名> 的并行会话，本会话仍需跑一次上面任一命令确认归属；"
+        f"WB_FLOW 只钉 CLI 路由、不解锁守卫。归属只需本会话做一次。）"
     )
 
 
 def resolve_target(cwd: Path, raw: str, root: Path | None = None) -> Path:
     p = Path(raw)
     if not p.is_absolute():
+        # 基目录先解析到与 root（find_root 恒 .resolve）同坐标系再判挂载：Write/Edit
+        # 载荷里的 cwd 可能带软链分量（macOS /var → /private/var，或整目录分发到含
+        # 软链的布局），不解析则 keep_source_mount 的 relative_to 与反查表在两套坐标系
+        # 下全落空 → 跟随 repos/.source 出根 → 归属闸门 fail-open（评审 §1）。cwd 不含
+        # 挂载软链本身，解析它安全；raw 保持词法拼接，尾部 repos/.source/** 不被跟随。
+        try:
+            cwd = cwd.resolve()
+        except OSError:
+            pass
         p = cwd / p
     if root is not None:
         m = keep_source_mount(root, p)
@@ -571,6 +589,7 @@ PRIVILEGED_WB = {
     ("flow", "new"): "需求线是编排者的调度决定，角色在当前 flow 里干活",
     ("flow", "switch"): "切 flow 会让后续状态命令落到另一条流水线",
     ("flow", "remove"): "删除的是整条流水线的状态与产物",
+    ("flow", "attribute"): "它声明本会话不建 flow 直接改产品源码，是调度层的豁免决定",
 }
 
 
@@ -587,6 +606,25 @@ def _wb_invocations(cmd: str) -> list[list[str]]:
                 calls.append(tokens[i + 1:])
                 break
     return calls
+
+
+def _is_attribution_cmd(cmd: str) -> bool:
+    """本会话是否真的执行了 wb.py flow switch/new/attribute（词法判定，非文本提及）。
+
+    早期用裸正则 `\\bwb\\.py\\s+flow\\s+(switch|new|attribute)\\b`.search(cmd)，把
+    `echo 'wb.py flow new x'`、`grep -rn 'wb.py flow new' docs/` 这类纯提及也当成
+    归属而解锁产品源码写入，还认不出 `wb` 软链名（评审 §2）。改走与 _is_task_start
+    同一套词法：_wb_invocations 已按段 shlex 分词、认 wb.py / wb 两种名，并剥掉 flag。
+
+    ponytail: 仍在 PreToolUse 落标记，只证明「发起过」不证明「成功」——CLI 失败
+    （如 flow switch <不存在的名>）仍会解锁。要收严就把落标记挪到 PostToolUse 只认
+    exit 0（评审 §2 的「更彻底做法」），需要 PostToolUse 载荷稳定给出退出码。
+    """
+    for args in _wb_invocations(cmd):
+        pos = [a for a in args if not a.startswith("-")]
+        if len(pos) >= 2 and pos[0] == "flow" and pos[1] in _ATTR_ACTIONS:
+            return True
+    return False
 
 
 def _flag_value(args: list[str], flag: str) -> str:
@@ -786,7 +824,7 @@ def hook_pre_tool(data: dict) -> None:
 
         # 本会话跑了 flow 归属命令（switch/new/attribute）→ 记下会话已表态，
         # 解锁后续产品源码写入。hook 手里才有稳定 session_id，标记只能这里落。
-        if _ATTR_FLOW_CMD.search(cmd):
+        if _is_attribution_cmd(cmd):
             mark_session_attributed(root, data.get("session_id", ""))
 
         # --- 灾难命令与敏感读取：扫剥壳后的命令 ---
