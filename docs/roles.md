@@ -157,7 +157,7 @@ wb.py config set role_scopes.backend-developer \
     '["server/**","internal/**","migrations/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
-单体项目里 `frontend-developer` 与 `backend-developer` 的默认范围都含 `src/**`，实际上不隔离。按真实目录改掉。跨仓库工作区的默认范围会歪成按语言隔离，必须改成按仓库前缀 —— 原因见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
+单体项目里 `frontend-developer` 与 `backend-developer` 的默认范围都含 `src/**`，实际上不隔离。按真实目录改掉。跨仓库工作区的默认范围会歪成按语言隔离，必须改成按仓库前缀 —— 原因见 [architecture.md](architecture.md#多仓库工作区的两处必调不调是静默出错)。
 
 改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/*/develop/tasks/**"`, `".workbench/artifacts/*/verify/**"`）。
 

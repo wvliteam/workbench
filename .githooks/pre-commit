@@ -8,7 +8,7 @@
 set -e
 
 changed=$(git diff --cached --name-only --diff-filter=ACM)
-if printf '%s\n' "$changed" | grep -qE '^(\.claude/hooks/|\.claude/agents/|\.claude/skills/|\.claude/settings\.json|\.agents/|\.codex/|agents/)'; then
+if printf '%s\n' "$changed" | grep -qE '^(\.claude/hooks/|\.claude/agents/|\.claude/skills/|\.claude/settings\.json|\.agents/|\.codex/|agents/|scripts/|docs/|references/|knowledge/|AGENTS\.md)'; then
     echo "pre-commit：分发内容有改动，跑 selfcheck…"
     log=$(mktemp)
     if ! python3 .claude/hooks/wb.py selfcheck >"$log" 2>&1; then

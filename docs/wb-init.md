@@ -12,7 +12,7 @@
 2. **自动生成 VS Code workspace 文件**：多根 `.code-workspace`（根 + 全部仓库）与 `.vscode/settings.json` 的 git 发现配置，VS Code 打开一个文件就能同时看到所有仓库。
 3. **兼容 Claude、Codex 与其他通用 agents**：SKILL.md 单一正文（软链到各端），执行脚本全端共用一份；SKILL.md 本身不引用任何一家独有的工具机制。
 
-明确不做：依赖安装与环境验证（那是各仓库开发阶段的事，走 `/wb-flow`）；仓库知识沉淀（ROMA 的 overview/setup/test 三件套，对单人工作台是纯开销，与 [roma-comparison.md](../draft/roma-comparison.md)「明确不抄的」同一判据）。
+明确不做：依赖安装与环境验证（那是各仓库开发阶段的事，走 `/wb-flow`）。（仓库画像 overview/setup/test 三件套已于 2026-09-14 纳入：由 `init` / `flow new` 建画像任务、`analyst` 在 analyze 阶段写，见下方决策表「单仓画像」行与演进记录。）
 
 ## 参照物：ROMA 的这个能力在哪
 
@@ -34,7 +34,7 @@
 | 决策 | 选择 | 为什么 / 代价 |
 | --- | --- | --- |
 | 清单位置 | 工作区根 `repos.json`，进 git | 清单是团队共识不是本机状态；ROMA 的 `.repo-list` 同样进 git，它的 `init-selection.json`（用户选择）才不进。代价：仓库地址公开在仓库里，私有 fork 地址不适合入清单 |
-| clone 落点 | `repos/<name>` | 外层唯一布局的既有约定，不引入 ROMA 的 `repos/.source/` 第二层 —— 内核的 `repo_layout_scopes`（`wb_core`）/ `nested_roots`（`wb_guard`）都按 `repos/*` 认 |
+| clone 落点 | `repos/.source/<项目>/<仓库>` | 2026-09-14 起两级布局（源码挂载点与画像分树，前后端边界落在项目一级）；内核 `repo_layout_scopes`（`wb_core`）按 `repos/.source/*` 认、`nested_roots`（`wb_guard`）按 `repos/*` 认 |
 | workspace 文件落点 | `.workbench/<工作区名>.code-workspace` | 对应 ROMA 的 `.roma/`：folders 用绝对路径，所以必须放 gitignore 里（`.workbench/` 已忽略），每台机器自理。绝对路径换机器失效的解药就是「始终刷新」—— 重跑一次脚本即修复 |
 | settings 合并策略 | `git.scanRepositories` 只管理 `repos/` 前缀（按磁盘重写），前缀外的用户条目原样保留；`git.autoRepositoryDetection` / `git.repositoryScanMaxDepth` 直接更新；无效 JSON 不覆盖只告警 | 照抄 check-health 的 `_init_ide_settings`。代价：用户手写的 `repos/xxx` 条目若目录不存在会被清掉 —— 这是「磁盘为准」的延伸，不是缺陷 |
 | 脚本归属 | 根级 `scripts/`（`repos_apply.py` / `repos_tui.py`），不进 `wb.py`，也不进 `.claude/skills/wb-init/scripts/` | clone 和 IDE 配置不是流程状态，`wb.py` 是状态内核；`scripts/` 与 `repos.json` 是工作区级公共资产，进守卫前缀、角色写不到（见 [permissions.md](permissions.md#第四层角色写入范围)），主线程直做 |
@@ -48,7 +48,7 @@
 | 单仓画像 | `repos/<项目>/<仓库>/{overview,setup,test}.md` **三件套**（一件一个文件），作者 `analyst`；未建、空文件被点名 | 这是 ROMA 三件套（overview / setup / test）的落地形态：`current-state.md` 是**本次需求**的现状（按 flow 隔离、过门禁即冻结、跟着需求归档），画像是**跟仓库走**的稳定事实（怎么跑、怎么测、坑在哪）。拆成三件而不是一份文件的三节，是因为画像是长文（`map-motel` 那份 overview 就上百行），单文件三节会让校验只能按节名粗判；**不逐条查「待补充」**——局部未取证是合规写法，逐条点名只会把警告刷成噪音 |
 | 画像任务独立派 | `init` / `flow new` 为每个还没有笔记的仓库建一个 `仓库画像：<仓库>` 任务（analyst / analyze / `write-scopes` 指向那份笔记），提示编排者**初始化后先派完**；analyze 门禁 `repos_notes_exist` 兜底 | 不能并进需求的 analyze：那个任务的边界是「实现 requirements 要动哪些地方」，取证跟着需求走，一整仓的画像（模块划分、启动方式、测试入口）不会被顺带产出 —— 把画像绑在需求上，等于画像的覆盖范围由需求决定，而需求只碰仓库的一角。任务化还带来并行、`write_scopes` 隔离与完成度记账 |
 
-清单格式：`{"repos":[{"name":"foo","remote":"git@…","link":"/path/to/local","branch":"dev"}]}`，`remote` 与 `link` 二选一，交互式编辑用 `python3 scripts/repos_tui.py`。
+清单格式：`{"repos":[{"name":"foo","project":"bddev","remote":"git@…","link":"/path/to/local","branch":"dev"}]}`，`remote` 与 `link` 二选一，`project` 可省（由 `remote` 推导，推不出则报错退出），交互式编辑用 `python3 scripts/repos_tui.py`。
 
 ## 测试（临时工作区 + 本地 fixture 仓库实跑）
 

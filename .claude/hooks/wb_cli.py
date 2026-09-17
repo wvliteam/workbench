@@ -49,9 +49,11 @@ def cmd_init(args) -> None:
     fd.mkdir(parents=True, exist_ok=True)
     for sub in ("contracts", "artifacts"):
         (wb_dir(root) / sub).mkdir(parents=True, exist_ok=True)
-    set_current_flow(root, flow)
+    # 存在性检查必须在 set_current_flow 之前：current-flow 是全工作区共享指针，
+    # 一次忘带 --force 的失败 init 若已改道，会让其他会话的 status/task 全落到这条线上。
     if state_path(root, flow).is_file() and not args.force:
         die(f"flow {flow} 已存在 state.json，如需重建请加 --force")
+    set_current_flow(root, flow)
     # --force 是「重开这条线」，上一代需求的产物必须一起清：任务号从 T1 重编，
     # develop/tasks/ 下的执行记录会与上一代同名（wb-flow 要求接续时先读它），
     # 阶段产物还要求存在且非空 —— 留着就是让新需求踩着旧需求的验收标准往下走。

@@ -12,9 +12,10 @@
 │   ├── wb_const.py            常量表：门禁规则 / 角色范围 / 守卫前缀（零依赖）
 │   ├── wb_bash.py             命令行静态解析（纯函数）
 │   ├── wb_core.py             状态 / flow / 锁 / 冻结 / 契约 / 门禁 / 调度
-│   ├── wb_guard.py            权限守卫与 4 个 hook 事件
+│   ├── wb_guard.py            权限守卫与 5 个 hook 事件
 │   ├── wb_cli.py              CLI 命令、参数解析与 main()
-│   └── wb_selfcheck.py        自检（wb.py selfcheck）
+│   ├── wb_selfcheck.py        自检（wb.py selfcheck）
+│   └── wb_selfcheck_static.py 静态布局校验（被 selfcheck 调用）
 ├── agents/                 8 个角色 subagent
 │   ├── pm.md                   需求澄清
 │   ├── analyst.md              现状分析（只读）
@@ -47,6 +48,8 @@ knowledge/                跨 flow 的长期经验库（按知识类别分目录
 ├── contracts/                  接口定义文件
 ├── artifacts/<flow>/<阶段>/    各阶段产物（按阶段隔离写入权限）
 ├── artifacts.jsonl             改动流水账（PostToolUse 追加，task done 归并）
+├── task-agents.jsonl           任务↔agent 绑定记录（守卫写、CLI 读）
+├── sessions/                   flow 归属的会话标记（在 FROZEN_ALWAYS，按 mtime 回收旧标记）
 └── role                        当前角色锁（守卫兜底用，subagent 优先按 hook 载荷判定）
 ```
 
@@ -68,7 +71,7 @@ python3 .claude/hooks/wb.py init --name my-project
 python3 .claude/hooks/wb.py init --name <需求名>
 ```
 
-上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","remote":"git@…","description":"一句话职责"}]}`），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
+上面的 clone 与 VS Code 多根工作区可以按清单一条命令完成：把仓库写进工作区根的 `repos.json`（`{"repos":[{"name":"foo","project":"bddev","remote":"git@…","description":"一句话职责"}]}`，`project` 可省、由 `remote` 推导），跑 `python3 scripts/repos_apply.py --root .` —— 幂等，已存在的 checkout 不覆盖，clone 失败显式报错。交互式编辑清单用 `python3 scripts/repos_tui.py`。清单格式与细节见 `.claude/skills/wb-init/SKILL.md`。
 
 仓库分工两个来源分开：**谁写**从 `role_scopes` 现算（`status` 给分工图，认不出的标 `⚠未认领`；认领单元是**项目**）；**干什么**写进 `repos/index.md`，**怎么跑、怎么测、坑在哪**写进 `repos/<项目>/<仓库>/` 的画像三件套（`overview` / `setup` / `test`，`analyst` 维护）—— 索引与画像都进 git，`status` 与 `role scopes` 每次点名缺失（缺行、死链、画像未建或空文件），校验只报不改。格式与取舍见 [CLAUDE.md](CLAUDE.md#仓库分工谁写干什么)。
 
@@ -150,7 +153,7 @@ python3 .claude/hooks/wb.py config set max_parallel 5
 3. 角色跑特权 wb.py 子命令（`phase set`、`phase advance --force`、`init --force`、`init --root`、`role set|clear`、`role scopes --reset`、`task skip`、`contract unlock|bump|consumers`、`config set`、`flow new/switch/remove` 等）
 4. 危险命令（`rm -rf /`、force push、`DROP TABLE`、`curl | sh`、`mkfs`、写块设备）+ 提示级警告（`git reset --hard`、`git clean -fd`、`git checkout --`、`npm publish`）
 5. 敏感路径读取 —— `.env`、`*.pem`、`*.key`、`id_rsa*`、`secrets/**`，Read 工具与 shell 的 `cat` 两类调用都拦
-6. 未审核的 skill 调用与非主线程工具管控 —— **当前不生效（待恢复）**，见 AGENTS.md「权限守卫」
+6. 未审核的 skill 调用与非主线程工具管控 —— **已于 `29f9255` 恢复并有 selfcheck 断言覆盖**，见 AGENTS.md「权限守卫」
 
 第 1 条**同时覆盖 Bash 与 Monitor 路径**：`>` `>>` `tee` `sed -i` `perl -i` `truncate` `patch` `dd` `shred` `python3 -c` `node -e` `ln -sf` `cp` `mv` `install` 提到冻结路径时一并拒绝。只做 Write/Edit 检查等于没做 —— 一行 shell 就能绕过全部。
 

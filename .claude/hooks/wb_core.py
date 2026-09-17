@@ -771,12 +771,6 @@ def task_binding_for_name(root: Path, st: dict, name: str) -> dict:
     return binding
 
 
-def validate_task_contracts(root: Path, st: dict, t: dict, action: str) -> None:
-    errors = task_contract_errors(root, st, t)
-    if errors:
-        die(f"任务 {t['id']} {action} 被拒：" + "; ".join(errors))
-
-
 def task_dependency_errors(st: dict, t: dict) -> list[str]:
     """返回任务尚未满足的依赖。
 
@@ -1189,9 +1183,11 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
             if skip_flags:
                 return False, label, f"`{cmd}` 含跳过测试标志（{skip_flags.group()}），记 unverified{body}"
             # 2. 日志匹配零用例执行
+            # (?<![\d.]) 左边界：否则 "10 passed"/"100 tests" 里的子串 "0 passed"/
+            # "0 tests" 会误命中，把用例数末尾是 0 的正常绿灯判成 unverified。
             zero_tests = re.search(
-                r"0\s+(tests?|passed|specs?)|No\s+tests?\s+ran|"
-                r"collected\s+0\s+items|0\s+selected\s+0\s+collected",
+                r"(?<![\d.])0\s+(?:tests?|passed|specs?)|No\s+tests?\s+ran|"
+                r"collected\s+0\s+items|(?<![\d.])0\s+selected\s+0\s+collected",
                 out_combined, re.IGNORECASE)
             if zero_tests:
                 return False, label, f"`{cmd}` 退出码 0 但零用例执行，记 unverified{body}"

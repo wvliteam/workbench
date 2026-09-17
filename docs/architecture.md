@@ -36,9 +36,10 @@
 | `wb_const` | 常量表：`GATES` / `DEFAULT_ROLE_SCOPES` / `GUARDED_PREFIXES` 等 | 无 |
 | `wb_bash` | 命令行静态解析（纯函数） | `wb_const` |
 | `wb_core` | 状态 / flow / 锁 / 冻结 / 契约 / 门禁 / 调度 | `wb_const` `wb_bash` |
-| `wb_guard` | 权限守卫与 4 个 hook 事件 | 上面全部 |
+| `wb_guard` | 权限守卫与 5 个 hook 事件 | 上面全部 |
 | `wb_cli` | CLI 命令、参数解析与 `main()`（`wb_selfcheck` 惰性加载） | 上面全部 |
 | `wb_selfcheck` | 自检 | 上面全部 |
+| `wb_selfcheck_static` | 静态布局校验（软链存在性 / 角色 TOML 可解析等，被 `wb_selfcheck` 调用） | 无（仅 stdlib） |
 
 **唯一入口这条约束没有变**：守卫按命令行里的 `wb.py` / `wb` 识别 wb 调用（`_wb_invocations`），所以子模块一律不提供 `__main__` —— 直接执行它们等于绕过特权子命令层。
 
@@ -63,6 +64,8 @@
 `frozen` 是**纯派生数据**，唯一权威在 state 的 `contracts`。所以它缺失或为空时 `read_frozen()` 从 state 现算（聚合全部 flow），而不是退化成默认值 —— 派生缓存缺失必须能重建，否则升级路径上会出现静默的能力丢失（老项目没有这个文件，契约的 Bash 防线整条消失且不报错）。「为空」一并当作不可信：`FROZEN_ALWAYS` 恒在，合法的清单不可能为空。
 
 这些文件自己也在冻结清单里（`FROZEN_ALWAYS` 与 `.workbench/flows/`，`audit.jsonl` 也在前一份里），任何工具调用都写不了它们，每一条对应一层机制的地基（见 [permissions.md](permissions.md#第二层冻结清单)）。`wb.py` 自己写它们不受影响：守卫只拦工具调用。
+
+除上表外还有两份工作区级运行时记录：`.workbench/task-agents.jsonl`（任务↔agent 绑定，守卫 `hook_post_tool` 写、`cmd_task` 读）与 `.workbench/sessions/`（flow 归属的会话标记，`mark_session_attributed` 写、按 mtime 回收 30 天前旧标记，在 `FROZEN_ALWAYS` 里）。
 
 ### state.json 结构
 
@@ -169,6 +172,8 @@ workbench/
 **新 flow 从 main 深拷贝继承四个工作区级配置键**：`role_scopes` / `gate_commands` / `gate_timeout` / `max_parallel`（`INHERIT_KEYS`）。它们描述「这个工作区怎么干活」，不继承的话每条 flow 都要重抄一遍 —— 漏抄一个仓库认领会让指针切换后的角色范围判定整个换掉。任务、契约与阶段进度**不继承**：那是每条需求线自己的东西。
 
 ### 多仓库工作区的两处必调（不调是静默出错）
+
+> **布局说明**：源码挂载自 2026-09-14 起为两级 `repos/.source/<项目>/<仓库>`（前后端边界落在项目一级，如 `repos/.source/bddev/`、`repos/.source/map-hotel-fe/`）。本节下方的 `repos/backend/**`、`repos/frontend/**` 是为讲清 fnmatch 跨 `/` 问题的**单级简写**，真实前缀是 `repos/.source/<项目>/`；`repo_layout_scopes()` 按 `repos/.source/*` 生成范围。
 
 外层一份状态意味着项目根 = 整个工作区，一份契约一条流水线，前后端对着同一份锁定契约并行开发 —— 这正是收敛到唯一布局的收益。代价是两处配置必须跟着改，而且**改错是静默的**：
 

@@ -33,7 +33,7 @@ if rel in frozen or any(rel.startswith(f + "/") for f in frozen):   # unlock/ �
         hook_deny(...)
 ```
 
-冻结清单 = 状态文件（`FROZEN_ALWAYS` 六项：`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl`，含 `.workbench/flows/` 整棵）+ **所有已锁定的契约（全部 flow）**。状态文件不可写是整套机制的地基：
+冻结清单 = 状态文件（`FROZEN_ALWAYS` 七项：`state.json` / `role` / `frozen` / `unlock` / `artifacts.jsonl` / `audit.jsonl` / `sessions`，含 `.workbench/flows/` 整棵）+ **所有已锁定的契约（全部 flow）**。状态文件不可写是整套机制的地基：
 
 - 能写 `state.json` → 能把 `gates` 全标成 `passed: true`，或改契约的 `sha` → 门禁与契约冻结一起作废。
 - 能写 `role` → 能给自己换个权限大的角色 → 角色隔离作废。
@@ -66,7 +66,7 @@ def unlocked_paths(root):
 | 性质 | 为什么 |
 | --- | --- |
 | 一份窗口只对一份契约生效，但多份可以并存 | 解冻 `user-api` 不会顺带放开 `design-doc`，范围最小；而 `bump` 一份产物契约会给每个消费方各建同步任务，它们并行申报是常态，不是边界情况。分片键是契约不是 agent —— 按 agent 分片会把「两个 agent 同时改一份契约」变成合法操作，正好放开唯一真该拦的那种（[architecture.md](architecture.md#解冻窗口按契约分片曾是单文件记录一次纠错)） |
-| 状态文件永不可解冻 | `unlocked_paths()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那六项查不到 |
+| 状态文件永不可解冻 | `unlocked_paths()` 只查 `contracts` 列表，`FROZEN_ALWAYS` 里那七项查不到 |
 | 理由必填，且先于改动 | 事后补的理由都是给已发生的事找解释。`contract unlock` 不给 `--reason` 直接拒绝 |
 
 `contract bump` / `contract lock` 只关自己那一份，不会收掉兄弟 agent 的窗口。`SubagentStop` 关全部，但只在没有任务处于 doing 时才关，否则先结束的 subagent 会把仍在跑的兄弟的窗口一起收掉。串行下这条兜住「一个 subagent 申报的窗口敞着让下一个用」；并行下要靠 `bump` / `lock` 自己关。
@@ -109,7 +109,7 @@ if not any(fnmatch.fnmatch(rel, g) for g in globs):
 
 角色取不到时**不做角色限制** —— 主线程如此，`agent_type` 不是角色名的内置 agent（`Explore` / `general-purpose` / `Plan`）在 `.workbench/role` 也缺失时同样如此。前三层仍生效，而阶段产物过门禁后是冻结契约（第二层），所以「无角色 = 无约束」不再意味着上游产物可以被随手重写。
 
-**最后两个前缀是知识与规范资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#retro-经验已沉淀knowledge_written)）；`references/` 的公共操作规范（输出信封等）对角色只读，`references/workspace/<role>/` 则是角色私有知识，只允许对应角色修改。主线程可维护全部内容。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
+**最后两个前缀是知识与规范资产，不是守卫本体。** `knowledge/` 是知识库（写权限专属 `knowledger` 角色，见 [gates.md](gates.md#六个阶段的门禁)）；`references/` 的公共操作规范（输出信封等）对角色只读，`references/workspace/<role>/` 则是角色私有知识，只允许对应角色修改。主线程可维护全部内容。设计依据见 [references-extraction.md](../draft/references-extraction.md)。
 
 各角色的默认范围见 [roles.md](roles.md#角色矩阵)。这里只记它的形状：**产物目录按阶段隔离**，不是给所有角色一个 `.workbench/artifacts/**`。这是第二层之外的纵深 —— 契约冻结挡「已定稿的东西被改」，阶段隔离挡「下游角色去改上游产物」，包括还没定稿的当前阶段产物。两者独立互补：`qa` 改 `design.md` 会被两层各自拦一次；阶段隔离只在守卫能判出角色时生效，冻结不依赖角色。
 
@@ -123,7 +123,7 @@ wb.py config set role_scopes.backend-developer \
     '["server/**","migrations/**","internal/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
-**跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#跨仓库同一个语义的反面)。
+**跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#多仓库工作区的两处必调不调是静默出错)。
 
 ### 工具层边界：非主线程禁用工具与脚本执行
 
@@ -171,7 +171,7 @@ wb.py config set role_scopes.backend-developer \
 | --- | --- | --- |
 | 这份契约的 owner，或主线程（载荷无 `agent_type`） | 完整的 `contract unlock --name <实名> --reason` 与 `contract bump` | —— |
 | 非 owner 的角色 | owner 是谁 + 报回编排者 + `task block <ID>` | 教它自己申报是错的：`bump` 会给每个消费方建返工任务，那是编排者的调度决定；而 `SubagentStop` 会在它结束时关掉悬挂窗口，留下一个改过但没定版的文件，下次 `contract verify` 报漂移 |
-| `FROZEN_ALWAYS` 里那六项（不是契约） | 「只能用 wb.py 子命令改」 | 给 `contract unlock` 会让读的人去申报一个不存在的契约名 |
+| `FROZEN_ALWAYS` 里那七项（不是契约） | 「只能用 wb.py 子命令改」 | 给 `contract unlock` 会让读的人去申报一个不存在的契约名 |
 
 这段判断放在守卫里而不是抄进三个 agent 定义：一处代码覆盖七个角色、主线程，以及以后新增的任何契约。
 

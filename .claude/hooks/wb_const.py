@@ -217,7 +217,7 @@ REPO_HINTS = {
     "frontend-developer": ("map-hotel-fe",),
     "backend-developer": ("bddev", "map-aiad", "map-cjh-hotel",
                           "map-living-services", "mapclient", "mapsearch",
-                          "mapx", "skills"),
+                          "mapx"),
 }
 
 # 产物流水账。post-tool 只往这里追加，由 task done 归并进任务的 artifacts ——

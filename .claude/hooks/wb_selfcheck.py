@@ -76,6 +76,18 @@ def cmd_selfcheck(args) -> None:
     # 见 knowledge/troubleshooting/codex-agent-toml-quote-escapes.md）。手工写
     # toml 后靠「记得跑 tomllib.load」不是机制 —— 把这一步固化成断言。
     check_static_layout(real_root)
+    # P1-2：knowledge 路由链接（knowledge_check）与角色 .md/.toml 同步（generate_agents
+    # --check）此前各自「靠人记得跑」（knowledge/README.md、AGENTS.md 的口头约定），
+    # 漂了不报错。固化成断言：脚本存在就跑，非零即自检失败。
+    for _script, _sargs in (("scripts/knowledge_check.py", []),
+                            ("scripts/generate_agents.py", ["--check"])):
+        _sp = real_root / _script
+        if not _sp.is_file():
+            continue
+        _sr = subprocess.run([sys.executable, str(_sp), *_sargs],
+                             cwd=real_root, capture_output=True, text=True)
+        assert _sr.returncode == 0, \
+            f"{_script} {' '.join(_sargs)} 未通过：{_sr.stdout}{_sr.stderr}"
     try:
         os.chdir(tmp)
 
@@ -443,6 +455,17 @@ def cmd_selfcheck(args) -> None:
         ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
         assert not ok and "超时" in detail, detail
         quiet("config", "set", "gate_timeout", "1800")
+        quiet("config", "set", "gate_commands.test", "exit 0")
+
+        # P0-1：零用例正则加了 (?<![\d.]) 左边界。"10 passed" 里的子串 "0 passed"
+        # 不能再误命中 —— 否则用例数末尾是 0 的正常绿灯全被判 unverified（≈FAIL）。
+        quiet("config", "set", "gate_commands.test", "echo 'Tests: 10 passed, 10 total'")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert ok, f"P0-1：10 passed 应判通过而非零用例：{detail}"
+        # 但真零用例仍要拦住（改的那条 alternative 的另一方向）。
+        quiet("config", "set", "gate_commands.test", "echo '0 passed'")
+        ok, _, detail = run_check(tmp, load_state(tmp), "verify", "cmd:test")
+        assert not ok and "零用例" in detail, f"P0-1：真零用例应记 unverified：{detail}"
         quiet("config", "set", "gate_commands.test", "exit 0")
 
         # Workflow Guard
@@ -1947,6 +1970,14 @@ def cmd_selfcheck(args) -> None:
             "flow attribute --flow 的审计应落在归属 flow 的 audit.jsonl（R4）"
         code, _ = quiet("flow", "attribute", "--flow", "feature-b", "--adhoc", "--reason", "x")
         assert code != 0, "flow attribute 的 --flow 与 --adhoc 应互斥"
+
+        # P0-2：失败的 init（flow 已存在、没带 --force）不能顺手改动共享指针。
+        # 存在性检查现在在 set_current_flow 之前；指针此刻停在 main。
+        assert _ptr_f.read_text().strip() == "main", "P0-2 前置：指针应在 main"
+        code, out = quiet("init", "--flow", "feature-b", "--name", "x")
+        assert code != 0, f"P0-2：init 已存在 flow 无 --force 应失败：{out}"
+        assert _ptr_f.read_text().strip() == "main", \
+            f"P0-2：失败的 init 不应把共享指针改道到 feature-b：{_ptr_f.read_text().strip()}"
 
         # --- 跨 flow 回归 3：WB_FLOW 钉 CLI，不钉 hook ---
         # 指针是全部会话共享的一份文件，两个终端并行推两条 flow 时状态命令会被
