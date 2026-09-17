@@ -27,9 +27,10 @@ from wb_bash import (
 )
 from wb_core import (
     all_flows, attribution_flow, close_unlock, contract_drift, die,
-    find_contract, find_root, load_state, load_state_of, log, now, pointer_flow,
+    find_contract, find_root, kept_for_bump_paths, load_state, load_state_of,
+    log, now, pointer_flow,
     read_disputes, read_frozen, read_unlocks, ready_tasks, save_state,
-    set_flow_override, state_path, task_contract_errors, wb_dir,
+    set_flow_override, sha256_file, state_path, task_contract_errors, wb_dir,
 )
 
 
@@ -547,7 +548,16 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
         # flow 布局下 state.json 因此整类漏拦。归一化成无尾斜杠再比。
         dirs = {f.rstrip("/") for f in frozen}
         if fro_rel in frozen or any(fro_rel.startswith(d + "/") for d in dirs):
-            if fro_rel not in unlocked_paths(fro_root):
+            in_window = fro_rel in unlocked_paths(fro_root)
+            # 漂移保留态窗口只留给主线程回来 bump；子 agent（带 agent_id）碰它当仍冻结。
+            if (in_window and data.get("agent_id")
+                    and fro_rel in kept_for_bump_paths(fro_root)):
+                hook_deny(
+                    f"{fro_rel} 的解冻窗口是上一个子 agent 停止时因正文已漂移、"
+                    f"保留给主线程 bump 的，子 agent 不能借它写冻结产物"
+                    f"（否则写权限就从停掉的 agent 漏给了你）。请把改动报回编排者，"
+                    f"由主线程 `wb.py contract bump --name` 定版后再继续。")
+            if not in_window:
                 wbrel = os.path.relpath(wb_dir(fro_root), fro_root).replace(os.sep, "/")
                 always = {f"{wbrel}/{c}" for c in FROZEN_ALWAYS}
                 if fro_rel in always or any(fro_rel.startswith(a + "/") for a in always):
@@ -744,11 +754,12 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
         elif sub_cmd == "contract" and action == "dispute" and "--clear" in flags:
             out.append(f"角色 {role} 不能跑 `contract dispute --clear`：解除争议熔断是"
                        f"编排者决策。{hint}")
-        elif sub_cmd == "contract" and action in ("unlock", "bump", "consumers"):
+        elif sub_cmd == "contract" and action in ("unlock", "bump", "readopt", "consumers"):
             # 冻结层的拒绝信息按 owner 分岔提示「不要自己申报解冻」，但 unlock / bump /
-            # consumers 本身不校验 owner —— 实测 backend-developer 能解冻、改写并重新基线化
-            # architect 的契约，事后 contract verify 干净。consumers 改的是通知目标，同样
-            # 该由 owner 定。这里补成硬拦。
+            # readopt / consumers 本身不校验 owner —— 实测 backend-developer 能解冻、改写并
+            # 重新基线化 architect 的契约，事后 contract verify 干净。consumers 改的是通知
+            # 目标，同样该由 owner 定。readopt 直接采纳磁盘正文重定基线，威力比 bump 更大，
+            # 更该锁到 owner。这里补成硬拦。
             name = _flag_value(args, "--name")
             owner = _contract_owner(root, name)
             if owner is None:
@@ -757,7 +768,12 @@ def privileged_wb_calls(cmd: str, root: Path, role: str) -> list[str]:
                     f"{name or '(缺)'} 查不到，无法核对 owner。先 `contract list` 看"
                     f"实名。{hint}")
             elif owner != role and role != CONTRACT_STEWARD:
-                tail = "别自己申报解冻。" if action in ("unlock", "bump") else "别自己改消费方。"
+                if action in ("unlock", "bump"):
+                    tail = "别自己申报解冻。"
+                elif action == "readopt":
+                    tail = "别自己重定基线。"
+                else:
+                    tail = "别自己改消费方。"
                 out.append(
                     f"角色 {role} 不能 `contract {action} --name {name}`：这份契约的"
                     f" owner 是 {owner}。要改它把需求报给 {owner}，{tail}{hint}")
@@ -957,6 +973,10 @@ def hook_pre_tool(data: dict) -> None:
             cleaned_cmd = strip_heredocs(cmd)
             mentioned = frozen_hits(root, cleaned_cmd)
             unlocked = unlocked_paths(root)
+            # 子 agent 不能借「漂移保留态」窗口写冻结产物（见 kept_for_bump_paths）：
+            # 对它把这些路径从解冻集里减掉，命中即按冻结拦。主线程不减。
+            if data.get("agent_id"):
+                unlocked = unlocked - kept_for_bump_paths(root)
             hits = [h for h in mentioned if h not in unlocked]
             if hits:
                 if not uncertain:
@@ -1193,15 +1213,43 @@ def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
         # 实测会把别的 flow 里 architect 改到一半的契约拆成死局：窗口没了 bump 被
         # 拒，正文已改 unlock 也被拒，只能手工恢复旧正文。悬挂窗口的代价是重报
         # 一次，跨 flow 误关的代价是死锁 —— 定点收窄是唯一正确方向。
+        #
+        # 同 flow 内也有同一个死锁：编排者 unlock 后派子 agent 改产物，子 agent 一停
+        # 就走到这里；此刻正文已相对锁定 SHA 漂移（改过但还没 bump），关窗即死锁 ——
+        # bump 说没窗口、unlock 说漂移，只能手工恢复旧正文。所以关窗前逐个查漂移：
+        # 已漂移的保留窗口给编排者 bump，没动过的照常关（防止把写权限泄漏给下一个
+        # agent）。这与跨 flow 的取舍同源：悬挂一个待 bump 的窗口，好过一个死锁。
         ud = state_path(root, flow).parent / "unlock"
         opened = sorted(p.name for p in ud.iterdir() if p.is_file()) if ud.is_dir() else []
-        close_unlock(root, flow=flow)
-        if opened:
-            names = ", ".join(opened)
+        kept, closed = [], []
+        for cname in opened:
+            c = find_contract(st, cname)
+            cur = sha256_file(root / c["path"]) if c and c.get("path") else None
+            if c and c.get("sha") and cur is not None and cur != c["sha"]:
+                kept.append(cname)          # 改到一半：保留窗口，别拆成死锁
+                # 标记这是「漂移保留态」窗口：合法消费者只有回来 bump 的主线程。
+                # 冻结检查据此对子 agent 把这条窗口当作仍冻结，堵住「子 agent 停了、
+                # 写权限却经悬挂窗口漏给下一个 agent」这条泄漏（见 kept_for_bump_paths）。
+                wf = ud / cname
+                try:
+                    rec = json.loads(wf.read_text(encoding="utf-8"))
+                    if isinstance(rec, dict) and not rec.get("kept_for_bump"):
+                        rec["kept_for_bump"] = True
+                        wf.write_text(json.dumps(rec, ensure_ascii=False) + "\n",
+                                      encoding="utf-8")
+                except (OSError, json.JSONDecodeError):
+                    pass                    # 旧版纯文本窗口：无法加标记，退回原行为
+            else:
+                close_unlock(root, name=cname, flow=flow)
+                closed.append(cname)
+        if closed:
             lines.append(
-                f"[工作台] 解冻窗口 {names} 已随子 agent 结束关闭。"
-                f"若已改动这些文件，跑 `wb.py contract verify` 确认状态，"
-                f"需要定版就逐个 `wb.py contract bump --name <名> --reason '<理由>'`。")
+                f"[工作台] 解冻窗口 {', '.join(closed)} 已随子 agent 结束关闭（正文未改动）。")
+        if kept:
+            lines.append(
+                f"[工作台] 解冻窗口 {', '.join(kept)} 的正文已改动但未 bump，已为你保留 —— "
+                f"关掉会造成 bump 没窗口、unlock 说漂移的死锁。请在主线程直接 "
+                f"`wb.py contract bump --name <名>` 定版，别再派子 agent 后才 bump。")
     msg = "\n".join(lines)
     if fmt == "codex":
         print(json.dumps({"systemMessage": msg}, ensure_ascii=False))

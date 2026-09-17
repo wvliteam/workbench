@@ -75,19 +75,30 @@ def cmd_selfcheck(args) -> None:
     # Codex 端加载不出这个角色且不报错（实测踩过，flow main 的 retro 改进项 2，
     # 见 knowledge/troubleshooting/codex-agent-toml-quote-escapes.md）。手工写
     # toml 后靠「记得跑 tomllib.load」不是机制 —— 把这一步固化成断言。
-    check_static_layout(real_root)
-    # P1-2：knowledge 路由链接（knowledge_check）与角色 .md/.toml 同步（generate_agents
-    # --check）此前各自「靠人记得跑」（knowledge/README.md、AGENTS.md 的口头约定），
-    # 漂了不报错。固化成断言：脚本存在就跑，非零即自检失败。
-    for _script, _sargs in (("scripts/knowledge_check.py", []),
-                            ("scripts/generate_agents.py", ["--check"])):
-        _sp = real_root / _script
-        if not _sp.is_file():
-            continue
-        _sr = subprocess.run([sys.executable, str(_sp), *_sargs],
-                             cwd=real_root, capture_output=True, text=True)
-        assert _sr.returncode == 0, \
-            f"{_script} {' '.join(_sargs)} 未通过：{_sr.stdout}{_sr.stderr}"
+    # 静态布局检查与动态全链路自检解耦：静态项失败记为 FAIL 但不 abort，让动态项照跑，
+    # 末尾统一判定。否则任何一条静态项挂掉（如 .codex 适配在途的 hooks.json matcher）
+    # 都会吞掉整套动态回归，改内核后无法用 selfcheck 验证逻辑（实测踩过，见摩擦记录 #4）。
+    # --skip-static 则连静态项都不跑，只验证动态逻辑。
+    skip_static = getattr(args, "skip_static", False)
+    static_failures: list[str] = []
+    if not skip_static:
+        try:
+            check_static_layout(real_root)
+        except AssertionError as e:
+            static_failures.append(f"check_static_layout: {e}")
+        # P1-2：knowledge 路由链接（knowledge_check）与角色 .md/.toml 同步（generate_agents
+        # --check）此前各自「靠人记得跑」（knowledge/README.md、AGENTS.md 的口头约定），
+        # 漂了不报错。固化成断言：脚本存在就跑，非零即静态 FAIL（不再 abort 动态）。
+        for _script, _sargs in (("scripts/knowledge_check.py", []),
+                                ("scripts/generate_agents.py", ["--check"])):
+            _sp = real_root / _script
+            if not _sp.is_file():
+                continue
+            _sr = subprocess.run([sys.executable, str(_sp), *_sargs],
+                                 cwd=real_root, capture_output=True, text=True)
+            if _sr.returncode != 0:
+                static_failures.append(
+                    f"{_script} {' '.join(_sargs)}: {_sr.stdout}{_sr.stderr}".strip())
     try:
         os.chdir(tmp)
 
@@ -356,8 +367,13 @@ def cmd_selfcheck(args) -> None:
         quiet("task", "reopen", api_task["id"])
         quiet("task", "start", api_task["id"])
         quiet("task", "done", api_task["id"])
-        assert sync_task["phase"] == st["phase"], \
-            "返工任务要落在当前阶段，硬编码 develop 会让本阶段门禁看不见它"
+        # 返工任务 phase = max(当前阶段, 消费方自然阶段)。这里当前是 analyze、消费方
+        # frontend-developer 的自然阶段是 develop（更晚）→ 落到 develop，而不是当年那样
+        # 一律钉当前阶段造出「analyze 阶段的 developer 任务」错位（摩擦记录 #6）。反向
+        # 不变式（自然阶段早于当前时退回当前、绝不落进走过的阶段）由 _rebaseline_contract
+        # 的 max 逻辑保证。
+        assert sync_task["phase"] == "develop", \
+            f"返工任务应落在消费方自然阶段 develop，实际 {sync_task['phase']}"
         code, _ = quiet("contract", "verify")
         assert code == 0, "bump 后应重新一致"
         quiet("contract", "unlock", "--name", "user-api", "--reason", "空改动")
@@ -1867,9 +1883,12 @@ def cmd_selfcheck(args) -> None:
         # 一条流水线一个 flow：state / 锁 / 产物互不覆盖；守卫读全部 flow 的并集。
         code, out = quiet("flow", "list")
         assert code == 0 and "main" in out, out
-        # 新 flow 继承 main 的工作区级配置（角色范围 / 门禁命令 / 并行度）—— 这些
+        # 新 flow 继承 main 的工作区级配置（角色范围 / 门禁超时 / 并行度）—— 这些
         # 描述的是「这个工作区怎么干活」，不是单条需求线的属性；不继承则每条 flow
-        # 重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉
+        # 重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉。
+        # 但 gate_commands 有意**不继承**：test/build/lint 与具体代码库强相关，main 常是
+        # 工作台自身的 selfcheck，盲继承会让改别的代码库的新 flow 在门禁跑错命令而 FAIL
+        # （摩擦记录 #3）。显式未配置比继承错的更安全。
         quiet("config", "set", "gate_commands.test", "echo selfcheck-inherit")
         main_before = load_state(tmp)
         code, out = quiet("flow", "new", "feature-b")
@@ -1882,7 +1901,10 @@ def cmd_selfcheck(args) -> None:
         assert st_b["tasks"] == [], "flow new 后新 flow 不该继承任务"
         for key in INHERIT_KEYS:
             assert st_b[key] == main_before[key], f"flow new 未从 main 继承 {key}"
-        assert st_b["gate_commands"]["test"] == "echo selfcheck-inherit"
+        assert "gate_commands" not in INHERIT_KEYS, \
+            "gate_commands 必须留在 INHERIT_KEYS 之外（代码库强相关，不盲继承）"
+        assert "test" not in st_b.get("gate_commands", {}), \
+            "flow new 不该继承 main 的 gate_commands.test（代码库强相关，摩擦记录 #3）"
         # flow 名是信任边界：../ 不能把状态目录挪出工作区
         code, out = quiet("flow", "new", "../pwn")
         assert code == 1 and "flow 名" in out, out
@@ -2235,8 +2257,17 @@ def cmd_selfcheck(args) -> None:
     finally:
         os.chdir(old)
         shutil.rmtree(tmp, ignore_errors=True)
-    print("selfcheck 全部通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / Workflow Guard / "
+    print("动态全链路通过：状态机 / 门禁 / 契约漂移 / 命令门禁 / Workflow Guard / "
           "冻结状态 / 契约 owner / sed 目标 / "
           "跳阶段留痕 / 并发写状态 / 产物挂载 / 报告 / flow 隔离 / 跨 flow 窗口与归属 / 嵌套根 / "
           "任务租约 / 自依赖 / 门禁豁免 / 改进项出口 / 降级可见性 / skills 双份同步 / "
           "init 重建清理")
+    if skip_static:
+        print("（已 --skip-static：静态布局检查未跑）")
+        return
+    if static_failures:
+        # 动态回归已跑完（上面），静态项失败在这里单独报并让整体失败 —— 不再吞掉动态。
+        for f in static_failures:
+            print(f"[静态 FAIL] {f}")
+        raise SystemExit(1)
+    print("静态布局检查通过。selfcheck 全部通过。")

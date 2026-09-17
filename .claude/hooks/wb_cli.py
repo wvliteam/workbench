@@ -19,7 +19,7 @@ from pathlib import Path
 
 from wb_const import (
     ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, GATES, PHASES, PHASE_ARTIFACT_CONTRACTS, PHASE_CN,
-    REPO_HINTS, ROLES, WB_VERSION,
+    REPO_HINTS, ROLE_NATURAL_PHASE, ROLES, WB_VERSION,
 )
 from wb_bash import CONFIG_SCHEMA, catastrophic_command, config_key_allowed
 from wb_core import (
@@ -622,12 +622,76 @@ def cmd_next(args) -> None:
         print(f"延后 {item['id']}：write_scopes 与 {item['with']} 重叠")
 
 
+def _rebaseline_contract(root, st, c, sha, reason, event, note):
+    """把契约重定基线到 sha：版本/修订 +1、作废并 stale 下游、为消费方建同步任务，
+    最后关本契约本 flow 的解冻窗口与争议。bump（消费解冻窗口）与 readopt（窗口丢失后
+    的死锁恢复）共用同一套定基线逻辑，避免两处漂移。返回 (old_version, old_revision, created)。"""
+    old_sha = c.get("sha") or ""
+    old_binding = contract_binding(c)
+    old_version, old_revision = old_binding["version"], old_binding["revision"]
+    c["version"] = old_version + 1
+    c["revision"] = old_revision + 1
+    c["sha"], c["locked_at"] = sha, now()
+    new_binding = contract_binding(c)
+
+    invalidated = []
+    for t in st["tasks"]:
+        refs = t.get("contracts", [])
+        if not isinstance(refs, list):
+            continue
+        matched = any(
+            contract_ref_name(ref) == c["name"] and
+            (not isinstance(ref, dict) or all(ref.get(k) == old_binding[k]
+                                             for k in old_binding))
+            for ref in refs
+        )
+        if matched and t.get("status") != "skipped":
+            t["status"] = "stale"
+            t["updated"] = now()
+            invalidated.append(t["id"])
+    for tid in invalidated:
+        _propagate_stale(st, tid)
+
+    log(st, event, name=c["name"], **{
+        "from": old_version, "to": c["version"],
+        "from_revision": old_revision, "to_revision": c["revision"],
+        "from_sha": old_sha[:12], "to_sha": sha[:12], "reason": reason,
+    })
+    created = []
+    for role in c["consumers"]:
+        if role not in ROLES:
+            continue
+        st["seq"] += 1
+        tid = f"T{st['seq']}"
+        # 返工任务的 phase 取「当前阶段」与「消费方角色自然阶段」中较晚的那个：
+        #  - 消费方自然阶段在当前之后（如 analyze 时 bump、消费方是 architect→design）：
+        #    落到自然阶段，避免出现「analyze 阶段的 architect 任务」这种错位（摩擦记录 #6）。
+        #  - 消费方自然阶段在当前之前（如 verify 时 bump、消费方是 developer→develop）：
+        #    退回当前阶段 —— 绝不能落进已经走过的阶段，否则当前门禁的 tasks_done 看不见它、
+        #    直接放行，返工被静默丢掉（selfcheck 曾对「硬编码 develop」记过这条教训）。
+        nat = ROLE_NATURAL_PHASE.get(role)
+        task_phase = (nat if nat and PHASES.index(nat) > PHASES.index(st["phase"])
+                      else st["phase"])
+        st["tasks"].append({
+            "id": tid, "title": f"同步契约 {c['name']} v{c['version']} 变更：{reason}",
+            "role": role, "phase": task_phase, "status": "todo", "deps": [],
+            "contracts": [new_binding.copy()], "artifacts": [],
+            "notes": note, "created": now(), "updated": now(),
+        })
+        created.append(f"{tid}({role})")
+    # 只消费并关闭本契约、本 flow 的窗口；兄弟契约与别的 flow 的同名窗口必须
+    # 继续存在 —— 那是别人正在进行的申报。
+    close_unlock(root, c["name"], flow=st.get("_flow"))
+    close_dispute(root, c["name"])
+    return old_version, old_revision, created
+
+
 def cmd_contract(args) -> None:
     root = find_root()
     # 只在会写状态的分支上锁。impact 在锁里跑 `git grep` 子进程，大仓库要几秒 ——
     # 而 wb-contract 要求改契约前先跑 impact，此时结束的 subagent 的 SubagentStop
     # 会等在锁上，超时后角色锁与解冻窗口都不清理，下一个写入被限制在上一个角色的范围里。
-    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump", "consumers"))
+    st = load_state(root, lock=args.action in ("add", "lock", "unlock", "bump", "consumers", "readopt"))
 
     if args.action == "add":
         p = Path(args.path)
@@ -797,57 +861,46 @@ def cmd_contract(args) -> None:
         if sha == old_sha:
             die(f"{c['name']} 内容未变（哈希相同），不能只刷版本号；请先修改正文")
 
-        old_binding = contract_binding(c)
-        old_version, old_revision = old_binding["version"], old_binding["revision"]
-        c["version"] = old_version + 1
-        c["revision"] = old_revision + 1
-        c["sha"], c["locked_at"] = sha, now()
-        new_binding = contract_binding(c)
-
-        invalidated = []
-        for t in st["tasks"]:
-            refs = t.get("contracts", [])
-            if not isinstance(refs, list):
-                continue
-            matched = any(
-                contract_ref_name(ref) == c["name"] and
-                (not isinstance(ref, dict) or all(ref.get(k) == old_binding[k]
-                                                 for k in old_binding))
-                for ref in refs
-            )
-            if matched and t.get("status") != "skipped":
-                t["status"] = "stale"
-                t["updated"] = now()
-                invalidated.append(t["id"])
-        for tid in invalidated:
-            _propagate_stale(st, tid)
-
-        log(st, "contract_bump", name=c["name"], **{
-            "from": old_version, "to": c["version"],
-            "from_revision": old_revision, "to_revision": c["revision"],
-            "from_sha": old_sha[:12], "to_sha": sha[:12], "reason": reason,
-        })
-        created = []
-        for role in c["consumers"]:
-            if role not in ROLES:
-                continue
-            st["seq"] += 1
-            tid = f"T{st['seq']}"
-            st["tasks"].append({
-                "id": tid, "title": f"同步契约 {c['name']} v{c['version']} 变更：{reason}",
-                "role": role, "phase": st["phase"], "status": "todo", "deps": [],
-                "contracts": [new_binding.copy()], "artifacts": [],
-                "notes": "由 contract bump 自动创建", "created": now(), "updated": now(),
-            })
-            created.append(f"{tid}({role})")
-        # 只消费并关闭本契约、本 flow 的窗口；兄弟契约与别的 flow 的同名窗口必须
-        # 继续存在 —— 那是别人正在进行的申报。
-        close_unlock(root, c["name"], flow=st.get("_flow"))
-        close_dispute(root, c["name"])
+        old_version, old_revision, created = _rebaseline_contract(
+            root, st, c, sha, reason, "contract_bump", "由 contract bump 自动创建")
         save_state(root, st)
         print(f"{c['name']} v{old_version}/r{old_revision} -> "
               f"v{c['version']}/r{c['revision']}  {sha[:12]}  理由：{reason}")
         print("已为消费方创建返工任务：" + (", ".join(created) or "无消费方"))
+        return
+
+    if args.action == "readopt":
+        # 死锁恢复口：解冻窗口丢失后（典型是 unlock 后派子 agent 改产物，子 agent 停时
+        # 窗口被 SubagentStop 关掉），契约正文已漂移、bump 没窗口可消费、unlock 又拒漂移。
+        # readopt 把磁盘现状直接采纳为新基线，跳过「先申报再改」——所以只用于恢复，且和
+        # bump 一样触发下游 stale + 消费方返工任务。角色 subagent 受 owner 门禁（见守卫
+        # privileged_wb_calls），主线程可直接跑。
+        c = find_contract(st, args.name)
+        if not c:
+            die(f"契约不存在：{args.name}")
+        if not args.reason:
+            die("readopt 必须给 --reason —— 为什么把磁盘现状直接采纳为新基线（要留痕）")
+        old_sha = c.get("sha")
+        if not old_sha:
+            die(f"契约 {c['name']} 尚未首次 lock，没有基线可恢复；先 contract lock")
+        path = c.get("path")
+        if not path:
+            die(f"契约 {c['name']} 缺少本地路径")
+        sha = sha256_file(root / path)
+        if sha is None:
+            die(f"文件缺失：{path}（readopt 采纳磁盘正文，文件得先在）")
+        if sha == old_sha:
+            die(f"{c['name']} 未漂移（哈希与基线一致），无需 readopt；"
+                "常规改动走 unlock -> 改 -> bump")
+        old_version, old_revision, created = _rebaseline_contract(
+            root, st, c, sha, args.reason, "contract_readopt", "由 contract readopt 自动创建")
+        save_state(root, st)
+        print(f"[readopt] {c['name']} v{old_version}/r{old_revision} -> "
+              f"v{c['version']}/r{c['revision']}  {sha[:12]}  已把磁盘现状采纳为新基线")
+        print(f"理由：{args.reason}")
+        print("已为消费方创建返工任务：" + (", ".join(created) or "无消费方"))
+        print("提示：readopt 跳过了「先申报再改」，仅用于解冻窗口丢失后的死锁恢复；"
+              "常规改动请走 unlock -> 改 -> bump。")
         return
 
     if args.action == "impact":
@@ -1275,7 +1328,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("contract", help="契约登记 / 锁定 / 漂移校验 / 申报变更 / 争议熔断")
     p.add_argument("action",
                    choices=["add", "list", "lock", "unlock", "verify", "bump", "impact",
-                            "dispute", "consumers"])
+                            "dispute", "consumers", "readopt"])
     p.add_argument("path", nargs="?")
     p.add_argument("--name")
     p.add_argument("--owner", choices=ROLES)
@@ -1322,6 +1375,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_hook)
 
     p = sub.add_parser("selfcheck", help="自检：跑一遍全链路并断言")
+    p.add_argument("--skip-static", "--dynamic-only", dest="skip_static",
+                   action="store_true",
+                   help="跳过静态布局检查，只跑动态全链路（静态项在途、要验证动态逻辑时用）")
     p.set_defaults(func=_run_selfcheck)
 
     return ap

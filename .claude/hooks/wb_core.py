@@ -509,7 +509,7 @@ def _read_unlock_records(root: Path) -> dict[str, dict]:
             if isinstance(payload, dict):
                 record["reason"] = str(payload.get("reason") or "")
                 record["sha"] = payload.get("sha")
-                for key in ("version", "revision", "opened_at"):
+                for key in ("version", "revision", "opened_at", "kept_for_bump"):
                     if key in payload:
                         record[key] = payload[key]
     return out
@@ -529,6 +529,31 @@ def read_unlocks(root: Path) -> dict[str, str]:
     """
     return {name: record.get("reason", "")
             for name, record in read_unlock_records(root).items()}
+
+
+def kept_for_bump_paths(root: Path) -> set[str]:
+    """漂移保留态解冻窗口对应的契约路径。
+
+    这类窗口是 SubagentStop 时因正文已漂移、为让编排者回来 bump 而保留下来的
+    （见 hook_subagent_stop 的 kept 分支）。它的合法消费者只有主线程 —— 子 agent
+    已经停了，不该再借这个悬挂窗口继续写冻结产物，否则等于「子 agent 停了、写权限
+    却留给下一个 agent」，正是关窗兜底本来要防的泄漏。主线程写不受影响（它就是回来
+    bump 的那个），普通 active 窗口（无 kept_for_bump 标记）也不受影响。
+    """
+    records = read_unlock_records(root)
+    kept = {name for name, rec in records.items() if rec.get("kept_for_bump")}
+    if not kept:
+        return set()
+    paths: set[str] = set()
+    for flow in all_flows(root):
+        try:
+            st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for c in st.get("contracts", []):
+            if c.get("name") in kept and c.get("path"):
+                paths.add(c["path"])
+    return paths
 
 
 def close_unlock(root: Path, name: str = "", flow: str | None = None) -> None:
@@ -1662,7 +1687,11 @@ def repo_note_issues(root: Path) -> list[str]:
 # 测、仓库怎么认领」，不是单条需求线的属性 —— 但它们存在每条 flow 各自的 state.json
 # 里，不继承就等于每条新 flow 都要重抄一遍，漏抄的仓库认领会让角色范围在指针
 # 切换后整个换掉。
-INHERIT_KEYS = ("role_scopes", "gate_commands", "gate_timeout", "max_parallel")
+# gate_commands 有意不在列：test/build/lint 与具体代码库强相关，而 main 常是工作台
+# 自身的 selfcheck —— 盲继承会让一条改 Go 代码的新 flow 在 verify 门禁跑 selfcheck 并
+# FAIL，把功能正确的改动挡在门外（实测踩过，见摩擦记录 #3）。显式未配置比继承错的
+# 更安全：flow new 起始为空，由 flow new 的提示引导按本 flow 代码库各自 cd 配置。
+INHERIT_KEYS = ("role_scopes", "gate_timeout", "max_parallel")
 
 
 def inherit_flow_config(root: Path, st: dict, flow: str) -> str:

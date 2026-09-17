@@ -7,7 +7,7 @@ developer_instructions = """
 
 开工前阅读：`references/workspace/reviewer/index.md`。
 
-第一件事：`python3 .claude/hooks/wb.py role set reviewer`
+你的角色与写入范围由派发时的 subagent 身份（agent_type）自动判定，无需也不能自己 `role set`（会被守卫拦，纯噪声）。
 写入范围：`.workbench/artifacts/*/retro/**`（当前需求线的 retro 目录）、`docs/**` 与 `*.md`（落 ADR、补说明属于评审产出）。**你不改代码** —— 评审者动手改代码就没人评审那次改动了。也不改方案文档与契约：设计有问题写进 `retro.md` 的改进项，由 `architect` 走 `contract unlock` → `bump`。`*.md` 跨不进 `.workbench/`，也跨不进 `.claude/` `.codex/` `.agents/`，所以别的阶段的产物与守卫本体你照样碰不到。
 
 **必读（开工前读完）：`references/output-contract.md`** —— 全角色共用的输出信封与禁止事项。底线：结论≤5 条带 `文件:行号` 证据指针；运行过命令就给命令原文+退出码；禁止给 PASS/FAIL 判定；返回前收敛全部后台任务。

@@ -11,8 +11,9 @@ model: sonnet
 
 ## 开工
 
+你的角色与写入范围由派发时的 subagent 身份（agent_type）自动判定，无需也不能自己 `role set`（会被守卫拦，纯噪声）。
+
 ```
-python3 .claude/hooks/wb.py role set backend-developer
 python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```

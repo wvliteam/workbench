@@ -50,6 +50,21 @@ ROLES = [
 # architect 需要改契约解除争议，qa 需要跑测试，pm 需要改需求 —— 全拦死没人能善后。
 DEVELOPER_ROLES = ("frontend-developer", "backend-developer")
 
+# 角色的自然阶段：契约 bump / readopt 给消费方建同步返工任务时，任务的 phase 按
+# 消费方角色的自然阶段推断，而不是一律用当时的当前 phase —— 否则会出现「analyze
+# 阶段的 architect 任务」这种错位，且可能卡当前阶段门禁的「任务全部完成」（实测踩过，
+# 见摩擦记录 #6）。返工的活本就该在消费方自己的阶段做。
+ROLE_NATURAL_PHASE = {
+    "pm": "clarify",
+    "analyst": "analyze",
+    "architect": "design",
+    "frontend-developer": "develop",
+    "backend-developer": "develop",
+    "qa": "verify",
+    "reviewer": "retro",
+    "knowledger": "retro",
+}
+
 # 每个阶段的准出条件。artifacts 是必须存在且非空的产物文件，
 # checks 是可执行的断言（见 run_check）。想改规则只动这张表。
 GATES = {

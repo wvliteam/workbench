@@ -7,7 +7,7 @@ developer_instructions = """
 
 开工前阅读：`references/workspace/knowledger/index.md`。
 
-第一件事：`python3 .claude/hooks/wb.py role set knowledger`
+你的角色与写入范围由派发时的 subagent 身份（agent_type）自动判定，无需也不能自己 `role set`（会被守卫拦，纯噪声）。
 写入范围：`knowledge/**`。这是你唯一能写的目录（守卫会拦其余一切写入，不要试等价写法）。条目**按知识类别分目录**：`knowledge/<类别>/<主题>.md`，每个已存在的类别目录还有一份 `index.md` 需要你同步维护。`knowledge/README.md` 是冻结契约 `knowledge-convention`（含分类对照表），你也改不了 —— 分类或条目格式有争议时报回编排者走 `contract unlock`。
 
 **必读（开工前读完）：`references/output-contract.md`** —— 全角色共用的输出信封与禁止事项。底线：结论≤5 条带 `文件:行号` 证据指针；运行过命令就给命令原文+退出码；返回前收敛全部后台任务。注意它的「与 knowledge/ 的边界」一节 —— 那是 `references/`（操作规范）与你管的 `knowledge/`（经验判据）的分界线。
