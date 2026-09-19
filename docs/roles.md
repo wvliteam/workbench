@@ -58,17 +58,16 @@
 
 `qa` 能写 `tests/` 与测试框架配置（`*.config.ts` / `pytest.ini` 之类）—— 搭测试与补测试是它的职责，改产品代码不是。`reviewer` 的范围只剩自己阶段的 retro 产物；落 ADR、补交付报告写到 `docs/` 仍然可以（`docs/` 不是受守前缀，不判角色），但不再靠裸 `*.md` 授权 —— 那会在 `fnmatch` 下跨 `/` 漏进受守的 `knowledge/`。
 
-## 每个角色的开工三步
+## 每个角色的开工步骤
 
-所有 agent 定义的开头都是同一个模式：
+所有角色 agent 定义的开头都是同一个模式：
 
 ```
-1. python3 .claude/hooks/wb.py role set <自己>     # 收紧写入范围
-2. 读上游产物（有明确路径）
-3. python3 .claude/hooks/wb.py task start <ID>     # 开发/测试角色
+1. 读上游产物（有明确路径）
+2. python3 .claude/hooks/wb.py task start <ID>     # 开发/测试角色
 ```
 
-`role set` 放在第一步而不是由编排者代设，原因是 subagent 一定会执行自己的第一条指令，而编排者可能忘。**但守卫并不依赖它** —— subagent 的写入按 hook 载荷里的 `agent_type` 判定，与谁最后 `role set` 过无关（见 [permissions.md](permissions.md#第四层角色写入范围)）。留着这一步的用处有两个：`role scopes` 能看出当前范围，以及活万一派给了非角色 agent（`general-purpose` 之类）时它是唯一的兜底。
+角色 subagent 的写入范围由 hook 载荷里的 `agent_type` 自动判定（值等于 agent 定义的 `name`，与 `ROLES` 同名），既不需要也不能自己 `role set` —— 跑了会被守卫当特权命令拦（见 [permissions.md](permissions.md#第四层角色写入范围)）。`role set` 只是编排者给非角色 agent（`general-purpose` 之类）收紧范围的兜底开关，不是角色 subagent 的开工步骤。
 
 ## 产物的门禁耦合
 

@@ -168,7 +168,7 @@ subagent 只在计划内停止、契约熔断 / stale、范围外发现这三类
 有些 harness 只暴露 `general-purpose` / `Explore` 这类内置类型，`.claude/agents/` 里的角色不在可派发列表里（本仓库实测过，见 `knowledge/environment/harness-dispatches-no-role-subagents.md`）。此时**不要等派发、也不要跳过阶段**：主线程直接执行各阶段产物，门禁纪律一项不减 ——
 
 - 产物照样落盘、`gate check` 照样真过、校验命令照样由编排者亲跑并写进 `verification.md`；
-- 角色产物（`requirements.md` 等）由主线程代写，但同样必须先过门禁再冻结，`role set <角色>` 照打（`status` 里能看出当前范围）；
+- 角色产物（`requirements.md` 等）由主线程代写，但同样必须先过门禁再冻结，主线程保持原生身份、不要 `role set`（一旦 set 会被锁进该角色范围，后续代写别的阶段产物会被守卫拦），`status` 里能看出当前范围；
 - 六阶段照走，`retro.md` 的改进项与沉淀出口照查。
 
 **失效的东西要说明白**：角色越权守卫整层跳过（主线程没有 `agent_type`，不受 `role_scopes` 约束），此时只剩冻结（契约与阶段产物）和门禁两道防线。所以降级时三件事不能做 —— 直接改已冻结的产物（走 `contract unlock`）、跳过门禁推进、把「我读过代码了」当验证证据。

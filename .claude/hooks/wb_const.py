@@ -162,7 +162,7 @@ REPO_PROFILE_FILES = ("overview.md", "setup.md", "test.md")
 #
 # 三类范围值得单独说明，它们都是补实测出来的误拦：
 #
-# `*.md` 给开发与 reviewer：写 README、补接口说明、落 ADR 都是本职。之前只有
+# `*.md` 给开发（写 README、补接口说明、落 ADR）；reviewer 的裸 `*.md` 已按下方说明移除。之前只有
 # architect 含 `docs/**`，于是 develop 阶段的开发碰 README 会被拒，而拒绝信息给的
 # 第一条出路「交给对应角色」在那时不存在 —— architect 已经下场了。放宽碰不到已定稿
 # 的产物：阶段产物过门禁后是冻结契约，守卫第二层先拦，与角色范围无关。

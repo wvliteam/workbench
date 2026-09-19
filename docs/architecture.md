@@ -25,6 +25,8 @@
 
 层间只有两种交互：**编排层与执行层通过 CLI 读写内核**，**拦截层由 Claude Code 在工具调用时同步触发内核**。没有第三种路径 —— 这是状态一致性的保证。
 
+> 上图拦截层示意的是 Claude 端 `.claude/settings.json` 的 4 个 hook；Codex 端 `.codex/hooks.json` 另注册 `UserPromptSubmit`（`user-prompt`），共 5 个 —— 所以下表 `wb_guard` 处理的是 5 个 hook 事件。
+
 ## 内核的模块划分（曾是单文件，记录一次决策反转）
 
 `wb.py` 曾是一个 5500 行的单文件。当时不拆的理由是「五者共享同一份 `state.json`，拆开会导致一份状态五处解析」—— 这个理由只对「按职责各拆一份状态」成立。实际拆法按层次：`wb_core` 独占状态读写，其余模块都调它的函数，不存在第二份解析逻辑。
@@ -192,7 +194,7 @@ frontend-developer repos/backend/**/*.tsx            放行 ['*.tsx']      ← �
 
 `migrations/**` 匹配不上 `repos/backend/migrations/001.sql`，而 `*.py` 却匹配任意深度。结果是「后端写不了自己的迁移，却能写别人仓库的同语言文件」。跨仓库时仓库目录本身就是最准的边界，所以按前缀写。`init` 检测到 `repos/*` 会自己换成按仓库前缀（`repo_layout_scopes()`），但它只能按目录名猜（`REPO_HINTS`）。
 
-**猜不出名字的仓库谁都写不了。** 只要有一个仓库被认领，`repos/<仓库>/**` 这条分支就把范围钉在被认领的仓库上，于是 `shared` / `payments-core` 这类名字落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。这个失败只会在 develop 阶段暴露成一次权限拒绝，所以 `unclaimed_repos()` 判定它、`init` 与 `role scopes` 当场点名并给出手写认领的命令。判定按守卫自己的方式做：拿 `repos/<仓库>/src/probe.{ts,py}` 去撞两个开发角色的模式，撞不上就算没人认领。只看开发角色是因为 `qa` 的 `repos/*/tests/**` 覆盖所有仓库，而「只有 qa 能写它的测试目录」不构成认领。
+**猜不出名字的仓库谁都写不了。** 只要有一个仓库被认领，`repos/<仓库>/**` 这条分支就把范围钉在被认领的仓库上，于是 `shared` / `payments-core` 这类名字落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。这个失败只会在 develop 阶段暴露成一次权限拒绝，所以 `unclaimed_repos()` 判定它、`init` 与 `role scopes` 当场点名并给出手写认领的命令。判定按守卫自己的方式做：拿 `repos/.source/<项目>/<仓库>/src/probe.{ts,py}` 去撞两个开发角色的模式，撞不上就算没人认领。只看开发角色是因为 `qa` 的 `repos/*/tests/**` 覆盖所有仓库，而「只有 qa 能写它的测试目录」不构成认领。
 
 只有**一个仓库都认不出**时才退回「任意仓库的对应位置」（模式逐条加 `repos/*/` 前缀），那时才是跨仓库放行。这条回退分支必须**带上裸扩展名模式** —— 丢掉它们，`qa` 就只剩四个测试目录（它没有仓库提示词，永远走这条分支），配不了 `repos/frontend/vitest.config.ts`，与单仓库下同一个误拦，只是在多仓库工作区下更难发现。跨仓库放行是这个分支本来就有的性质（`repos/*/src/**` 一样跨），加裸扩展名没有新破的边界。
 
@@ -226,7 +228,7 @@ wb.py next --all --json                    → 就绪集合（依赖全部满足
         ↓
 主线程同一条消息多个 Agent 调用             → fe-dev 与 be-dev 并行
         ↓ 各自
-role set → task start → 读契约 → 写代码 → 自检 → task check → 回报编排者
+task start → 读契约 → 写代码 → 自检 → task check → 回报编排者
         ↓
 PostToolUse hook 把改动追加到 artifacts.jsonl（角色取自载荷 agent_type，不看单文件）
         ↓ 编排者复核后

@@ -568,6 +568,23 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
                     + frozen_advice(fro_root, [fro_rel], current_role(fro_root, data))
                 )
 
+    # 2.5 硬链接别名：Path.resolve() 认不出同一 inode 的另一个目录项，别名可按 *.md
+    #    命中角色范围、内容直改冻结的 state.json —— 冻结防线与「状态只能经 wb.py 改」
+    #    同时失效且不留哈希痕迹。已存在的普通文件 st_nlink > 1 即拒（目录 nlink 天然
+    #    > 1、新建目标与 FIFO/socket 等非常规文件经 is_file() 跳过；stat 抛 OSError
+    #    —— 权限、竞态删除等 —— 时跳过而不阻断，环境问题不升级成全网阻断）。
+    try:
+        if target.is_file():
+            nlink = target.stat().st_nlink
+            if nlink > 1:
+                hook_deny(
+                    f"{rel} 是多硬链接的普通文件（st_nlink={nlink}），拒绝写入："
+                    "硬链别名能绕过冻结防线直改状态/契约文件。"
+                    "改动请经 wb.py 命令或该文件的原始路径。"
+                )
+    except OSError:
+        pass
+
     # 3. 角色写入范围：**只对工作流核心路径强制执行** —— 受守前缀下的东西
     #    （.workbench/ 的阶段产物与契约、knowledge/ 知识库、references/ 规范、
     #    .claude/ 等守卫本体、workbench 布局下的工作区材料）。这些文件坏了，工作流

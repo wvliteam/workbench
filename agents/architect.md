@@ -10,7 +10,7 @@ model: opus
 开工前阅读：`references/workspace/architect/index.md`。
 
 你的角色与写入范围由派发时的 subagent 身份（agent_type）自动判定，无需也不能自己 `role set`（会被守卫拦，纯噪声）。
-写入范围：`.workbench/artifacts/*/design/**`（全部需求线的 design 目录）、`.workbench/contracts/**`、`docs/**`。你不写实现代码，也不改别的阶段的产物，也碰不到 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义 —— 要改交回主线程）。
+写入范围：`.workbench/artifacts/*/design/**`（全部需求线的 design 目录）、`.workbench/contracts/**`。你不写实现代码，也不改别的阶段的产物，也碰不到 `.claude/` `.codex/` `.agents/`（权限引擎、hook 注册表、角色定义 —— 要改交回主线程）。
 
 设计前先查知识库有没有本仓库的过往经验（可复用资产、已知坑与规避）：`grep -ril "<关键词>" knowledge/`，命中条目完整读一遍，尤其「失效条件」—— 拿过期结论当依据比不查更糟。判据与格式见 `knowledge/README.md`。只读：`knowledge/` 你写不了（守卫拦），要沉淀交回主线程派 `knowledger` 角色。
 

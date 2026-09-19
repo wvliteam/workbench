@@ -317,13 +317,14 @@ hook 自身出 bug 时，未初始化目录放行；已初始化工作台**拒�
 
 `state.json` 不存在或解析失败时，第三层直接 return（放行）。工作台未初始化的仓库不该被守卫影响。
 
-## 其余三个 hook
+## 其余的 hook（PreToolUse 之外）
 
 | 事件 | 匹配 | 作用 |
 | --- | --- | --- |
 | `PostToolUse` | Write / Edit / NotebookEdit / MultiEdit / apply_patch / Bash / Monitor | 把静态可解析的改动路径、角色和可用 agent 身份字段追加一行到 `.workbench/artifacts.jsonl`，由 `task done` 归并进任务的 `artifacts` |
 | `SessionStart` | — | 输出当前阶段、任务进度、阻塞项、契约漂移、就绪任务，注入上下文 |
 | `SubagentStop` | — | 无任务处于 doing 时清除 `role` 与 `unlock`；有 doing 任务则保留并打印原因；记审计日志 |
+| `UserPromptSubmit` | — | **仅 Codex 端**（`.codex/hooks.json`）注册，对应 `user-prompt`：flow 归属提醒等；Claude 端 `.claude/settings.json` 不注册它 |
 
 `PostToolUse` **绝不能读改写 `state.json`**。并行 develop 下每个 subagent 的每次文件写入都触发它，旧快照回写会静默吞掉期间落盘的 `task done`，连带把 `save_state` 顺手重写的冻结清单退回旧版 —— 于是「门禁与进度不可绕过」在并发下失效，不需要谁去绕。状态锁把这条路封在了 CLI 那一侧，但对 hook 不是出路：`load_state(lock=True)` 会把每次工具调用都串行化到状态锁上，延迟直接叠加到并行写入的每一笔。纯 append 无竞态，也把全量 JSON 读写从每次工具调用的热路径上挪走了。每行的角色取自本次调用的载荷；归属按「角色 + 任务 `started` 时间」在归并时认领，重复归并幂等。
 

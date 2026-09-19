@@ -12,7 +12,7 @@
 2. **自动生成 VS Code workspace 文件**：多根 `.code-workspace`（根 + 全部仓库）与 `.vscode/settings.json` 的 git 发现配置，VS Code 打开一个文件就能同时看到所有仓库。
 3. **兼容 Claude、Codex 与其他通用 agents**：SKILL.md 单一正文（软链到各端），执行脚本全端共用一份；SKILL.md 本身不引用任何一家独有的工具机制。
 
-明确不做：依赖安装与环境验证（那是各仓库开发阶段的事，走 `/wb-flow`）。（仓库画像 overview/setup/test 三件套已于 2026-09-14 纳入：由 `init` / `flow new` 建画像任务、`analyst` 在 analyze 阶段写，见下方决策表「单仓画像」行与演进记录。）
+明确不做：依赖安装与环境验证（那是各仓库开发阶段的事，走 `/wb-flow`）。（注：仓库画像 overview/setup/test 三件套**不在此列** —— 已于 2026-09-14 纳入 wb-init，由 `init` / `flow new` 建画像任务、`analyst` 在 analyze 阶段写，见下方决策表「单仓画像」行。）
 
 ## 参照物：ROMA 的这个能力在哪
 

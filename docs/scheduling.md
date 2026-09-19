@@ -124,7 +124,7 @@ wb.py task reopen T2 --note "契约已 bump 到 v2"
 
 绑定与流水账的每一行都带 `flow` 字段，归并按任务所在 flow 过滤 —— 任务 ID 每条 flow 独立从 T1 编起，而这两个文件是工作区共享的，不过滤时 A flow 的 T1 会把 B flow 同名任务的产物认领进来。无 `flow` 字段的旧行按 main 归属（字段引入前的存量日志都在 main 线上）。
 
-`--role-lock` 是给编排者用的便捷开关（`start` 的同时 `role set`）。subagent 自己开工时通常先 `role set` 再 `task start`，两种路径等价。
+`--role-lock` 是给编排者用的便捷开关（`start` 的同时 `role set`）。角色 subagent 由派发身份（`agent_type`）自动判定写入范围，既不需要也不能自己 `role set`（会被守卫拦，纯噪声）。
 
 ## Loop 执行
 
