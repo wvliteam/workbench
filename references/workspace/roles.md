@@ -10,5 +10,6 @@
 | `qa` | `common.md` + 项目 workspace 的 QA 文档 | 测试和门禁验证 |
 | `reviewer` | `common.md` + 项目 workspace 的 Reviewer 文档 | 评审和复盘 |
 | `knowledger` | `common.md` + 项目 workspace 的 Knowledger 文档 | 知识沉淀和查找 |
+| `submitter` | `common.md` + `submitter/index.md`（含 commit-format、push-config） | 代码选择性提交与推送 |
 
 角色定义引用本索引和 workspace 提供的角色文档，不把项目路径、版本和仓库清单写死在通用 workbench 中。

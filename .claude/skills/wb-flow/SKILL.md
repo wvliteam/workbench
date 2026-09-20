@@ -50,7 +50,7 @@ python3 .claude/hooks/wb.py status
 | analyze 现状分析 | `analyst` | `artifacts/<flow>/analyze/current-state.md`；多域另有 `analyze/parts/manifest.json` 与各 scope part |
 | design 方案设计 | `architect` | `artifacts/<flow>/design/design.md` + 登记并锁定 `design-doc` + 接口契约 + 任务图 |
 | develop 开发实现 | `frontend-developer` / `backend-developer` | 代码 + 自带校验 |
-| verify 测试验证 | `qa` | `artifacts/<flow>/verify/test-report.md` |
+| verify 测试验证 | `qa` → `submitter` | `qa`：`artifacts/<flow>/verify/test-report.md`；`submitter`（依赖 qa 任务）：git commit + push + `artifacts/<flow>/verify/submit-report.md` |
 | retro 总结复盘 | `reviewer` + `knowledger` | `artifacts/<flow>/retro/retro.md` + 交付报告 + `knowledge/` 沉淀条目 |
 
 `<flow>` 是当前需求线（`status` 根行显示），并行多需求线见 CLAUDE.md「多条需求并行：flow」。
@@ -128,7 +128,7 @@ python3 .claude/hooks/wb.py task add --title "注册路由并联调" \
 旧行为，不参与冲突判定。
 
 **派发对象必须是 ROLES 里的角色 agent**（`pm` / `analyst` / `architect` / `frontend-developer` /
-`backend-developer` / `qa` / `reviewer` / `knowledger`），不要用 `general-purpose` / `Explore` /
+`backend-developer` / `qa` / `submitter` / `reviewer` / `knowledger`），不要用 `general-purpose` / `Explore` /
 `Plan` 这类非角色 agent 干开发或写产物：它们的 `agent_type` 不在 ROLES 里，守卫对核心路径会判
 `UNKNOWN_ROLE` 拒写、对非核心路径则完全不做角色隔离 —— 两种都会让「谁能写哪块」的约束静默失效。
 只读的探查（大范围搜索、读代码）才可以派非角色 agent。

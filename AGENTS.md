@@ -150,7 +150,7 @@ python3 .claude/hooks/wb.py flow remove feature-b --force   # 删整条（先切
 | analyze | `analyst` | `<flow>/analyze/current-state.md`（含「风险」）；多域模式另有 `analyze/parts/manifest.json` 与每域独立 part |
 | design | `architect` | `<flow>/design/design.md`（含「方案对比」）+ 登记并锁定 `design-doc` 契约 + 接口契约 + 任务图 |
 | develop | `frontend-developer` `backend-developer` | 代码 + `<flow>/develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
-| verify | `qa` | `<flow>/verify/test-report.md` |
+| verify | `qa` → `submitter` | `qa`：`<flow>/verify/test-report.md`；`submitter`（依赖 qa 任务，在 design 阶段由 architect 加入任务图）：git commit + push + `<flow>/verify/submit-report.md`（含 commit SHA、纳入文件、推送目标） |
 | retro | `reviewer` `knowledger` | `<flow>/retro/retro.md`（含「改进项」「沉淀」）+ `knowledge/<类别>/` 沉淀条目（retro 门禁查 `knowledge_written`：递归数条目，或 retro.md 显式「无可沉淀」） |
 
 编排者不亲自干活，派 subagent。派发时给足上下文：需求原话、上游产物路径、要读的契约文件、相关的验收标准条目。

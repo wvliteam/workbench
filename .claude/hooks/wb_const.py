@@ -42,6 +42,7 @@ ROLES = [
     "frontend-developer",
     "backend-developer",
     "qa",
+    "submitter",
     "reviewer",
     "knowledger",
 ]
@@ -61,6 +62,7 @@ ROLE_NATURAL_PHASE = {
     "frontend-developer": "develop",
     "backend-developer": "develop",
     "qa": "verify",
+    "submitter": "verify",   # verify 通过后、retro 前执行（同属 verify 收尾动作）
     "reviewer": "retro",
     "knowledger": "retro",
 }
@@ -206,6 +208,10 @@ DEFAULT_ROLE_SCOPES = {
         "tests/**", "test/**", "e2e/**", "spec/**",
         "*.config.ts", "*.config.js", "*.config.mjs", "pytest.ini", "tox.ini",
     ],
+    # submitter 用 Write 工具写 submit-report.md（commit SHA、纳入文件、推送目标、跳过文件）；
+    # 这份报告是 retro 的输入，也是「已交付」的唯一可回溯凭据。
+    # 除此之外不写产品代码：git add/commit/push 走 Bash，不走 Write/Edit。
+    "submitter": [".workbench/artifacts/*/verify/**"],
     "reviewer": [".workbench/artifacts/*/retro/**"],
     # 知识库写权限专属（ROMA 对比第八节的沉淀出口）。knowledge/ 在 GUARDED_PREFIXES
     # 里，别的角色写不进 —— 否则沉淀会退化成「谁顺手谁写」，查找的人不知道哪条可信。
