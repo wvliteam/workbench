@@ -1077,7 +1077,11 @@ def cmd_flow(args) -> None:
                 phase = json.loads(state_path(root, f).read_text(encoding="utf-8"))["phase"]
             except (OSError, json.JSONDecodeError, KeyError):
                 phase = "（未初始化）"
-            print(f"{f:<20} {phase:<12}{mark}")
+            # 从 state.json 的 description 取需求摘要，便于判断是否复用当前 flow
+            # 而无需打开 requirements.md 阅读全文（pre-flow 判断的低成本辅助）。
+            summary = _flow_req_summary(root, f)
+            summary_col = f"  {summary}" if summary else ""
+            print(f"{f:<20} {phase:<12}{mark}{summary_col}")
         return
     if args.action == "new":
         flow = args.name
