@@ -16,15 +16,21 @@
 │   ├── wb_cli.py              CLI 命令、参数解析与 main()
 │   ├── wb_selfcheck.py        自检（wb.py selfcheck）
 │   └── wb_selfcheck_static.py 静态布局校验（被 selfcheck 调用）
-├── agents/                 8 个角色 subagent
+├── agents/                 核心主干与按需旁路角色 subagent
 │   ├── pm.md                   需求澄清
 │   ├── analyst.md              现状分析（只读）
 │   ├── architect.md            方案设计 + 契约定义 + 任务拆解
-│   ├── frontend-developer.md
-│   ├── backend-developer.md
-│   ├── qa.md                   测试验证
-│   ├── reviewer.md             代码评审 + 复盘
-│   └── knowledger.md           知识沉淀 + 检索（只写 knowledge/<类别>/）
+│   ├── frontend-developer.md   前端业务实现
+│   ├── backend-developer.md    后端业务实现
+│   ├── dba.md                  数据库与双向平滑迁移（按需条件角色）
+│   ├── qa.md                   测试与门禁验证
+│   ├── submitter.md            代码归因暂存与提交推送
+│   ├── devops.md               发布部署与健康巡检（交付旁路）
+│   ├── reviewer.md             代码评审 + 复盘总结
+│   ├── knowledger.md           知识沉淀 + 检索（只写 knowledge/<类别>/）
+│   ├── impact-scout.md         跨仓影响面调研（只读旁路）
+│   ├── debugger.md             线上排障与故障归因（只读旁路）
+│   └── security-auditor.md     安全与合规审计（只读旁路）
 └── skills/
     ├── wb-flow/                主编排：全链路推进
     ├── wb-loop/                自动排空循环

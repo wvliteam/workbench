@@ -242,10 +242,15 @@ python3 .claude/hooks/wb.py task add --title "role scopes 按角色分节输出"
 
 需要用户决策的典型场景（用 AskUserQuestion）：pm 报上来的阻塞待确认项、architect 的方案取舍、契约变更的影响面、是否强推门禁、QA 报的缺陷是修还是接受。
 
-## 边界
+## 边界与旁路角色调度
 
 - 只做流程编排。用户直接问一个技术问题、改一行代码，不要拉起整条流程。
 - 小改动（一两个文件、无接口变化）不值得走六阶段。直接做完，告诉用户「这个改动没走完整流程，因为…」。
-- **规模研判说不准时**（不知道牵动几个仓、几个文件、有没有跨仓契约）-> 派只读侦查 agent `impact-scout` 拿影响面清单，据此判定走不走完整 flow。侦查可下放，**决策（flow 归属、走不走六阶段、验收）不下放**，那是编排者的。明显小（一两文件无接口）直接做、明显大（已知跨仓/动契约/迁移）直接进 flow，都不派——只在规模真说不准时才付这次 agent 往返。`impact-scout` 是非角色只读 agent，不占阶段、不写任何文件。
+- **跨仓影响面研判（Pre-flow 旁路）**：规模研判说不准时（不知道牵动几个仓、几个文件、有没有跨仓契约）-> 派只读侦查 agent `impact-scout` 拿影响面清单，据此判定走不走完整 flow。明显小直接做、明显大直接进 flow，都不派。`impact-scout` 是非角色只读 agent，不占阶段、不写任何文件。
+- **故障与告警归因（Pre-flow 旁路）**：收到线上报警、错误日志、崩溃堆栈或偶发 Bug 现象时 -> 派只读排障 agent `debugger` 调查堆栈与根因代码（`file:line`），产出四段式根因报告；若确认是微小确定的单点修补，由主线程或开发角色直接修，若是系统性/跨仓缺陷，以该报告作为 clarify/analyze 的输入拉起 `wb-flow`。
+- **数据库与平滑迁移（Develop 条件旁路）**：若 `design` 方案涉及数据模型变更（DDL、历史数据迁移、分库分表、大表索引）-> 由 `architect` 在任务图中按需动态创建 `dba` 任务（`wb.py task add --role dba --phase develop --write-scopes "migrations/**"`），专职负责编写并验证对称回滚（Up/Down）脚本与零停机（Expand & Contract）模式，普通业务开发不碰 DDL。
+- **安全与合规审计（Advisory 旁路）**：在方案设计阶段涉及鉴权与数据流转，或代码涉及敏感凭据/外部调用时 -> 派只读 `security-auditor` 开展威胁建模或静态合规扫描（OWASP Top 10、越权漏洞、PII 脱敏），产出安全阻断清单。
+- **发布与环境部署（Post-verify 交付旁路）**：在 `submitter` 提交推送后，或在独立发布流程中 -> 派 `devops` 角色感知远程 CI/CD 构建状态、核对容器与 K8s 部署配置、在授权下执行发布与健康巡检，产出 `artifacts/<flow>/verify/deploy-report.md`。
 - 用户中途插入新需求 -> 派 `pm` 追加变更记录，别悄悄扩大范围。
 - 需要无人值守连续排空任务 -> 用 `/wb-loop`。
+
