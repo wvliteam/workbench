@@ -11,5 +11,10 @@
 | `reviewer` | `common.md` + 项目 workspace 的 Reviewer 文档 | 评审和复盘 |
 | `knowledger` | `common.md` + 项目 workspace 的 Knowledger 文档 | 知识沉淀和查找 |
 | `submitter` | `common.md` + `submitter/index.md`（含 commit-format、push-config） | 代码选择性提交与推送 |
+| `impact-scout` | `common.md` + `impact-scout/index.md` | 跨仓影响面调研（只读旁路） |
+| `debugger` | `common.md` + `debugger/index.md` | 线上排障与故障归因（只读旁路） |
+| `dba` | `common.md` + `dba/index.md`（含 role.md） | 数据库与平滑迁移开发（按需条件角色） |
+| `devops` | `common.md` + `devops/index.md`（含 role.md） | 发布部署与健康巡检（交付旁路角色） |
+| `security-auditor` | `common.md` + `security-auditor/index.md` | 安全与合规审计（只读旁路） |
 
 角色定义引用本索引和 workspace 提供的角色文档，不把项目路径、版本和仓库清单写死在通用 workbench 中。

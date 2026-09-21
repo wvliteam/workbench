@@ -1,6 +1,6 @@
 # 软件开发工作台
 
-这个仓库是一套供多种 coding agent 共用的软件开发流程工作台：六阶段流水线、八个角色 subagent、契约管理、门禁校验、任务调度与权限守卫。
+这个仓库是一套供多种 coding agent 共用的软件开发流程工作台：主干六阶段流水线、核心与按需旁路角色 subagent、契约管理、门禁校验、任务调度与权限守卫。
 
 **本文件（`AGENTS.md`）是协作约定的唯一正文，其他入口文件名（如 `CLAUDE.md`）以软链指向它** —— 各端 agent 按自己的约定文件名读取项目指导，接入新端时加一条软链即可，不复制正文。改协作约定只改本文件。
 
@@ -142,7 +142,11 @@ python3 .claude/hooks/wb.py flow desc main --desc '摘要'   # 补填/更新指�
 
 同一个仓库要走第二个需求:并行用 `flow new`(状态、门禁记录、产物按 flow 隔离);需要代码也物理隔离时,用 `git worktree add ../foo-featureB`,新 worktree 也归外层状态管。串行接续则先 `report --write` 归档,再 `init --force` 重开。
 
-## 六阶段与角色
+## 六阶段与角色（主干与旁路双轨制）
+
+工作台采用**主干闭环 + 旁路特化**架构：80% 常规需求由 6 阶段主干流水线快速通过；高危或专业场景按需唤醒旁路角色，不增加常态流程开销。
+
+### 主干流水线
 
 `clarify` → `analyze` → `design` → `develop` → `verify` → `retro`
 
@@ -154,6 +158,15 @@ python3 .claude/hooks/wb.py flow desc main --desc '摘要'   # 补填/更新指�
 | develop | `frontend-developer` `backend-developer` | 代码 + `<flow>/develop/verification.md`（编排者复核每个任务的校验命令与输出后写入，不是 subagent 自己写） |
 | verify | `qa` → `submitter` | `qa`：`<flow>/verify/test-report.md`；`submitter`（依赖 qa 任务，在 design 阶段由 architect 加入任务图）：git commit + push + `<flow>/verify/submit-report.md`（含 commit SHA、纳入文件、推送目标） |
 | retro | `reviewer` `knowledger` | `<flow>/retro/retro.md`（含「改进项」「沉淀」）+ `knowledge/<类别>/` 沉淀条目（retro 门禁查 `knowledge_written`：递归数条目，或 retro.md 显式「无可沉淀」） |
+
+### 旁路与按需角色（Sidecar Roles）
+
+不绑死在默认 6 阶段强依赖链条中，由编排者根据需求特性按需唤醒：
+- **`impact-scout`（只读旁路）**：前置跨仓影响面调研。规模研判说不准时唤醒，只读遍历拓扑与源码，输出影响清单与跨仓契约点。
+- **`debugger`（只读旁路）**：线上排障与故障归因。针对报警、错误日志与崩溃堆栈，定位根因代码（`file:line`），建议直接小修或启动 flow。
+- **`dba`（条件开发角色）**：数据库与迁移专家。仅在方案涉及表结构变更（DDL/DML/索引）时由 architect 在 develop 阶段按需建任务，专职编写对称回滚（Up/Down）脚本与零停机模式。
+- **`security-auditor`（只读旁路）**：安全与合规审计。按需针对架构方案威胁建模或代码合规审计（OWASP Top 10、越权漏洞、PII 泄露、三方组件 CVE）。
+- **`devops`（交付旁路）**：发布与运维部署。在 submitter 推送代码后或独立发布流程中唤醒，感知远程 CI/CD 结果、核对容器/K8s 部署配置并执行发布健康巡检。
 
 编排者不亲自干活，派 subagent。派发时给足上下文：需求原话、上游产物路径、要读的契约文件、相关的验收标准条目。
 

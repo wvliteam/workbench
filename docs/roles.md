@@ -1,6 +1,16 @@
 # 角色设计
 
-八个角色 subagent（develop 阶段两个，reviewer 兼代码评审，knowledger 兼沉淀与检索）。
+主干核心 subagent（6 阶段流水线）+ 旁路与按需 subagent（跨仓侦查、线上排障、DBA、DevOps、安全审计）。
+
+## 架构：主干流水线与旁路角色双轨制
+
+为了避免常规简单需求面临过重流程负担，同时确保复杂与高危工程动作（如数据库结构迁移、安全合规、线上事故排障与生产发布）具备严密防线，工作台采用**主干与旁路双轨制**：
+1. **主干流水线角色（In-Flow Backbone）**：负责必须闭环的 6 阶段核心链路（`pm` → `analyst` → `architect` → `fe/be-dev` → `qa` → `submitter` → `reviewer`/`knowledger`）。
+2. **旁路与按需角色（Off-Flow / Sidecar / On-Demand）**：
+   - **前置只读旁路**：`impact-scout`（跨仓规模与影响面调研）、`debugger`（线上告警与故障堆栈根因归因）；
+   - **开发条件旁路**：`dba`（仅当方案涉及数据库 Schema/DDL/迁移变更时由 architect 动态插入任务）；
+   - **只读审计旁路**：`security-auditor`（威胁建模、OWASP 与权限数据合规静态审查）；
+   - **交付部署旁路**：`devops`（代码 push 后的远端 CI/CD 感知、K8s/容器物料校验与发布健康巡检）。
 
 ## 为什么按角色划分而不按任务类型
 
@@ -8,7 +18,7 @@
 
 按角色划分带来三个可强制的东西：
 
-1. **固定的写入范围** —— `pm` 永远只写产物目录，`qa` 永远只写测试目录。权限守卫可以硬编码这个映射。
+1. **固定的写入范围** —— `pm` 永远只写产物目录，`qa` 永远只写测试目录，`dba` 专职写迁移脚本。权限守卫可以硬编码这个映射。
 2. **固定的产物路径与格式** —— 下游 agent 按固定路径读上游产物，门禁按固定章节校验。
 3. **固定的交接格式** —— 每个 agent 的定义末尾都规定了「交回主线程的报告」包含什么，编排者不需要猜。
 
@@ -16,18 +26,24 @@
 
 这里是角色写入范围的唯一出处，权威值以 `wb_const.py` 的 `DEFAULT_ROLE_SCOPES` 为准（`wb.py role scopes` 打当前项目的实际值）。
 
-| 角色 | 阶段 | 产出 | 可写 | 模型 |
+| 角色 | 阶段 / 属性 | 产出 | 可写 | 模型 |
 | --- | --- | --- | --- | --- |
-| `pm` | clarify | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
-| `analyst` | analyze | `artifacts/<flow>/analyze/current-state.md` + `repos/<项目>/<仓库>/{overview,setup,test}.md`（跨需求复用的稳定事实：职责 / 启动 / 测试） | `artifacts/*/analyze/**` / `repos/*/*/{overview,setup,test}.md`（**逐文件列** —— 写成 `repos/*/*/**` 会把 `repos/.source/` 下的源码一并放行） | sonnet |
-| `architect` | design | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` | opus |
-| `frontend-developer` | develop | 前端代码 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `web/ frontend/ app/ src/ public/ components/ pages/ lib/ styles/` + 前端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
-| `backend-developer` | develop | 后端代码 + 迁移 + 校验（命令与输出报回编排者）+ 异常时的执行记录 | `server/ backend/ api/ src/ migrations/` + 后端扩展名 + `*.md` + `artifacts/*/develop/tasks/**` | sonnet |
-| `qa` | verify | `artifacts/<flow>/verify/test-report.md` | `tests/ test/ e2e/ spec/` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
-| `reviewer` | retro + 临时评审 | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` | opus |
-| `knowledger` | retro 沉淀 + 随时检索 | `knowledge/<类别>/` 下的经验条目与类别 `index.md` | `knowledge/**` | sonnet |
+| `pm` | clarify (主干) | `artifacts/<flow>/clarify/requirements.md` | `artifacts/*/clarify/**` | sonnet |
+| `analyst` | analyze (主干) | `artifacts/<flow>/analyze/current-state.md` + 单仓画像三件套 | `artifacts/*/analyze/**` / `repos/*/*/{overview,setup,test}.md` | sonnet |
+| `architect` | design (主干) | `design.md` + 契约 + 任务图 | `artifacts/*/design/**` / `contracts/**` | opus |
+| `frontend-developer` | develop (主干) | 前端代码 + 校验命令输出 + 异常执行记录 | 前端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
+| `backend-developer` | develop (主干) | 后端代码 + 校验命令输出 + 异常执行记录 | 后端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
+| `dba` | develop (条件旁路) | 数据库双向迁移脚本 + 回滚校验 | `migrations/**`, `schemas/**`, `schema/**`, `sql/**`, `tasks/**` | sonnet |
+| `qa` | verify (主干) | `artifacts/<flow>/verify/test-report.md` | `tests/**` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
+| `submitter` | verify (主干) | `artifacts/<flow>/verify/submit-report.md` + git commit/push | `artifacts/*/verify/**` | sonnet |
+| `devops` | verify/release (交付旁路) | `artifacts/<flow>/verify/deploy-report.md` | `deploy/**`, `k8s/**`, `docker/**`, `.github/workflows/**`, `ci/**`, `helm/**`, `artifacts/*/verify/**` | sonnet |
+| `reviewer` | retro (主干) | `artifacts/<flow>/retro/retro.md` + 交付报告 | `artifacts/*/retro/**` | opus |
+| `knowledger` | retro (主干) | `knowledge/<类别>/` 经验条目与类别 `index.md` | `knowledge/**` | sonnet |
+| `impact-scout` | pre-flow (只读旁路) | 跨仓影响面清单、契约依赖与漂移 | **只读**（无 Write/Edit） | sonnet |
+| `debugger` | pre-flow (只读旁路) | 故障根因分析报告（触发机理、`file:line`、处置建议） | **只读**（无 Write/Edit） | opus |
+| `security-auditor` | advisory (只读旁路) | 安全与合规审计报告（阻断项、CVE、权限隐患） | **只读**（无 Write/Edit） | opus |
 
-**模型分配**：`architect` 与 `reviewer` 用 opus —— 方案取舍与复盘归因是判断密度最高的两件事，做错的成本由后面所有阶段承担。其余用 sonnet。
+**模型分配**：`architect`、`reviewer`、`debugger` 与 `security-auditor` 用 opus/high-reasoning —— 方案架构、复盘归因、故障定位与安全审计是判断密度最高的环节。其余用 sonnet。
 
 **三处范围是补实测出来的误拦**，每一条堵的都是该角色的本职而不是跨界：
 
@@ -43,20 +59,26 @@
 
 阶段过了门禁之后还多一道：那份产物被登记成契约并锁定，连 owner 自己都要先 `contract unlock --reason` 申报才能改（见 [contracts.md](contracts.md#阶段产物)）。阶段隔离只在守卫判得出角色时生效，冻结不依赖角色 —— 主线程与非角色 agent 也拦得住。
 
-## 四个不许动手的角色
+## 不许修改业务代码的角色
 
-`analyst`、`qa`、`reviewer` 都能用 Write，但写入范围不含产品代码。`knowledger` 更窄 —— 只有 `knowledge/**`。`pm` 同样不含代码路径（它只能写自己的产物目录），只是它的本职是澄清需求而非触碰代码，不算一个「诱惑」。这不是疏忽：
+在工作台体系中，多达 7 个角色不拥有业务产品代码的修改权限，分为两类：
 
-> 注（2026-09-12，2026-09-14 更新）：上表「可写」列是**范围表**，守卫只在工作流核心路径（受守前缀：`.workbench/` `knowledge/` `references/` `.claude/` `.codex/` `.agents/` `.comate/` `agents/` `skills/` `plugins/` `mcps/` 等 + 多仓库布局下的 `scripts/` `repos.json` `repos/index.md` `.vscode/`）上强制执行它；仓库代码、`/tmp`、项目根外不做角色判定 —— 「谁写哪块代码」由 harness 与模型层面规范，不是工作台的职责。注意 `repos/` 整体**不在**受守前缀里（`repos/<名>/` 可能是自带 `.workbench/` 的嵌套项目根），画像的可写面由 `analyst` 的逐文件范围收窄。详见 [permissions.md](permissions.md#第四层角色写入范围)。
+### 1. 主干流水线中的无业务代码角色
+`analyst`、`qa`、`reviewer` 虽然配置了 Write 工具，但写入范围严格排除了业务代码。`knowledger` 更是被守卫收窄至仅 `knowledge/**`，`pm` 只能写自己的产物目录。
 
-| 角色 | 为什么不许改代码 |
+| 角色 | 为什么不许改业务代码 |
 | --- | --- |
 | `analyst` | 分析阶段动手改代码是最常见的流程破坏 —— 边看边改会跳过方案设计，改完也没人评审 |
-| `qa` | 自己顺手改会让缺陷统计失真，也绕过了开发的自检责任。缺陷要打回成任务 |
+| `qa` | 自己顺手改会让缺陷统计失真，也绕过了开发的自检责任。缺陷必须打回成任务交开发修复 |
 | `reviewer` | 评审者改代码就没人评审那次改动了 |
-| `knowledger` | 知识条目是它唯一的产出。让它顺手改别的，沉淀就从「专职判断」退化成「谁顺手谁写」，查找的人无从判断哪条可信 |
+| `knowledger` | 知识条目是它唯一的产出。让它顺手改别的，沉淀就从「专职判断」退化成「谁顺手谁写」 |
 
-`qa` 能写 `tests/` 与测试框架配置（`*.config.ts` / `pytest.ini` 之类）—— 搭测试与补测试是它的职责，改产品代码不是。`reviewer` 的范围只剩自己阶段的 retro 产物；落 ADR、补交付报告写到 `docs/` 仍然可以（`docs/` 不是受守前缀，不判角色），但不再靠裸 `*.md` 授权 —— 那会在 `fnmatch` 下跨 `/` 漏进受守的 `knowledge/`。
+`qa` 能写 `tests/**` 与测试框架配置（`*.config.ts` / `pytest.ini` 等）—— 搭测试与补测试是其本职，改业务代码不是。`reviewer` 的范围只剩自己阶段的 retro 产物。
+
+### 2. 纯只读旁路执行体（Pure Read-only Sidecars）
+`impact-scout`、`debugger` 与 `security-auditor` 的工具集直接被物理配置为：
+`claude_tools = "Read, Grep, Glob, Bash"`（完全没有 Write 与 Edit 工具）。
+守卫对非角色 agent 默认阻断受守前缀的写入，Bash 工具中的静态重定向与流写入同样受到深度解析拦截。三者只做探查、归因与审计，纯依靠结构化分析文本向编排者汇报，从机制层面杜绝任何越权修改或副作用。
 
 ## 每个角色的开工步骤
 
@@ -144,7 +166,51 @@ wb.py task reopen T1 --note "分页 total 恒为 0"     # 或者已完成的任�
 
 重复是刻意的：**subagent 只看自己的定义，不看别人的，也不看这份文档。** 写进共享文档等于没写。代价是改一条规则要改多个文件 —— 接受这个代价，因为漏一处的后果是那个角色少一条底线，而不是文档不一致。
 
-## 定制角色
+## 旁路角色的运行机制与调度场景
+
+旁路角色（Sidecar / On-Demand Roles）不绑定在默认的 6 阶段强制链条中，按需唤醒：
+
+### 1. `impact-scout`（跨仓影响面调研，只读旁路）
+* **定位**：在主 Agent 决定是否走完整 flow 之前使用。
+* **场景**：起点只有一个模糊的业务需求、现象或跨仓改动，不确定涉及哪些仓库、跨仓契约在哪。
+* **机制**：纯只读（`Read, Grep, Glob, Bash`）。输出四段式影响面清单，不下业务决策，由编排者据此决定直接改还是拉起 flow。
+
+### 2. `debugger`（线上排障与故障归因，只读旁路）
+* **定位**：在主 Agent 接收到线上 Bug、报警、崩溃堆栈或偶发异常时使用。
+* **场景**：面对线上故障与调用异常，需快速定位到具体源码行，并判定是否为系统性缺陷。
+* **机制**：纯只读。提取堆栈关键帧、根据路由表定位源码、分析触发条件并可选在本地执行无副作用的只读复现单测。输出故障表现、根因 `file:line`、影响链路与处置建议（微小修复直接修，复杂缺陷作为 clarify 输入拉起 flow）。
+
+### 3. `dba`（数据库与平滑迁移专家，开发条件旁路）
+* **定位**：`develop` 阶段按需动态插入。
+* **场景**：方案设计涉及数据库 DDL/DML 变更、分库分表、大表加索引或历史数据回填。
+* **机制**：写入范围限定在 `migrations/**`, `schemas/**`, `schema/**`, `sql/**`。强制执行双向对称迁移（Up/Down）、遵循 Expand & Contract 零停机演进模式、规避长事务与全表锁。
+
+### 4. `security-auditor`（安全合规审计员，只读旁路）
+* **定位**：在 `design`（威胁建模）或 `verify`（静态代码安全审计）阶段调用。
+* **场景**：涉及认证授权系统、外部开放接口、加解密算法或用户隐私 PII 数据。
+* **机制**：纯只读。针对 OWASP Top 10、水平/垂直越权（IDOR）、SQL/命令注入、硬编码凭据与依赖库高危 CVE 进行静态排查，输出安全阻断清单（Blockers）。
+
+### 5. `devops`（发布与环境运维专家，交付旁路）
+* **定位**：在 `submitter` 提交推送后，或在独立发布流程中调用。
+* **场景**：代码已提交至分支，需确认远程 CI/CD 结果、核对容器与 K8s 编排并执行上线巡检。
+* **机制**：写入部署物料配置与 `artifacts/<flow>/verify/deploy-report.md`。轮询远程构建状态、检查探针与环境变量凭据安全，并在异常时执行预备的回滚指令。
+
+---
+
+## 业务自定义 References 知识钩子机制
+
+工作台采用**“业务事实与通用 Agent Prompt 解耦”**的设计原则：
+1. **为什么不写死在 Prompt 中**：
+   各个业务项目的数据库版本（MySQL vs Postgres）、监控平台（Prometheus vs Noah）、CI/CD 流水线（GitHub Actions vs GitLab）各不相同。若硬编码在 `agents/*.toml` 中，工作台在多项目分发时会造成严重污染。
+2. **知识钩子分层约定**：
+   每个角色在开工第一步统一读取 `references/workspace/<role>/index.md`，该目录下提供三件套标准模板：
+   - `index.md`：参考文档索引与通用协议关联（如 `common.md`, `toolchain.md`, `repo-routing.md`）；
+   - `role.md`：业务自定义规则（项目方言、大表清单、环境拓扑、监控平台地址、合规基线），支持业务项目在本地直接覆盖；
+   - `skills.md`：该角色建议使用的 Skill 工具推荐表及优先级，由业务 workspace 按需选配。
+
+---
+
+## 定制与新增角色
 
 ### 调整写入范围
 
@@ -156,18 +222,25 @@ wb.py config set role_scopes.backend-developer \
     '["server/**","internal/**","migrations/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
-单体项目里 `frontend-developer` 与 `backend-developer` 的默认范围都含 `src/**`，实际上不隔离。按真实目录改掉。跨仓库工作区的默认范围会歪成按语言隔离，必须改成按仓库前缀 —— 原因见 [architecture.md](architecture.md#多仓库工作区的两处必调不调是静默出错)。
+改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（如 `".workbench/artifacts/*/develop/tasks/**"`, `".workbench/artifacts/*/verify/**"`）。
 
-改定制范围时**别把产物目录放宽回 `.workbench/artifacts/**`** —— 那会撤掉阶段隔离。要给某个角色额外的产物目录就明确列出来（`".workbench/artifacts/*/develop/tasks/**"`, `".workbench/artifacts/*/verify/**"`）。
+### 新增一个角色的标准流程
 
-### 加一个角色
-
-1. 把名字加进 `wb_const.py` 的 `ROLES` 列表（`task add --role` 与 `contract --owner` 的 choices 由它生成）。
-2. 在 `DEFAULT_ROLE_SCOPES` 加写入范围。
-3. 写 `.claude/agents/<名字>.md`，照现有 agent 的结构：frontmatter（`name` / `description` / `tools` / `model`）+ 开工三步 + 职责 + 产物模板 + 规则 + 交回报告格式。**`name` 必须与 `ROLES` 里的名字一字不差** —— 守卫按载荷 `agent_type` 查 `role_scopes`，对不上就退回读 `.workbench/role`，角色隔离静默降级。
-4. 在 `wb-flow` 的阶段-角色对应表里加一行。
-5. 跑 `wb.py selfcheck`。
-
-`description` 决定 Claude 什么时候自动选用这个 agent，要写清「什么情况下用」而不只是「它是什么」。
-
-加之前先问：这个角色的写入范围与现有角色重叠吗？重叠说明不该拆 —— 两个 agent 改同一批文件会互相覆盖，且没有机制能检出。
+1. **确定角色类型（主干 vs 旁路）**：
+   - **主干角色**：承担 6 阶段必要产物，进入流水线状态推进依赖；
+   - **旁路角色**：按需调用，若为纯只读则不配 Write/Edit 工具，若涉及受控写入（如 DBA/DevOps）则精确分配范围；
+2. **单一事实源定义（TOML）**：
+   在根目录创建 `agents/<角色名>.toml`，配置 `name`、`description`、`model`、`claude_tools` 与 `developer_instructions`。在 Instructions 开头加入 `references/workspace/<角色名>/index.md` 业务知识钩子；
+3. **编译并同步全平台**：
+   运行 `python3 scripts/generate_agents.py` 编译生成对应的 `agents/<角色名>.md`；
+   为各端创建入口软链：
+   - Claude 端：`.claude/agents/<角色名>.md -> ../../agents/<角色名>.md`
+   - Codex 端：`.codex/agents/<角色名>.toml -> ../../agents/<角色名>.toml`
+4. **配置工作台内核（如涉及状态或写入）**：
+   - 若角色具备写入权限或需在任务图中分配（`wb.py task add --role <名>`），将名字加入 `wb_const.py` 的 `ROLES`；
+   - 若角色参与代码/迁移编写，加入 `DEVELOPER_ROLES`；
+   - 配置角色的自然阶段 `ROLE_NATURAL_PHASE` 与默认可写范围 `DEFAULT_ROLE_SCOPES`；
+5. **初始化业务自定义 References 钩子**：
+   在 `references/workspace/<角色名>/` 下创建 `index.md`、`role.md` 与 `skills.md`，并在 `references/workspace/roles.md` 登记索引；
+6. **自检验证**：
+   运行 `python3 scripts/generate_agents.py --check` 与 `python3 .claude/hooks/wb.py selfcheck` 确保全链路通过。

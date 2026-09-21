@@ -35,7 +35,7 @@ def main() -> int:
         data = tomllib.loads(source.read_text(encoding="utf-8"))
         target = source.with_suffix(".md")
         content = render(data)
-        if target.read_text(encoding="utf-8") != content:
+        if not target.exists() or target.read_text(encoding="utf-8") != content:
             changed.append(target.name)
             if not args.check:
                 target.write_text(content, encoding="utf-8")

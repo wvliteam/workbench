@@ -41,15 +41,17 @@ ROLES = [
     "architect",
     "frontend-developer",
     "backend-developer",
+    "dba",
     "qa",
     "submitter",
+    "devops",
     "reviewer",
     "knowledger",
 ]
 
 # 争议熔断只拦 developer：pm / analyst / architect / qa / reviewer 不在列。
 # architect 需要改契约解除争议，qa 需要跑测试，pm 需要改需求 —— 全拦死没人能善后。
-DEVELOPER_ROLES = ("frontend-developer", "backend-developer")
+DEVELOPER_ROLES = ("frontend-developer", "backend-developer", "dba")
 
 # 角色的自然阶段：契约 bump / readopt 给消费方建同步返工任务时，任务的 phase 按
 # 消费方角色的自然阶段推断，而不是一律用当时的当前 phase —— 否则会出现「analyze
@@ -61,8 +63,10 @@ ROLE_NATURAL_PHASE = {
     "architect": "design",
     "frontend-developer": "develop",
     "backend-developer": "develop",
+    "dba": "develop",
     "qa": "verify",
     "submitter": "verify",   # verify 通过后、retro 前执行（同属 verify 收尾动作）
+    "devops": "verify",      # 交付部署旁路（verify 通过后或独立发布流程）
     "reviewer": "retro",
     "knowledger": "retro",
 }
@@ -203,6 +207,10 @@ DEFAULT_ROLE_SCOPES = {
         "server/**", "backend/**", "api/**", "src/**", "migrations/**",
         "*.json", "*.py", "*.go", "*.java", "*.md",
     ],
+    "dba": [
+        ".workbench/artifacts/*/develop/tasks/**",
+        "migrations/**", "schemas/**", "schema/**", "sql/**", "*.sql",
+    ],
     "qa": [
         ".workbench/artifacts/*/verify/**",
         "tests/**", "test/**", "e2e/**", "spec/**",
@@ -212,6 +220,10 @@ DEFAULT_ROLE_SCOPES = {
     # 这份报告是 retro 的输入，也是「已交付」的唯一可回溯凭据。
     # 除此之外不写产品代码：git add/commit/push 走 Bash，不走 Write/Edit。
     "submitter": [".workbench/artifacts/*/verify/**"],
+    "devops": [
+        ".workbench/artifacts/*/verify/**",
+        "deploy/**", "k8s/**", "docker/**", ".github/workflows/**", "ci/**", "helm/**",
+    ],
     "reviewer": [".workbench/artifacts/*/retro/**"],
     # 知识库写权限专属（ROMA 对比第八节的沉淀出口）。knowledge/ 在 GUARDED_PREFIXES
     # 里，别的角色写不进 —— 否则沉淀会退化成「谁顺手谁写」，查找的人不知道哪条可信。

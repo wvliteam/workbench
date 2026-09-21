@@ -1920,7 +1920,9 @@ def cmd_selfcheck(args) -> None:
         assert "test" not in st_b.get("gate_commands", {}), \
             "flow new 不该继承 main 的 gate_commands.test（代码库强相关，摩擦记录 #3）"
         # flow 名是信任边界：../ 不能把状态目录挪出工作区
-        code, out = quiet("flow", "new", "--desc", "pwn", "../pwn")
+        # name 必须在 --desc 之前：name 是 nargs="?" 位置参数，被 --desc 从中间
+        # 劈开会触发 argparse 的位置参数分组限制，报 unrecognized arguments 而非名字校验
+        code, out = quiet("flow", "new", "../pwn", "--desc", "pwn")
         assert code == 1 and "flow 名" in out, out
         # 角色 subagent 不能开/切/删/改 flow（编排者的调度决定）
         for act in ("new", "switch", "remove", "desc"):

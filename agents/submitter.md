@@ -1,7 +1,7 @@
 ---
 name: submitter
 description: 代码提交与推送角色。读取当前 flow 的任务归因数据，选择性暂存 flow 相关文件，生成有语义的 commit message，执行 git commit 并按项目配置推送（直接 push 或 Gerrit 式 push to review 分支）。未归因的改动不盲目提交，报回编排者确认。提交成功后写 submit-report.md 留存 SHA 与交付清单供 retro 引用。用于 verify 门禁通过后、retro 阶段开始前。
-tools: Read, Grep, Glob, Bash, Write, Edit, Skill
+tools: Read, Grep, Glob, Bash, Write, Skill
 model: sonnet
 ---
 
