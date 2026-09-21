@@ -1,6 +1,6 @@
 # 权限模型
 
-权限守卫是 `PreToolUse` hook，在**每一次**工具调用之前同步执行。matcher 是 catch-all（`.claude/settings.json` 里是 `.*`），不逐个列工具名 —— 早期显式清单的写法漏掉了清单外的工具，`Monitor`（与 Bash 同一个 shell 环境跑 `tool_input.command`）就曾因此整层绕过。catch-all 下每个工具调用都过守卫、由 hook 自己分发。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
+权限守卫是 `PreToolUse` hook，在**每一次**工具调用之前同步执行。matcher 是 catch-all，两端一致：Claude（`.claude/settings.json` 的 `PostToolUse`/`PreToolUse` 用 `.*` 或按工具集匹配）与 Codex（`.codex/hooks.json` 的 `PreToolUse` 用 `.*`）都不过滤工具名就去调守卫 —— 早期显式清单的写法漏掉了清单外的工具，`Monitor`（与 Bash 同一个 shell 环境跑 `tool_input.command`）就曾因此整层绕过。catch-all 下每个工具调用都过守卫、由 hook 自己分发；对既非 Read/Monitor 也非写入型/Shell 的未知工具（如 `mcp__*`）守卫读不到写目标就自然放行。退出码 2 阻止调用，stderr 内容回灌给模型作为拒绝理由。
 
 ## 为什么需要这一层
 

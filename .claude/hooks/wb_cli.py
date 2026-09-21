@@ -66,6 +66,9 @@ def cmd_init(args) -> None:
     for ph in PHASES:
         (wb_dir(root) / "artifacts" / flow / ph).mkdir(parents=True, exist_ok=True)
     st = default_state(args.name or root.name)
+    desc = (getattr(args, "desc", None) or "").strip()
+    if desc:
+        st["description"] = desc
     scopes = repo_layout_scopes(root)
     if scopes:
         st["role_scopes"] = scopes
@@ -80,7 +83,8 @@ def cmd_init(args) -> None:
     if purged:
         print(f"--force：已清理上一代产物 {purged} 个文件（.workbench/artifacts/{flow}/）"
               f"—— 重开这条线不继承上一代的产物")
-    print(f"项目：{st['project']}  flow：{flow}  当前阶段：clarify（需求澄清）")
+    print(f"项目：{st['project']}  flow：{flow}  当前阶段：clarify（需求澄清）"
+          + (f"  需求：{desc}" if desc else ""))
     if inherited:
         print(f"工作区级配置（角色范围 / 门禁命令 / 并行度）已从 flow {inherited} 继承；"
               f"本 flow 的覆盖用 config set，不会写回 {inherited}")
@@ -1058,6 +1062,25 @@ def cmd_role(args) -> None:
                 print(f"  {uname} —— {ureason}")
 
 
+
+def _flow_req_summary(root: Path, flow: str, max_len: int = 30) -> str:
+    """读取 state.json["description"] 作为 flow 摘要。
+
+    desc 为空时返回提醒字符串，提示 main agent 补充
+    （存量 flow 缺字段 / flow new 漏填时均提醒）。
+    """
+    try:
+        st = json.loads(state_path(root, flow).read_text(encoding="utf-8"))
+        desc = (st.get("description") or "").strip()
+        if desc:
+            if len(desc) > max_len:
+                desc = desc[:max_len - 1] + "…"
+            return desc
+    except (OSError, json.JSONDecodeError):
+        pass
+    return "（desc 未填，请补充：wb.py flow desc --desc '摘要'）"
+
+
 def cmd_flow(args) -> None:
     """flow（需求线）管理：list / new / switch / remove。
 
@@ -1077,15 +1100,26 @@ def cmd_flow(args) -> None:
                 phase = json.loads(state_path(root, f).read_text(encoding="utf-8"))["phase"]
             except (OSError, json.JSONDecodeError, KeyError):
                 phase = "（未初始化）"
-            print(f"{f:<20} {phase:<12}{mark}")
+            # 从 requirements.md 提取需求标题摘要，便于判断是否复用当前 flow
+            # 而无需打开文件阅读全文（pre-flow 判断的低成本辅助）。
+            summary = _flow_req_summary(root, f)
+            summary_col = f"  {summary}" if summary else ""
+            print(f"{f:<20} {phase:<12}{mark}{summary_col}")
         return
     if args.action == "new":
         flow = args.name
         if not flow:
             die("flow new 需要 <flow 名>")
+        desc = (getattr(args, "desc", None) or "").strip()
+        if not desc:
+            die("flow new 需要 --desc '<需求摘要>'：一句话说清这条需求线要做什么，"
+                "flow list 直接展示、无需打开 requirements.md 才能判断是否复用。")
+        if len(desc) > 50:
+            die(f"--desc 最多 50 字，当前 {len(desc)} 字：{desc!r}")
         if state_path(root, flow).is_file():
             die(f"flow {flow} 已存在，要用它直接 switch")
-        args2 = argparse.Namespace(root=str(root), name=None, force=False, flow=flow)
+        args2 = argparse.Namespace(root=str(root), name=None, force=False, flow=flow,
+                                   desc=desc)
         cmd_init(args2)
         return
     if args.action == "switch":
@@ -1161,6 +1195,21 @@ def cmd_flow(args) -> None:
         if (wb_dir(root) / "artifacts" / flow).is_dir():
             shutil.rmtree(wb_dir(root) / "artifacts" / flow, ignore_errors=True)
         print(f"已删除 flow {flow}（状态、锁、产物）")
+        return
+    if args.action == "desc":
+        flow = args.name or pointer_flow(root)
+        desc = (getattr(args, "desc", None) or "").strip()
+        if not desc:
+            die("flow desc 需要摘要文本：wb.py flow desc [<flow名>] --desc '一句话摘要'")
+        if len(desc) > 50:
+            die(f"摘要最多 50 字，当前 {len(desc)} 字：{desc!r}")
+        if not state_path(root, flow).is_file():
+            die(f"flow {flow} 不存在")
+        st = load_state(root, lock=True, flow=flow)
+        st["description"] = desc
+        log(st, "flow_desc_set", flow=flow, desc=desc)
+        save_state(root, st)
+        print(f"已更新 flow {flow} 摘要：{desc}")
 
 
 def cmd_config(args) -> None:
@@ -1270,9 +1319,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_init)
 
-    p = sub.add_parser("flow", help="需求线管理：list / new / switch / remove / attribute")
-    p.add_argument("action", choices=["list", "new", "switch", "remove", "attribute"])
+    p = sub.add_parser("flow", help="需求线管理：list / new / switch / remove / attribute / desc")
+    p.add_argument("action", choices=["list", "new", "switch", "remove", "attribute", "desc"])
     p.add_argument("name", nargs="?")
+    p.add_argument("--desc", help="new：需求摘要（必填）；desc：补填/更新摘要。存入 state.json，flow list 直接显示")
     p.add_argument("--force", action="store_true", help="remove 的确认开关")
     p.add_argument("--adhoc", action="store_true",
                    help="attribute：声明本轮为低风险单次改动、不建 flow（记账豁免）")
@@ -1280,6 +1330,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="attribute：按会话诚实归属到某条已存在需求线，不移动共享指针")
     p.add_argument("--reason", help="attribute --adhoc 必填：为什么不建 flow")
     p.set_defaults(func=cmd_flow)
+
+
 
     p = sub.add_parser("status", help="总览：阶段 / 任务 / 契约 / 就绪队列")
     p.add_argument("--json", action="store_true")

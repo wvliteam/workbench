@@ -1883,6 +1883,15 @@ def cmd_selfcheck(args) -> None:
         # 一条流水线一个 flow：state / 锁 / 产物互不覆盖；守卫读全部 flow 的并集。
         code, out = quiet("flow", "list")
         assert code == 0 and "main" in out, out
+        # desc 未填时 flow list 应提醒补充（main 在 init 时不填 --desc）
+        assert "desc 未填" in out, f"desc 空时应提醒，实际输出：{out}"
+        # 用 flow desc 补填后提醒应消失
+        code2, out2 = quiet("flow", "desc", "--desc", "selfcheck main flow 摘要")
+        assert code2 == 0, out2
+        code3, out3 = quiet("flow", "list")
+        assert "desc 未填" not in out3 and "selfcheck main flow 摘要" in out3, \
+            f"补填 desc 后 list 应显示摘要：{out3}"
+
         # 新 flow 继承 main 的工作区级配置（角色范围 / 门禁超时 / 并行度）—— 这些
         # 描述的是「这个工作区怎么干活」，不是单条需求线的属性；不继承则每条 flow
         # 重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉。
@@ -1891,12 +1900,17 @@ def cmd_selfcheck(args) -> None:
         # （摩擦记录 #3）。显式未配置比继承错的更安全。
         quiet("config", "set", "gate_commands.test", "echo selfcheck-inherit")
         main_before = load_state(tmp)
-        code, out = quiet("flow", "new", "feature-b")
+        code, out = quiet("flow", "new", "feature-b", "--desc", "selfcheck 测试用例 flow")
         assert code == 0, out
         code, out = quiet("flow", "list")
         assert "feature-b" in out and "main" in out, out
-        # 新 flow 从头开始：phase 回 clarify，任务表为空 —— 继承的是配置不是进度
+        # description 写入 state 并在 list 中展示
         st_b = load_state(tmp)
+        assert st_b.get("description") == "selfcheck 测试用例 flow", \
+            "flow new --desc 未写入 state.json description"
+        assert "selfcheck 测试用例 flow" in out, \
+            "flow list 未展示 description 摘要"
+        # 新 flow 从头开始：phase 回 clarify，任务表为空 —— 继承的是配置不是进度
         assert st_b["phase"] == "clarify", "flow new 后新 flow 应回 clarify"
         assert st_b["tasks"] == [], "flow new 后新 flow 不该继承任务"
         for key in INHERIT_KEYS:
@@ -1906,10 +1920,10 @@ def cmd_selfcheck(args) -> None:
         assert "test" not in st_b.get("gate_commands", {}), \
             "flow new 不该继承 main 的 gate_commands.test（代码库强相关，摩擦记录 #3）"
         # flow 名是信任边界：../ 不能把状态目录挪出工作区
-        code, out = quiet("flow", "new", "../pwn")
+        code, out = quiet("flow", "new", "--desc", "pwn", "../pwn")
         assert code == 1 and "flow 名" in out, out
-        # 角色 subagent 不能开/切/删 flow（编排者的调度决定）
-        for act in ("new", "switch", "remove"):
+        # 角色 subagent 不能开/切/删/改 flow（编排者的调度决定）
+        for act in ("new", "switch", "remove", "desc"):
             args_txt = (f"python3 .claude/hooks/wb.py flow {act} x"
                         + (" --force" if act == "remove" else ""))
             assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "backend-developer",

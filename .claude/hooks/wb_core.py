@@ -175,6 +175,7 @@ def default_state(name: str) -> dict:
         "version": STATE_SCHEMA,
         "state_rev": 0,  # 单调递增，每次 save_state +1；phase advance 用它做门禁前后的 CAS
         "project": name,
+        "description": "",   # flow new --desc 写入；不依赖 requirements.md 的摘要兜底
         "created": now(),
         "phase": "clarify",
         "phases": list(PHASES),

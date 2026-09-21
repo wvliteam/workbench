@@ -23,7 +23,7 @@ python3 .claude/hooks/wb.py init --name <项目名>
 python3 .claude/hooks/wb.py flow list
 ```
 
-根据请求与各 flow 的目标、产物和阶段判断是否完全匹配；完全匹配才执行 `flow switch <name>`，否则执行 `flow new <语义化名称>`。选定后再看状态：
+根据请求与各 flow 的目标、产物和阶段判断是否完全匹配；完全匹配才执行 `flow switch <name>`，否则执行 `flow new <语义化名称> --desc '<一句话摘要>'`。`flow list` 在每条 flow 后直接展示 desc 摘要（来自 `state.json`），未填时显示提醒，不必打开 requirements.md 即可判断是否复用。选定后再看状态：
 
 ```
 python3 .claude/hooks/wb.py status
@@ -36,7 +36,7 @@ python3 .claude/hooks/wb.py status
 - **复用已有 flow**：仅限与该 flow 目标、影响范围和验收标准完全匹配，且只是当前需求范围内的补充、纠正、返工或收尾；先执行 `flow switch <name>`。
 - **判定依据**：按需求目标和验收标准归属，不能仅因修改同一函数、模块或产品能力就复用 flow；例如同属 `cancel_feedback` 的 errno 异常处理与 coupon 资格判断，目标不同，应拆为不同 flow。
 - **复用空白初始 flow**：仅限刚执行 `init` 后，当前 flow 尚无阶段产物、契约、任务、阶段推进历史或其他需求过程材料。默认 `init` 下这就是 `main` —— 第一条需求落在它上面之后，`main` 即与别的需求线无异（不可删、不再收新需求），别盘算把它留空。
-- **新建 flow**：只要没有已有 flow 完全匹配，必须执行 `python3 .claude/hooks/wb.py flow new <语义化名称>`；不得因为 `status` 显示某个 current-flow 就直接复用。
+- **新建 flow**：只要没有已有 flow 完全匹配，必须执行 `python3 .claude/hooks/wb.py flow new <语义化名称> --desc '<一句话摘要>'`（`--desc` 必填，最多 50 字）；不得因为 `status` 显示某个 current-flow 就直接复用。存量 flow 缺 desc 时，`flow list` 会显示提醒，用 `flow desc [<名>] --desc '<摘要>'` 补填。
 - **已收尾的 flow 不再收新需求**：当前 flow 的任务全部 done、或阶段已走完，即视为该需求线已结束；此时新需求一律 `flow new`，不得挂上去续写。
 - **Conversation closure**：默认不创建流程材料；确需保留时使用独立 Work Item 或命名 flow，不得写入无关的活动 flow。
 

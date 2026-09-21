@@ -658,6 +658,7 @@ PRIVILEGED_WB = {
     ("flow", "switch"): "切 flow 会让后续状态命令落到另一条流水线",
     ("flow", "remove"): "删除的是整条流水线的状态与产物",
     ("flow", "attribute"): "它声明本会话不建 flow 直接改产品源码，是调度层的豁免决定",
+    ("flow", "desc"): "改 flow 需求描述是编排者的调度决定",
 }
 
 
