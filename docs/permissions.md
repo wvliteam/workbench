@@ -123,7 +123,7 @@ wb.py config set role_scopes.backend-developer \
     '["server/**","migrations/**","internal/**",".workbench/artifacts/*/develop/tasks/**"]'
 ```
 
-**跨仓库布局下「谁都没认领的仓库」会撞成本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色范围之外 —— 是硬拦，不是放行。`init` 与 `role scopes` 会当场点名并给出手写认领的命令（`unclaimed_repos()`），所以撞上这类拒绝先跑一遍 `role scopes` 看有没有点名，而不是去改本层的判定。为什么宁可硬拦见 [architecture.md](architecture.md#多仓库工作区的两处必调不调是静默出错)。
+**跨仓库布局下「谁都没认领的仓库」是分工缺口，不是本层的拒绝。** `repos/shared` / `repos/payments-core` 这类按目录名认不出归属的仓库落在所有角色的**默认范围**之外。但本层（角色范围）只对**受守前缀**执法，产品源码 `repos/.source/**` 不在其中 —— 所以未认领仓库**不会**在这一层撞成写入拒绝，而是「没有推荐的开发角色可派」。`init` 与 `role scopes` 会当场点名（`unclaimed_repos()`），提醒你派 develop 任务时显式指定角色或补认领；这不是写入硬拦。产品源码的越权防护另有其道（首写归属闸门 + 子 agent 任务契约），见 [architecture.md](architecture.md#多仓库工作区的两处必调不调是静默出错)。
 
 ### 工具层边界：非主线程禁用工具与脚本执行
 

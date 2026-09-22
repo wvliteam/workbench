@@ -35,7 +35,8 @@ from wb_core import (
     release_state_lock, repo_claims, repo_index_issues, repo_layout_scopes,
     projects_missing_profiles, source_projects,
     repo_note_issues, read_repos_manifest, save_state, set_current_flow,
-    set_flow_override, sha256_file, state_path, task_binding_for_name, task_check_errors,
+    set_flow_override, sha256_file, state_path, strict_flow_routing,
+    set_strict_flow_routing, task_binding_for_name, task_check_errors,
     task_contract_names, task_dependency_errors, unclaimed_repos, wb_dir,
     normalize_write_scopes, select_task_batch,
 )
@@ -112,12 +113,15 @@ def cmd_init(args) -> None:
 
 
 def print_unclaimed(root: Path, scopes: dict[str, list[str]]) -> None:
-    """认不出名字的仓库谁都写不了，得当场说 —— 否则要到 develop 才撞成权限拒绝。"""
+    """认不出名字的仓库没有默认开发角色认领，得当场说 —— 这是任务分工缺口，
+    不是写入硬拦（守卫不对 repos/.source/** 按角色执法）。派 develop 任务时要么
+    显式指定角色，要么补认领前缀。"""
     un = unclaimed_repos(root, scopes)
     if un:
-        print(f"\n没有角色认领这些仓库，任何角色都写不了：{', '.join(un)}")
-        print("按名字认不出来（认领靠 " + " / ".join(
-            sorted({h for hs in REPO_HINTS.values() for h in hs})) + "）。手写认领：")
+        print(f"\n这些仓库没有默认开发角色认领：{', '.join(un)}")
+        print("（守卫不据此拦产品源码写入，这是分工缺口：派 develop 任务时请显式"
+              "指定角色，或补认领。认领靠 " + " / ".join(
+            sorted({h for hs in REPO_HINTS.values() for h in hs})) + "）手写认领：")
         print("  wb.py config set role_scopes.backend-developer "
               f"'[\".workbench/artifacts/*/develop/tasks/**\",\"repos/{un[0]}/**\"]'")
         print("  （连自己原有的前缀一起写进去，config set 是整条覆盖不是追加）")
@@ -1214,6 +1218,16 @@ def cmd_flow(args) -> None:
 
 def cmd_config(args) -> None:
     root = find_root()
+    # 严格路由开关是工作区级（不绑 flow），存标记文件而非 flow state，单独处理。
+    if args.key == "strict_flow_routing":
+        if args.action == "get":
+            print(json.dumps(strict_flow_routing(root)))
+            return
+        on = str(args.value).strip().lower() in ("true", "1", "on", "yes")
+        set_strict_flow_routing(root, on)
+        print(f"strict_flow_routing = {json.dumps(on)}"
+              + ("（改 flow 状态的命令现在必须显式 --flow / WB_FLOW）" if on else ""))
+        return
     st = load_state(root, lock=True)
     if args.action == "get":
         v = dotted_get(st, args.key) if args.key else st["gate_commands"]
@@ -1343,6 +1357,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?")
     p.add_argument("--force", action="store_true", help="门禁不通过仍推进（记入日志与报告）")
     p.add_argument("--reason", help="set 必填：为什么直接跳阶段（不跑门禁，入日志）")
+    p.add_argument("--flow", dest="explicit_flow",
+                   help="显式指定作用的 flow（strict_flow_routing 开启时必填）")
     p.set_defaults(func=cmd_phase)
 
     p = sub.add_parser("gate", help="门禁校验（退出码 1 = 未通过）")
@@ -1367,6 +1383,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true")
     p.add_argument("--role-lock", action="store_true", help="start 时同时把写入范围锁到该任务角色")
     p.add_argument("--owner", help="start 时记录认领者（如 agent_id），并行下辅助归属")
+    p.add_argument("--flow", dest="explicit_flow",
+                   help="显式指定本命令作用的 flow（优先于共享指针与 WB_FLOW）；"
+                        "strict_flow_routing 开启时状态变更类命令必填")
     p.set_defaults(func=cmd_task)
 
     p = sub.add_parser("next", help="调度：返回依赖已满足的就绪任务")
@@ -1389,6 +1408,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--all", action="store_true")
     p.add_argument("--clear", action="store_true",
                    help="dispute：解除争议哨兵（不给 --name 则全部解除）")
+    p.add_argument("--flow", dest="explicit_flow",
+                   help="显式指定作用的 flow（strict_flow_routing 开启时必填）")
     p.set_defaults(func=cmd_contract)
 
     p = sub.add_parser("artifact", help="产物目录")
@@ -1402,12 +1423,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", nargs="?")
     p.add_argument("--reset", action="store_true",
                    help="scopes：把 state.json 里的角色范围刷成当前代码默认值（老项目迁移用）")
+    p.add_argument("--flow", dest="explicit_flow",
+                   help="显式指定作用的 flow（strict_flow_routing 开启时状态变更必填）")
     p.set_defaults(func=cmd_role)
 
     p = sub.add_parser("config", help="配置门禁命令、并行度、角色范围")
     p.add_argument("action", choices=["get", "set"])
     p.add_argument("key", nargs="?")
     p.add_argument("value", nargs="?")
+    p.add_argument("--flow", dest="explicit_flow",
+                   help="显式指定作用的 flow（strict_flow_routing 开启时必填）")
     p.set_defaults(func=cmd_config)
 
     p = sub.add_parser("log", help="审计日志（带 message 则写入一条备注）")
@@ -1435,6 +1460,26 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+# strict_flow_routing 开启时，这些「改 flow 状态」的命令必须显式指定 flow（--flow /
+# WB_FLOW），不再默认信任共享指针 —— 挡多终端并发下 task done 落错流水线（评审 P2）。
+_FLOW_MUTATING = {
+    "task": {"add", "start", "done", "block", "reopen", "skip"},
+    "phase": {"set", "advance"},
+    "contract": {"add", "lock", "unlock", "bump", "dispute", "consumers", "readopt"},
+    "role": {"set", "clear"},
+    "config": {"set"},
+}
+
+
+def _requires_explicit_flow(args) -> bool:
+    # strict_flow_routing 开关自身是工作区级、不绑 flow，别把关自己锁死（否则开启后
+    # 想关都要先 --flow）。
+    if args.cmd == "config" and getattr(args, "key", None) == "strict_flow_routing":
+        return False
+    acts = _FLOW_MUTATING.get(args.cmd)
+    return bool(acts) and getattr(args, "action", None) in acts
+
+
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     # WB_FLOW 只钉 CLI 命令路径；selfcheck 在进程内反复调 main()，环境里残留的
@@ -1445,6 +1490,22 @@ def main(argv: list[str] | None = None) -> None:
         if not _FLOW_NAME.fullmatch(env_flow):
             die(f"WB_FLOW 只能用小写字母、数字、`-`、`_`：{env_flow!r}")
         set_flow_override(env_flow)
+    # --flow 比 WB_FLOW 更就近，优先钉死。
+    explicit = getattr(args, "explicit_flow", None)
+    if explicit and args.cmd not in ("selfcheck", "hook"):
+        if not _FLOW_NAME.fullmatch(explicit):
+            die(f"--flow 只能用小写字母、数字、`-`、`_`：{explicit!r}")
+        set_flow_override(explicit)
+    # 严格路由：状态变更类命令未显式指定 flow 时拒绝（仅在开关开启的工作区生效）。
+    if _requires_explicit_flow(args) and not env_flow and not explicit:
+        try:
+            _root = find_root()
+        except SystemExit:
+            _root = None
+        if _root is not None and strict_flow_routing(_root):
+            die(f"strict_flow_routing 已开启：`{args.cmd} {getattr(args, 'action', '')}` "
+                f"会改 flow 状态，但本会话没有显式指定 flow。共享指针在多终端并发下会串台，"
+                f"请显式加 `--flow <名>` 或 `export WB_FLOW=<名>`。盘点：wb.py flow list")
     if args.cmd == "task" and args.action == "add" and not (args.title and args.role):
         die("task add 需要 --title 与 --role")
     if args.cmd == "phase" and args.action == "set" and not args.name:
