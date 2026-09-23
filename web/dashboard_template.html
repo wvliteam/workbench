@@ -1767,7 +1767,7 @@
         }
     </style>
 </head>
-<body>
+<body x-data>
     <!-- 顶部状态导航栏 -->
     <header class="app-header">
         <div class="header-left">
@@ -1838,11 +1838,11 @@
         <div class="toolbar-actions">
             <!-- 状态过滤胶囊 -->
             <div class="filter-group">
-                <button class="filter-btn active" data-filter="all">全部</button>
-                <button class="filter-btn" data-filter="doing">进行中</button>
-                <button class="filter-btn" data-filter="done">已完成</button>
-                <button class="filter-btn" data-filter="blocked">阻断</button>
-                <button class="filter-btn" data-filter="todo">待处理</button>
+                <button class="filter-btn active" :class="{ active: $store.dash?.activeFilter === 'all' }" data-filter="all" @click="$store.dash?.setFilter('all')">全部</button>
+                <button class="filter-btn" :class="{ active: $store.dash?.activeFilter === 'doing' }" data-filter="doing" @click="$store.dash?.setFilter('doing')">进行中</button>
+                <button class="filter-btn" :class="{ active: $store.dash?.activeFilter === 'done' }" data-filter="done" @click="$store.dash?.setFilter('done')">已完成</button>
+                <button class="filter-btn" :class="{ active: $store.dash?.activeFilter === 'blocked' }" data-filter="blocked" @click="$store.dash?.setFilter('blocked')">阻断</button>
+                <button class="filter-btn" :class="{ active: $store.dash?.activeFilter === 'todo' }" data-filter="todo" @click="$store.dash?.setFilter('todo')">待处理</button>
             </div>
 
             <!-- 全局任务模糊检索 (Fuse.js) -->
@@ -1896,49 +1896,49 @@
         </div>
 
         <!-- 底部折叠多功能控制台开关 -->
-        <button id="btn-toggle-dev" class="dev-console-toggle bottom-console-toggle" title="展开/收起控制台">
+        <button id="btn-toggle-dev" class="dev-console-toggle bottom-console-toggle" title="展开/收起控制台" @click="$store.dash?.toggleConsole()">
             <svg class="ui-icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
             <span>控制台与门禁日志</span>
             <span id="console-status-dot" class="console-status-dot"></span>
         </button>
 
         <!-- 底部折叠控制台面板 -->
-        <div id="dev-console-drawer" class="dev-console-drawer bottom-console-drawer">
+        <div id="dev-console-drawer" class="dev-console-drawer bottom-console-drawer" :class="{ open: $store.dash?.isConsoleOpen, expanded: $store.dash?.isConsoleExpanded }">
             <div class="console-header">
                 <div class="console-tabs">
-                    <button class="console-tab-btn active" data-tab="gate" id="tab-btn-gate">
+                    <button class="console-tab-btn active" :class="{ active: $store.dash?.activeConsoleTab === 'gate' }" data-tab="gate" id="tab-btn-gate" @click="$store.dash?.switchConsoleTab('gate')">
                         <svg class="tab-icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
                         <span>门禁日志</span>
                         <span id="console-gate-badge" class="tab-badge-sm"></span>
                     </button>
-                    <button class="console-tab-btn" data-tab="contracts" id="tab-btn-contracts">
+                    <button class="console-tab-btn" :class="{ active: $store.dash?.activeConsoleTab === 'contracts' }" data-tab="contracts" id="tab-btn-contracts" @click="$store.dash?.switchConsoleTab('contracts')">
                         <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
                         <span>契约与争议</span>
                         <span id="console-contract-badge" class="tab-badge-sm">0</span>
                     </button>
-                    <button class="console-tab-btn" data-tab="audit" id="tab-btn-audit">
+                    <button class="console-tab-btn" :class="{ active: $store.dash?.activeConsoleTab === 'audit' }" data-tab="audit" id="tab-btn-audit" @click="$store.dash?.switchConsoleTab('audit')">
                         <svg class="tab-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
                         <span>审计流水</span>
                         <span id="console-audit-badge" class="tab-badge-sm">0</span>
                     </button>
-                    <button class="console-tab-btn" data-tab="events" id="tab-btn-events">
+                    <button class="console-tab-btn" :class="{ active: $store.dash?.activeConsoleTab === 'events' }" data-tab="events" id="tab-btn-events" @click="$store.dash?.switchConsoleTab('events')">
                         <svg class="tab-icon" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
                         <span>实时事件</span>
                     </button>
-                    <button class="console-tab-btn" data-tab="api" id="tab-btn-api">
+                    <button class="console-tab-btn" :class="{ active: $store.dash?.activeConsoleTab === 'api' }" data-tab="api" id="tab-btn-api" @click="$store.dash?.switchConsoleTab('api')">
                         <svg class="tab-icon" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
                         <span>API 探测</span>
                     </button>
                 </div>
                 <div class="console-header-actions">
-                    <button class="btn btn-control" id="btn-expand-dev" title="切换高度 (540px / 280px)">⛶ 展开</button>
-                    <button class="btn btn-control" id="btn-close-dev" title="收起控制台 (Esc)">收起 ✕</button>
+                    <button class="btn btn-control" id="btn-expand-dev" title="切换高度 (540px / 280px)" @click="$store.dash?.toggleConsoleExpand()" x-text="$store.dash?.isConsoleExpanded ? '🗗 恢复' : '⛶ 展开'">⛶ 展开</button>
+                    <button class="btn btn-control" id="btn-close-dev" title="收起控制台 (Esc)" @click="$store.dash?.closeConsole()">收起 ✕</button>
                 </div>
             </div>
 
             <div class="console-body">
                 <!-- Panel 1: 门禁日志 (ANSI 终端) -->
-                <div id="console-pane-gate" class="console-pane active">
+                <div id="console-pane-gate" class="console-pane active" :class="{ active: $store.dash?.activeConsoleTab === 'gate' }">
                     <div class="console-toolbar">
                         <div class="toolbar-left">
                             <span class="toolbar-label">门禁命令:</span>
@@ -1962,7 +1962,7 @@
                 </div>
 
                 <!-- Panel 2: 契约与争议 -->
-                <div id="console-pane-contracts" class="console-pane">
+                <div id="console-pane-contracts" class="console-pane" :class="{ active: $store.dash?.activeConsoleTab === 'contracts' }">
                     <div class="console-toolbar">
                         <div class="contracts-summary">
                             <span>契约总数: <strong id="contracts-total-count">0</strong></span>
@@ -1978,7 +1978,7 @@
                 </div>
 
                 <!-- Panel 3: 审计流水瀑布 -->
-                <div id="console-pane-audit" class="console-pane">
+                <div id="console-pane-audit" class="console-pane" :class="{ active: $store.dash?.activeConsoleTab === 'audit' }">
                     <div class="console-toolbar">
                         <div class="toolbar-left">
                             <span class="toolbar-label">过滤事件:</span>
@@ -2004,7 +2004,7 @@
                 </div>
 
                 <!-- Panel 4: SSE 实时事件流 -->
-                <div id="console-pane-events" class="console-pane">
+                <div id="console-pane-events" class="console-pane" :class="{ active: $store.dash?.activeConsoleTab === 'events' }">
                     <div class="console-toolbar">
                         <span class="toolbar-label">实时通道: /api/events (SSE)</span>
                         <button id="btn-clear-events" class="btn btn-sm">清空事件记录</button>
@@ -2015,7 +2015,7 @@
                 </div>
 
                 <!-- Panel 5: REST API 探测 -->
-                <div id="console-pane-api" class="console-pane">
+                <div id="console-pane-api" class="console-pane" :class="{ active: $store.dash?.activeConsoleTab === 'api' }">
                     <div class="dev-card" style="margin: 8px;">
                         <ul class="dev-api-list">
                             <li class="dev-api-item"><a href="/api/overview" target="_blank">GET /api/overview</a><span>全局概览</span></li>
@@ -2032,14 +2032,14 @@
     </main>
 
     <!-- 侧边任务执行细节抽屉 -->
-    <div id="drawer-backdrop" class="drawer-backdrop"></div>
-    <aside id="detail-drawer" class="detail-drawer">
+    <div id="drawer-backdrop" class="drawer-backdrop" :class="{ open: $store.dash?.isDrawerOpen }" @click="$store.dash?.closeDrawer()"></div>
+    <aside id="detail-drawer" class="detail-drawer" :class="{ open: $store.dash?.isDrawerOpen }">
         <div class="drawer-header">
             <div class="drawer-header-left">
                 <span id="drawer-task-id" class="drawer-task-id">T1</span>
                 <span id="drawer-task-status" class="node-status-tag tag-done">DONE</span>
             </div>
-            <button id="drawer-close-btn" class="drawer-close-btn" title="关闭 (Esc)">✕</button>
+            <button id="drawer-close-btn" class="drawer-close-btn" title="关闭 (Esc)" @click="$store.dash?.closeDrawer()">✕</button>
         </div>
         <div class="drawer-body">
             <h2 id="drawer-task-title" class="drawer-task-title">任务标题</h2>
@@ -2076,16 +2076,16 @@
 
             <!-- 细节透视 Tab 导航 -->
             <div class="drawer-tabs">
-                <button id="drawer-tab-btn-notes" class="drawer-tab-btn active" data-tab="notes">
+                <button id="drawer-tab-btn-notes" class="drawer-tab-btn active" :class="{ active: $store.dash?.activeDrawerTab === 'notes' }" data-tab="notes" @click="$store.dash?.switchDrawerTab('notes')">
                     <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
                     <span>现场笔记</span>
                 </button>
-                <button id="drawer-tab-btn-changes" class="drawer-tab-btn" data-tab="changes">
+                <button id="drawer-tab-btn-changes" class="drawer-tab-btn" :class="{ active: $store.dash?.activeDrawerTab === 'changes' }" data-tab="changes" @click="$store.dash?.switchDrawerTab('changes')">
                     <svg class="tab-icon" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
                     <span>代码改动</span>
                     <span id="drawer-artifacts-count" class="tab-badge">0</span>
                 </button>
-                <button id="drawer-tab-btn-ver" class="drawer-tab-btn" data-tab="ver">
+                <button id="drawer-tab-btn-ver" class="drawer-tab-btn" :class="{ active: $store.dash?.activeDrawerTab === 'ver' }" data-tab="ver" @click="$store.dash?.switchDrawerTab('ver')">
                     <svg class="tab-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
                     <span>人工复核</span>
                     <span id="drawer-ver-count" class="tab-badge">0</span>
@@ -2093,7 +2093,7 @@
             </div>
 
             <!-- Tab 1: 现场笔记 Markdown -->
-            <div id="drawer-pane-notes" class="drawer-tab-pane active">
+            <div id="drawer-pane-notes" class="drawer-tab-pane active" :class="{ active: $store.dash?.activeDrawerTab === 'notes' }">
                 <div id="drawer-note-file" class="note-file-indicator" style="display: none;"></div>
                 <div id="drawer-notes-preview" class="drawer-markdown-body">
                     <span style="color: var(--text-muted);">无现场备忘记录</span>
@@ -2101,14 +2101,14 @@
             </div>
 
             <!-- Tab 2: 代码改动文件树 -->
-            <div id="drawer-pane-changes" class="drawer-tab-pane">
+            <div id="drawer-pane-changes" class="drawer-tab-pane" :class="{ active: $store.dash?.activeDrawerTab === 'changes' }">
                 <div id="drawer-artifacts-list" class="drawer-artifacts-list">
                     <span style="color: var(--text-muted);">暂无产物文件</span>
                 </div>
             </div>
 
             <!-- Tab 3: 复核依据 -->
-            <div id="drawer-pane-ver" class="drawer-tab-pane">
+            <div id="drawer-pane-ver" class="drawer-tab-pane" :class="{ active: $store.dash?.activeDrawerTab === 'ver' }">
                 <div id="drawer-ver-content" class="drawer-ver-container">
                     <span style="color: var(--text-muted);">暂无复核证据记录</span>
                 </div>
@@ -2116,6 +2116,7 @@
         </div>
     </aside>
     <!-- 开源第三方运行时库 (位于 web/vendor 目录) -->
+    <script src="vendor/alpine.min.js" defer></script>
     <script src="vendor/marked.min.js"></script>
     <script src="vendor/prism.min.js"></script>
     <script src="vendor/diff.min.js"></script>
@@ -2155,6 +2156,9 @@
             contractsData: null,
             auditData: null,
             currentTaskDetail: null,
+            isDrawerOpen: false,
+            isConsoleOpen: false,
+            isConsoleExpanded: false,
         };
 
         const PHASE_ORDER = ['clarify', 'analyze', 'design', 'develop', 'verify', 'retro'];
@@ -2166,6 +2170,16 @@
             'verify': '测试验证',
             'retro': '总结复盘'
         };
+
+        // 直接将 AppState 作为唯一数据事实源注册进 Alpine 响应式 Store
+        document.addEventListener('alpine:init', () => {
+            if (window.Alpine && typeof Alpine.store === 'function') {
+                Alpine.store('dash', AppState);
+            }
+        });
+        if (window.Alpine && typeof Alpine.store === 'function') {
+            Alpine.store('dash', AppState);
+        }
 
         // DOM 元素引用
         const svgElement = document.getElementById('dag-svg');
@@ -2651,9 +2665,13 @@
                 succsContainer.innerHTML = '<span class="text-muted">无后置任务</span>';
             }
 
-            // 打开抽屉
-            detailDrawer.classList.add('open');
-            drawerBackdrop.classList.add('open');
+            // 打开抽屉 (由 Alpine 响应式驱动)
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').openDrawer();
+            } else {
+                detailDrawer.classList.add('open');
+                drawerBackdrop.classList.add('open');
+            }
 
             // 默认切到当前选中的 Tab
             switchDrawerTab(AppState.activeDrawerTab || 'notes');
@@ -2696,23 +2714,16 @@
 
         function switchDrawerTab(tabName) {
             AppState.activeDrawerTab = tabName;
-            document.querySelectorAll('.drawer-tab-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
-            });
-            document.querySelectorAll('.drawer-tab-pane').forEach(pane => {
-                pane.classList.toggle('active', pane.id === `drawer-pane-${tabName}`);
-            });
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').activeDrawerTab = tabName;
+            }
         }
 
         function switchConsoleTab(tabName) {
             AppState.activeConsoleTab = tabName;
-            document.querySelectorAll('.console-tab-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.getAttribute('data-tab') === tabName);
-            });
-            document.querySelectorAll('.console-pane').forEach(pane => {
-                pane.classList.toggle('active', pane.id === `console-pane-${tabName}`);
-            });
-
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').activeConsoleTab = tabName;
+            }
             if (tabName === 'gate') {
                 loadGateLog(AppState.selectedGate || 'test');
             } else if (tabName === 'contracts') {
@@ -3024,10 +3035,14 @@
         }
 
         function closeTaskDrawer() {
-            detailDrawer.classList.remove('open');
-            drawerBackdrop.classList.remove('open');
-            AppState.selectedTaskId = null;
-            document.querySelectorAll('.node-card').forEach(c => c.classList.remove('selected'));
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').closeDrawer();
+            } else {
+                detailDrawer.classList.remove('open');
+                drawerBackdrop.classList.remove('open');
+                AppState.selectedTaskId = null;
+                document.querySelectorAll('.node-card').forEach(c => c.classList.remove('selected'));
+            }
         }
 
         // 聚焦指定任务
@@ -3036,7 +3051,9 @@
             if (!node) return;
 
             const rect = canvasContainer.getBoundingClientRect();
-            const drawerOpen = detailDrawer.classList.contains('open');
+            const drawerOpen = (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash'))
+                ? Alpine.store('dash').isDrawerOpen
+                : detailDrawer.classList.contains('open');
             const visibleWidth = (drawerOpen && rect.width > 768) ? Math.max(200, rect.width - 480) : rect.width;
             AppState.scale = Math.max(AppState.scale, 0.9);
             AppState.translateX = (visibleWidth / 2) - (node.x + node.width / 2) * AppState.scale;
@@ -3049,9 +3066,9 @@
         // 状态筛选
         function applyStatusFilter(filter) {
             AppState.activeFilter = filter;
-            document.querySelectorAll('.filter-btn').forEach(b => {
-                b.classList.toggle('active', b.getAttribute('data-filter') === filter);
-            });
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').activeFilter = filter;
+            }
 
             document.querySelectorAll('.dag-node-wrapper').forEach(el => {
                 const id = el.getAttribute('data-id');
@@ -3070,14 +3087,15 @@
 
         // 底部多功能控制台逻辑
         function toggleBottomConsole() {
-            const isOpen = devConsoleDrawer.classList.toggle('open');
-            if (isOpen) {
-                switchConsoleTab(AppState.activeConsoleTab || 'gate');
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').toggleConsole();
             }
         }
 
         function closeBottomConsole() {
-            devConsoleDrawer.classList.remove('open');
+            if (window.Alpine && typeof Alpine.store === 'function' && Alpine.store('dash')) {
+                Alpine.store('dash').closeConsole();
+            }
         }
 
         async function loadGateLog(gateName) {
@@ -3947,13 +3965,6 @@
                 loadData(AppState.currentFlow, { preserveView: true });
             });
 
-            // 过滤按钮
-            document.querySelectorAll('.filter-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    applyStatusFilter(btn.getAttribute('data-filter'));
-                });
-            });
-
             // 缩放控件
             document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(1.15));
             document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(0.85));
@@ -3963,24 +3974,6 @@
                 AppState.translateX = 40;
                 AppState.translateY = 40;
                 applyTransform();
-            });
-
-            // 抽屉开关
-            document.getElementById('drawer-close-btn').addEventListener('click', closeTaskDrawer);
-            drawerBackdrop.addEventListener('click', closeTaskDrawer);
-
-            // 抽屉 Tab 切换监听
-            document.querySelectorAll('.drawer-tab-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    switchDrawerTab(btn.getAttribute('data-tab'));
-                });
-            });
-
-            // 底部控制台 Tab 切换监听
-            document.querySelectorAll('.console-tab-btn').forEach(btn => {
-                btn.addEventListener('click', () => {
-                    switchConsoleTab(btn.getAttribute('data-tab'));
-                });
             });
 
             // 门禁选择器与刷新
@@ -4039,31 +4032,11 @@
                 });
             }
 
-            // 底部控制台开关与高度切换
+            // 底部控制台开关事件隔离
             const devToggle = document.getElementById('btn-toggle-dev');
-            const devClose = document.getElementById('btn-close-dev');
-            const devExpand = document.getElementById('btn-expand-dev');
             if (devToggle) {
-                devToggle.addEventListener('click', () => {
-                    toggleBottomConsole();
-                });
-                devToggle.addEventListener('wheel', (e) => {
-                    e.stopPropagation();
-                }, { passive: true });
-                devToggle.addEventListener('mousedown', (e) => {
-                    e.stopPropagation();
-                });
-            }
-            if (devClose) {
-                devClose.addEventListener('click', () => {
-                    closeBottomConsole();
-                });
-            }
-            if (devExpand) {
-                devExpand.addEventListener('click', () => {
-                    const isExp = devConsoleDrawer.classList.toggle('expanded');
-                    devExpand.textContent = isExp ? '🗗 恢复' : '⛶ 展开';
-                });
+                devToggle.addEventListener('wheel', (e) => e.stopPropagation(), { passive: true });
+                devToggle.addEventListener('mousedown', (e) => e.stopPropagation());
             }
 
             // 控制台抽屉手势隔离与滚动穿透防护

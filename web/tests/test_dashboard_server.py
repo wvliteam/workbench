@@ -331,6 +331,13 @@ class TestVendorAssetsDelivery(TestDashboardServerBase):
         self.assertIn("application/javascript", headers.get("content-type", ""))
         self.assertIn("Fuse", content)
 
+    def test_vendor_alpine_served_successfully(self):
+        """测试 /vendor/alpine.min.js 正确交付且包含 Alpine。"""
+        status, content, headers = self.fetch_text("/vendor/alpine.min.js")
+        self.assertEqual(status, 200)
+        self.assertIn("application/javascript", headers.get("content-type", ""))
+        self.assertIn("Alpine", content)
+
     def test_vendor_nonexistent_returns_404(self):
         """测试请求不存在的第三方库文件返回 404。"""
         status, _, _ = self.fetch_text("/vendor/nonexistent.js")

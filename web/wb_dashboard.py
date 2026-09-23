@@ -689,10 +689,12 @@ def export_static_dashboard(
     initial_json = json.dumps(export_data, ensure_ascii=False).replace("</script>", "<\\/script>")
 
     vendor_dir = _WEB_DIR / "vendor"
+    alpine_file = vendor_dir / "alpine.min.js"
     marked_file = vendor_dir / "marked.min.js"
     prism_file = vendor_dir / "prism.min.js"
     diff_file = vendor_dir / "diff.min.js"
     fuse_file = vendor_dir / "fuse.min.js"
+    alpine_code = alpine_file.read_text(encoding="utf-8") if alpine_file.is_file() else ""
     marked_code = marked_file.read_text(encoding="utf-8") if marked_file.is_file() else ""
     prism_code = prism_file.read_text(encoding="utf-8") if prism_file.is_file() else ""
     diff_code = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else ""
@@ -707,6 +709,12 @@ def export_static_dashboard(
         .replace("{{INITIAL_DATA_JSON}}", initial_json)
     )
 
+    if alpine_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)alpine\.min\.js["\x27](?:\s+defer)?>\s*</script>',
+            lambda _: f'<script id="__VENDOR_ALPINE__">\n{alpine_code}\n</script>',
+            html_content,
+        )
     if marked_code:
         html_content = re.sub(
             r'<script\s+src=["\x27](?:/vendor/|vendor/)marked\.min\.js["\x27]>\s*</script>',
