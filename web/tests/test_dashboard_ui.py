@@ -119,18 +119,18 @@ class TestDashboardHTMLStructure(TestDashboardUIBase):
         self.assertIn('id="btn-reset-view"', html_text)
         self.assertIn('id="zoom-level-text"', html_text)
 
-    def test_svg_canvas_elements(self):
-        """验证原生 SVG 拓扑画布、有向图层与箭头定义。"""
+    def test_cytoscape_canvas_elements(self):
+        """验证 Cytoscape 拓扑画布容器与三方库引入（已取代手搓 SVG 图层）。"""
         _, html_text, _ = self.fetch_page("/")
-        self.assertIn('id="dag-svg"', html_text)
-        self.assertIn('id="dag-viewport"', html_text)
-        self.assertIn('id="dag-edges"', html_text)
-        self.assertIn('id="dag-nodes"', html_text)
-
-        # SVG 箭头 marker
-        self.assertIn('id="arrow"', html_text)
-        self.assertIn('id="arrow-highlight-up"', html_text)
-        self.assertIn('id="arrow-highlight-down"', html_text)
+        # Cytoscape 挂载容器
+        self.assertIn('id="dag-cy"', html_text)
+        # 三个 vendor 库按依赖顺序引入
+        self.assertIn('vendor/cytoscape.min.js', html_text)
+        self.assertIn('vendor/dagre.min.js', html_text)
+        self.assertIn('vendor/cytoscape-dagre.min.js', html_text)
+        # 手搓 SVG 结构已彻底移除
+        self.assertNotIn('id="dag-svg"', html_text)
+        self.assertNotIn('id="dag-viewport"', html_text)
 
     def test_detail_drawer_elements(self):
         """验证侧边详情抽屉结构与各字段占位。"""
@@ -175,18 +175,21 @@ class TestDashboardCSSAndAesthetics(TestDashboardUIBase):
 class TestDashboardJavaScriptEngine(TestDashboardUIBase):
     """验证前端 JavaScript 逻辑引擎与算法。"""
 
-    def test_cubic_bezier_curve_syntax(self):
-        """验证连线生成逻辑采用标准三次贝塞尔曲线。"""
+    def test_cytoscape_dagre_layout(self):
+        """验证连线/布局改由 Cytoscape + dagre 承担（不再手搓贝塞尔路径）。"""
         _, html_text, _ = self.fetch_page("/")
-        # 必须包含三次贝塞尔曲线的 M ... C ... 构造语句
-        self.assertIn("M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}", html_text)
+        # dagre 布局引擎与横向排布
+        self.assertIn("name: 'dagre'", html_text)
+        self.assertIn("rankDir: 'LR'", html_text)
+        # 扩展注册
+        self.assertIn("cytoscape.use(window.cytoscapeDagre)", html_text)
 
     def test_graph_navigation_functions(self):
-        """验证前端画布包含缩放、自适应与聚焦函数。"""
+        """验证前端画布包含缩放、自适应与聚焦函数（cytoscape 接线）。"""
         _, html_text, _ = self.fetch_page("/")
         self.assertIn("function fitToView()", html_text)
-        self.assertIn("function zoomBy(", html_text)
-        self.assertIn("function applyTransform()", html_text)
+        self.assertIn("function zoomByCy(", html_text)
+        self.assertIn("function initCytoscape()", html_text)
         self.assertIn("function focusTask(", html_text)
 
     def test_bfs_dependency_traversal(self):

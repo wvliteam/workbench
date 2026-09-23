@@ -693,10 +693,18 @@ def export_static_dashboard(
     prism_file = vendor_dir / "prism.min.js"
     diff_file = vendor_dir / "diff.min.js"
     fuse_file = vendor_dir / "fuse.min.js"
+    diff2html_file = vendor_dir / "diff2html.min.js"
+    cytoscape_file = vendor_dir / "cytoscape.min.js"
+    dagre_file = vendor_dir / "dagre.min.js"
+    cytoscape_dagre_file = vendor_dir / "cytoscape-dagre.min.js"
     marked_code = marked_file.read_text(encoding="utf-8") if marked_file.is_file() else ""
     prism_code = prism_file.read_text(encoding="utf-8") if prism_file.is_file() else ""
     diff_code = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else ""
     fuse_code = fuse_file.read_text(encoding="utf-8") if fuse_file.is_file() else ""
+    diff2html_code = diff2html_file.read_text(encoding="utf-8") if diff2html_file.is_file() else ""
+    cytoscape_code = cytoscape_file.read_text(encoding="utf-8") if cytoscape_file.is_file() else ""
+    dagre_code = dagre_file.read_text(encoding="utf-8") if dagre_file.is_file() else ""
+    cytoscape_dagre_code = cytoscape_dagre_file.read_text(encoding="utf-8") if cytoscape_dagre_file.is_file() else ""
 
     html_content = (
         DASHBOARD_HTML_TEMPLATE
@@ -729,6 +737,30 @@ def export_static_dashboard(
         html_content = re.sub(
             r'<script\s+src=["\x27](?:/vendor/|vendor/)fuse\.min\.js["\x27]>\s*</script>',
             lambda _: f'<script id="__VENDOR_FUSE__">\n{fuse_code}\n</script>',
+            html_content,
+        )
+    if diff2html_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)diff2html\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_DIFF2HTML__">\n{diff2html_code}\n</script>',
+            html_content,
+        )
+    if cytoscape_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)cytoscape\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_CYTOSCAPE__">\n{cytoscape_code}\n</script>',
+            html_content,
+        )
+    if dagre_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)dagre\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_DAGRE__">\n{dagre_code}\n</script>',
+            html_content,
+        )
+    if cytoscape_dagre_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)cytoscape-dagre\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_CYTOSCAPE_DAGRE__">\n{cytoscape_dagre_code}\n</script>',
             html_content,
         )
 

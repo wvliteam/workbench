@@ -167,14 +167,17 @@ class TestBottomConsoleUIStructure(TestDashboardDetailsBase):
 
 
 class TestMarkdownAndANSIEnginesWithNode(unittest.TestCase):
-    """利用 Node.js 实际执行提取出的纯 JS 算法，验证渲染质量与状态机行为。"""
+    """渲染引擎已迁移到开源库：Markdown 用 marked + DOMPurify，ANSI 用 anser。
+
+    ANSI 引擎（anser 纯 JS）在 Node 下端到端执行验证；Markdown 引擎依赖浏览器 DOM 的
+    DOMPurify，Node 无 jsdom，故对模板做接线级断言，确认 marked 解析 + DOMPurify 净化已接上。"""
 
     @classmethod
     def setUpClass(cls):
-        # 从 wb_dashboard.py 提取 renderMarkdown, inlineMarkdown 与 ansiToHtml 函数源码
+        import os
         src = dashboard.DASHBOARD_HTML_TEMPLATE
+        cls.template_src = src
 
-        # 匹配 escapeHtml, inlineMarkdown, renderMarkdown
         def extract_func(name: str) -> str:
             pattern = re.compile(rf"function\s+{name}\s*\([^)]*\)\s*\{{", re.MULTILINE)
             m = pattern.search(src)
@@ -194,15 +197,18 @@ class TestMarkdownAndANSIEnginesWithNode(unittest.TestCase):
             raise ValueError(f"Failed to match balanced braces for {name}")
 
         cls.js_escape = extract_func("escapeHtml")
-        cls.js_inline_md = extract_func("inlineMarkdown")
-        cls.js_render_md = extract_func("renderMarkdown")
         cls.js_ansi = extract_func("ansiToHtml")
+        vendor_anser = os.path.join(os.path.dirname(__file__), "..", "vendor", "anser.min.js")
+        with open(vendor_anser, encoding="utf-8") as f:
+            cls.anser_src = f.read()
 
-    def run_node_eval(self, script: str) -> str:
+    def run_ansi_eval(self, script: str) -> str:
+        # 提供 window 垫片并加载 vendored anser，端到端执行迁移后的 ansiToHtml
         full_code = f"""
+var window = {{}};
+{self.anser_src}
+var Anser = window.Anser;
 {self.js_escape}
-{self.js_inline_md}
-{self.js_render_md}
 {self.js_ansi}
 {script}
 """
@@ -216,78 +222,57 @@ class TestMarkdownAndANSIEnginesWithNode(unittest.TestCase):
             raise RuntimeError(f"Node execution failed: {proc.stderr}")
         return proc.stdout.strip()
 
-    def test_markdown_headings_and_inline(self):
-        """验证 Markdown 标题与行内粗斜体、代码、链接解析。"""
-        js = """
-        const input = '# 标题一\\n## 标题二\\n这是一段含有 **加粗** 和 *斜体* 以及 `inline code` 和 [链接](https://example.com) 的文字。';
-        console.log(renderMarkdown(input));
-        """
-        output = self.run_node_eval(js)
-        self.assertIn("<h1>标题一</h1>", output)
-        self.assertIn("<h2>标题二</h2>", output)
-        self.assertIn("<strong>加粗</strong>", output)
-        self.assertIn("<em>斜体</em>", output)
-        self.assertIn('<code class="inline-code">inline code</code>', output)
-        self.assertIn('<a href="https://example.com" target="_blank" rel="noopener">链接</a>', output)
+    def test_markdown_uses_marked_and_sanitizes(self):
+        """Markdown 渲染改用 marked.parse，并经 DOMPurify 净化后输出。"""
+        self.assertIsNotNone(
+            re.search(r"function\s+renderMarkdown\s*\(", self.template_src),
+            "renderMarkdown 应仍存在",
+        )
+        self.assertIn("marked.parse", self.template_src)
+        self.assertIn("DOMPurify.sanitize", self.template_src)
+        self.assertIn("vendor/marked.min.js", self.template_src)
+        self.assertIn("vendor/purify.min.js", self.template_src)
 
     def test_markdown_code_block_and_table(self):
-        """验证 Markdown 代码块与表格生成结构。"""
-        js = """
-        const input = '```python\\ndef hello():\\n    return 42\\n```\\n\\n| 列名A | 列名B |\\n| --- | --- |\\n| 1 | 2 |';
-        console.log(renderMarkdown(input));
-        """
-        output = self.run_node_eval(js)
-        self.assertIn('<div class="code-container">', output)
-        self.assertIn('<span>python</span>', output)
-        self.assertIn('def hello():\n    return 42', output)
-        self.assertIn('<table>', output)
-        self.assertIn('<th>列名A</th>', output)
-        self.assertIn('<td>1</td>', output)
+        """自定义 marked renderer 仍保留代码块/行内代码样式契约。"""
+        self.assertIn("marked.use", self.template_src)
+        self.assertIn("code-container", self.template_src)
+        self.assertIn("inline-code", self.template_src)
 
     def test_markdown_xss_protection(self):
-        """验证 Markdown 解析器对恶意脚本字符与伪协议链接的转义与阻断防护。"""
-        js = """
-        const input = '<script>alert("xss")</script>\\n[攻击链接](javascript:alert(1))\\n[正常链接](https://safe.com)';
-        console.log(renderMarkdown(input));
-        """
-        output = self.run_node_eval(js)
-        self.assertNotIn('<script>', output)
-        self.assertIn('&lt;script&gt;', output)
-        self.assertNotIn('href="javascript:', output)
-        self.assertIn('<a href="https://safe.com"', output)
+        """XSS 防护由 DOMPurify 承担：marked.parse 的输出必须先 sanitize 再返回。"""
+        self.assertRegex(self.template_src, r"DOMPurify\.sanitize\(\s*marked\.parse")
 
     def test_ansi_color_parsing_pytest_success(self):
-        """验证 ANSI 绿字通过状态与重置码解析。"""
-        # \x1b[32mPASSED\x1b[0m
-        js = """
-        const input = "test_func \\x1b[32mPASSED\\x1b[0m";
+        """anser 将绿色 PASSED 转为带 rgb 颜色的 span，并剔除 ESC 序列。"""
+        js = r"""
+        const input = "test_func \x1b[32mPASSED\x1b[0m";
         console.log(ansiToHtml(input));
         """
-        output = self.run_node_eval(js)
-        self.assertIn('<span style="color:#3fb950">PASSED</span>', output)
-        self.assertNotIn("\\x1b", output)
+        output = self.run_ansi_eval(js)
+        self.assertIn("PASSED</span>", output)
+        self.assertIn("color:rgb(0, 187, 0)", output)
+        self.assertNotIn("\x1b", output)
 
     def test_ansi_color_parsing_pytest_failure(self):
-        """验证 ANSI 粗体红字失败状态解析。"""
-        # \x1b[1;31mFAILED\x1b[0m
-        js = """
-        const input = "\\x1b[1;31mFAILED\\x1b[0m in 0.05s";
+        """anser 将粗体红字 FAILED 转为带 font-weight:bold 的彩色 span。"""
+        js = r"""
+        const input = "\x1b[1;31mFAILED\x1b[0m in 0.05s";
         console.log(ansiToHtml(input));
         """
-        output = self.run_node_eval(js)
-        self.assertTrue('color:#ff7b72' in output or 'color:#f85149' in output)
-        self.assertIn('font-weight:700', output)
-        self.assertIn('FAILED', output)
+        output = self.run_ansi_eval(js)
+        self.assertIn("font-weight:bold", output)
+        self.assertIn("FAILED", output)
+        self.assertRegex(output, r"color:rgb\(\d+, \d+, \d+\)")
 
     def test_ansi_non_sgr_stripping_and_html_escaping(self):
-        """验证光标控制符剔除与特殊 HTML 字符安全转义。"""
-        # \x1b[2K (清行) + <AssertionError>
-        js = """
-        const input = "\\x1b[2KError: <AssertionError: 1 != 2>";
+        """光标控制符(\\x1b[2K)被剔除，HTML 特殊字符经 escapeHtml 安全转义。"""
+        js = r"""
+        const input = "\x1b[2KError: <AssertionError: 1 != 2>";
         console.log(ansiToHtml(input));
         """
-        output = self.run_node_eval(js)
-        self.assertNotIn("\\x1b[2K", output)
+        output = self.run_ansi_eval(js)
+        self.assertNotIn("[2K", output)
         self.assertIn("&lt;AssertionError: 1 != 2&gt;", output)
 
 

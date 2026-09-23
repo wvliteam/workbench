@@ -488,7 +488,7 @@
         .canvas-wrapper.dragging {
             cursor: grabbing;
         }
-        #dag-svg {
+        #dag-cy {
             width: 100%;
             height: 100%;
             display: block;
@@ -1765,6 +1765,56 @@
                 max-width: 100vw;
             }
         }
+        /* ===== vendored diff2html.min.css (内联以保证静态导出自包含) ===== */
+:host,:root{--d2h-bg-color:#fff;--d2h-border-color:#ddd;--d2h-dim-color:rgba(0,0,0,.3);--d2h-line-border-color:#eee;--d2h-file-header-bg-color:#f7f7f7;--d2h-file-header-border-color:#d8d8d8;--d2h-empty-placeholder-bg-color:#f1f1f1;--d2h-empty-placeholder-border-color:#e1e1e1;--d2h-selected-color:#c8e1ff;--d2h-ins-bg-color:#dfd;--d2h-ins-border-color:#b4e2b4;--d2h-ins-highlight-bg-color:#97f295;--d2h-ins-label-color:#399839;--d2h-del-bg-color:#fee8e9;--d2h-del-border-color:#e9aeae;--d2h-del-highlight-bg-color:#ffb6ba;--d2h-del-label-color:#c33;--d2h-change-del-color:#fdf2d0;--d2h-change-ins-color:#ded;--d2h-info-bg-color:#f8fafd;--d2h-info-border-color:#d5e4f2;--d2h-change-label-color:#d0b44c;--d2h-moved-label-color:#3572b0;--d2h-dark-color:#e6edf3;--d2h-dark-bg-color:#0d1117;--d2h-dark-border-color:#30363d;--d2h-dark-dim-color:#6e7681;--d2h-dark-line-border-color:#21262d;--d2h-dark-file-header-bg-color:#161b22;--d2h-dark-file-header-border-color:#30363d;--d2h-dark-empty-placeholder-bg-color:hsla(215,8%,47%,.1);--d2h-dark-empty-placeholder-border-color:#30363d;--d2h-dark-selected-color:rgba(56,139,253,.1);--d2h-dark-ins-bg-color:rgba(46,160,67,.15);--d2h-dark-ins-border-color:rgba(46,160,67,.4);--d2h-dark-ins-highlight-bg-color:rgba(46,160,67,.4);--d2h-dark-ins-label-color:#3fb950;--d2h-dark-del-bg-color:rgba(248,81,73,.1);--d2h-dark-del-border-color:rgba(248,81,73,.4);--d2h-dark-del-highlight-bg-color:rgba(248,81,73,.4);--d2h-dark-del-label-color:#f85149;--d2h-dark-change-del-color:rgba(210,153,34,.2);--d2h-dark-change-ins-color:rgba(46,160,67,.25);--d2h-dark-info-bg-color:rgba(56,139,253,.1);--d2h-dark-info-border-color:rgba(56,139,253,.4);--d2h-dark-change-label-color:#d29922;--d2h-dark-moved-label-color:#3572b0}.d2h-wrapper{text-align:left}.d2h-file-header{background-color:#f7f7f7;background-color:var(--d2h-file-header-bg-color);border-bottom:1px solid #d8d8d8;border-bottom:1px solid var(--d2h-file-header-border-color);display:-webkit-box;display:-ms-flexbox;display:flex;font-family:Source Sans Pro,Helvetica Neue,Helvetica,Arial,sans-serif;height:35px;padding:5px 10px}.d2h-file-header.d2h-sticky-header{position:sticky;top:0;z-index:1}.d2h-file-stats{display:-webkit-box;display:-ms-flexbox;display:flex;font-size:14px;margin-left:auto}.d2h-lines-added{border:1px solid #b4e2b4;border:1px solid var(--d2h-ins-border-color);border-radius:5px 0 0 5px;color:#399839;color:var(--d2h-ins-label-color);padding:2px;text-align:right;vertical-align:middle}.d2h-lines-deleted{border:1px solid #e9aeae;border:1px solid var(--d2h-del-border-color);border-radius:0 5px 5px 0;color:#c33;color:var(--d2h-del-label-color);margin-left:1px;padding:2px;text-align:left;vertical-align:middle}.d2h-file-name-wrapper{display:-webkit-box;display:-ms-flexbox;display:flex;-webkit-box-align:center;-ms-flex-align:center;align-items:center;font-size:15px;width:100%}.d2h-file-name{overflow-x:hidden;text-overflow:ellipsis;white-space:nowrap}.d2h-file-wrapper{border:1px solid #ddd;border:1px solid var(--d2h-border-color);border-radius:3px;margin-bottom:1em}.d2h-file-collapse{-webkit-box-pack:end;-ms-flex-pack:end;cursor:pointer;display:none;font-size:12px;justify-content:flex-end;-webkit-box-align:center;-ms-flex-align:center;align-items:center;border:1px solid #ddd;border:1px solid var(--d2h-border-color);border-radius:3px;padding:4px 8px}.d2h-file-collapse.d2h-selected{background-color:#c8e1ff;background-color:var(--d2h-selected-color)}.d2h-file-collapse-input{margin:0 4px 0 0}.d2h-diff-table{border-collapse:collapse;font-family:Menlo,Consolas,monospace;font-size:13px;width:100%}.d2h-files-diff{display:-webkit-box;display:-ms-flexbox;display:flex;width:100%}.d2h-file-diff{overflow-y:hidden}.d2h-file-diff.d2h-d-none,.d2h-files-diff.d2h-d-none{display:none}.d2h-file-side-diff{display:inline-block;overflow-x:scroll;overflow-y:hidden;width:50%}.d2h-code-line{padding:0 8em;width:calc(100% - 16em)}.d2h-code-line,.d2h-code-side-line{display:inline-block;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none;white-space:nowrap}.d2h-code-side-line{padding:0 4.5em;width:calc(100% - 9em)}.d2h-code-line-ctn{background:none;display:inline-block;padding:0;word-wrap:normal;-webkit-user-select:text;-moz-user-select:text;-ms-user-select:text;user-select:text;vertical-align:middle;white-space:pre;width:100%}.d2h-code-line del,.d2h-code-side-line del{background-color:#ffb6ba;background-color:var(--d2h-del-highlight-bg-color)}.d2h-code-line del,.d2h-code-line ins,.d2h-code-side-line del,.d2h-code-side-line ins{border-radius:.2em;display:inline-block;margin-top:-1px;-webkit-text-decoration:none;text-decoration:none}.d2h-code-line ins,.d2h-code-side-line ins{background-color:#97f295;background-color:var(--d2h-ins-highlight-bg-color);text-align:left}.d2h-code-line-prefix{background:none;display:inline;padding:0;word-wrap:normal;white-space:pre}.line-num1{float:left}.line-num1,.line-num2{-webkit-box-sizing:border-box;box-sizing:border-box;overflow:hidden;padding:0 .5em;text-overflow:ellipsis;width:3.5em}.line-num2{float:right}.d2h-code-linenumber{background-color:#fff;background-color:var(--d2h-bg-color);border:solid #eee;border:solid var(--d2h-line-border-color);border-width:0 1px;-webkit-box-sizing:border-box;box-sizing:border-box;color:rgba(0,0,0,.3);color:var(--d2h-dim-color);cursor:pointer;display:inline-block;position:absolute;text-align:right;width:7.5em}.d2h-code-linenumber:after{content:"\200b"}.d2h-code-side-linenumber{background-color:#fff;background-color:var(--d2h-bg-color);border:solid #eee;border:solid var(--d2h-line-border-color);border-width:0 1px;-webkit-box-sizing:border-box;box-sizing:border-box;color:rgba(0,0,0,.3);color:var(--d2h-dim-color);cursor:pointer;display:inline-block;overflow:hidden;padding:0 .5em;position:absolute;text-align:right;text-overflow:ellipsis;width:4em}.d2h-code-side-linenumber:after{content:"\200b"}.d2h-code-side-emptyplaceholder,.d2h-emptyplaceholder{background-color:#f1f1f1;background-color:var(--d2h-empty-placeholder-bg-color);border-color:#e1e1e1;border-color:var(--d2h-empty-placeholder-border-color)}.d2h-code-line-prefix,.d2h-code-linenumber,.d2h-code-side-linenumber,.d2h-emptyplaceholder{-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.d2h-code-linenumber,.d2h-code-side-linenumber{direction:rtl}.d2h-del{background-color:#fee8e9;background-color:var(--d2h-del-bg-color);border-color:#e9aeae;border-color:var(--d2h-del-border-color)}.d2h-ins{background-color:#dfd;background-color:var(--d2h-ins-bg-color);border-color:#b4e2b4;border-color:var(--d2h-ins-border-color)}.d2h-info{background-color:#f8fafd;background-color:var(--d2h-info-bg-color);border-color:#d5e4f2;border-color:var(--d2h-info-border-color);color:rgba(0,0,0,.3);color:var(--d2h-dim-color)}.d2h-file-diff .d2h-del.d2h-change{background-color:#fdf2d0;background-color:var(--d2h-change-del-color)}.d2h-file-diff .d2h-ins.d2h-change{background-color:#ded;background-color:var(--d2h-change-ins-color)}.d2h-file-list-wrapper{margin-bottom:10px}.d2h-file-list-wrapper a{-webkit-text-decoration:none;text-decoration:none}.d2h-file-list-wrapper a,.d2h-file-list-wrapper a:visited{color:#3572b0;color:var(--d2h-moved-label-color)}.d2h-file-list-header{text-align:left}.d2h-file-list-title{font-weight:700}.d2h-file-list-line{display:-webkit-box;display:-ms-flexbox;display:flex;text-align:left}.d2h-file-list{display:block;list-style:none;margin:0;padding:0}.d2h-file-list>li{border-bottom:1px solid #ddd;border-bottom:1px solid var(--d2h-border-color);margin:0;padding:5px 10px}.d2h-file-list>li:last-child{border-bottom:none}.d2h-file-switch{cursor:pointer;display:none;font-size:10px}.d2h-icon{margin-right:10px;vertical-align:middle;fill:currentColor}.d2h-deleted{color:#c33;color:var(--d2h-del-label-color)}.d2h-added{color:#399839;color:var(--d2h-ins-label-color)}.d2h-changed{color:#d0b44c;color:var(--d2h-change-label-color)}.d2h-moved{color:#3572b0;color:var(--d2h-moved-label-color)}.d2h-tag{background-color:#fff;background-color:var(--d2h-bg-color);display:-webkit-box;display:-ms-flexbox;display:flex;font-size:10px;margin-left:5px;padding:0 2px}.d2h-deleted-tag{border:1px solid #c33;border:1px solid var(--d2h-del-label-color)}.d2h-added-tag{border:1px solid #399839;border:1px solid var(--d2h-ins-label-color)}.d2h-changed-tag{border:1px solid #d0b44c;border:1px solid var(--d2h-change-label-color)}.d2h-moved-tag{border:1px solid #3572b0;border:1px solid var(--d2h-moved-label-color)}.d2h-dark-color-scheme{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);color:#e6edf3;color:var(--d2h-dark-color)}.d2h-dark-color-scheme .d2h-file-header{background-color:#161b22;background-color:var(--d2h-dark-file-header-bg-color);border-bottom:#30363d;border-bottom:var(--d2h-dark-file-header-border-color)}.d2h-dark-color-scheme .d2h-lines-added{border:1px solid rgba(46,160,67,.4);border:1px solid var(--d2h-dark-ins-border-color);color:#3fb950;color:var(--d2h-dark-ins-label-color)}.d2h-dark-color-scheme .d2h-lines-deleted{border:1px solid rgba(248,81,73,.4);border:1px solid var(--d2h-dark-del-border-color);color:#f85149;color:var(--d2h-dark-del-label-color)}.d2h-dark-color-scheme .d2h-code-line del,.d2h-dark-color-scheme .d2h-code-side-line del{background-color:rgba(248,81,73,.4);background-color:var(--d2h-dark-del-highlight-bg-color)}.d2h-dark-color-scheme .d2h-code-line ins,.d2h-dark-color-scheme .d2h-code-side-line ins{background-color:rgba(46,160,67,.4);background-color:var(--d2h-dark-ins-highlight-bg-color)}.d2h-dark-color-scheme .d2h-diff-tbody{border-color:#30363d;border-color:var(--d2h-dark-border-color)}.d2h-dark-color-scheme .d2h-code-side-linenumber{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);border-color:#21262d;border-color:var(--d2h-dark-line-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-dark-color-scheme .d2h-files-diff .d2h-code-side-emptyplaceholder,.d2h-dark-color-scheme .d2h-files-diff .d2h-emptyplaceholder{background-color:hsla(215,8%,47%,.1);background-color:var(--d2h-dark-empty-placeholder-bg-color);border-color:#30363d;border-color:var(--d2h-dark-empty-placeholder-border-color)}.d2h-dark-color-scheme .d2h-code-linenumber{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);border-color:#21262d;border-color:var(--d2h-dark-line-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-dark-color-scheme .d2h-del{background-color:rgba(248,81,73,.1);background-color:var(--d2h-dark-del-bg-color);border-color:rgba(248,81,73,.4);border-color:var(--d2h-dark-del-border-color)}.d2h-dark-color-scheme .d2h-ins{background-color:rgba(46,160,67,.15);background-color:var(--d2h-dark-ins-bg-color);border-color:rgba(46,160,67,.4);border-color:var(--d2h-dark-ins-border-color)}.d2h-dark-color-scheme .d2h-info{background-color:rgba(56,139,253,.1);background-color:var(--d2h-dark-info-bg-color);border-color:rgba(56,139,253,.4);border-color:var(--d2h-dark-info-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-dark-color-scheme .d2h-file-diff .d2h-del.d2h-change{background-color:rgba(210,153,34,.2);background-color:var(--d2h-dark-change-del-color)}.d2h-dark-color-scheme .d2h-file-diff .d2h-ins.d2h-change{background-color:rgba(46,160,67,.25);background-color:var(--d2h-dark-change-ins-color)}.d2h-dark-color-scheme .d2h-file-wrapper{border:1px solid #30363d;border:1px solid var(--d2h-dark-border-color)}.d2h-dark-color-scheme .d2h-file-collapse{border:1px solid #0d1117;border:1px solid var(--d2h-dark-bg-color)}.d2h-dark-color-scheme .d2h-file-collapse.d2h-selected{background-color:rgba(56,139,253,.1);background-color:var(--d2h-dark-selected-color)}.d2h-dark-color-scheme .d2h-file-list-wrapper a,.d2h-dark-color-scheme .d2h-file-list-wrapper a:visited{color:#3572b0;color:var(--d2h-dark-moved-label-color)}.d2h-dark-color-scheme .d2h-file-list>li{border-bottom:1px solid #0d1117;border-bottom:1px solid var(--d2h-dark-bg-color)}.d2h-dark-color-scheme .d2h-deleted{color:#f85149;color:var(--d2h-dark-del-label-color)}.d2h-dark-color-scheme .d2h-added{color:#3fb950;color:var(--d2h-dark-ins-label-color)}.d2h-dark-color-scheme .d2h-changed{color:#d29922;color:var(--d2h-dark-change-label-color)}.d2h-dark-color-scheme .d2h-moved{color:#3572b0;color:var(--d2h-dark-moved-label-color)}.d2h-dark-color-scheme .d2h-tag{background-color:#0d1117;background-color:var(--d2h-dark-bg-color)}.d2h-dark-color-scheme .d2h-deleted-tag{border:1px solid #f85149;border:1px solid var(--d2h-dark-del-label-color)}.d2h-dark-color-scheme .d2h-added-tag{border:1px solid #3fb950;border:1px solid var(--d2h-dark-ins-label-color)}.d2h-dark-color-scheme .d2h-changed-tag{border:1px solid #d29922;border:1px solid var(--d2h-dark-change-label-color)}.d2h-dark-color-scheme .d2h-moved-tag{border:1px solid #3572b0;border:1px solid var(--d2h-dark-moved-label-color)}@media (prefers-color-scheme:dark){.d2h-auto-color-scheme{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);color:#e6edf3;color:var(--d2h-dark-color)}.d2h-auto-color-scheme .d2h-file-header{background-color:#161b22;background-color:var(--d2h-dark-file-header-bg-color);border-bottom:#30363d;border-bottom:var(--d2h-dark-file-header-border-color)}.d2h-auto-color-scheme .d2h-lines-added{border:1px solid rgba(46,160,67,.4);border:1px solid var(--d2h-dark-ins-border-color);color:#3fb950;color:var(--d2h-dark-ins-label-color)}.d2h-auto-color-scheme .d2h-lines-deleted{border:1px solid rgba(248,81,73,.4);border:1px solid var(--d2h-dark-del-border-color);color:#f85149;color:var(--d2h-dark-del-label-color)}.d2h-auto-color-scheme .d2h-code-line del,.d2h-auto-color-scheme .d2h-code-side-line del{background-color:rgba(248,81,73,.4);background-color:var(--d2h-dark-del-highlight-bg-color)}.d2h-auto-color-scheme .d2h-code-line ins,.d2h-auto-color-scheme .d2h-code-side-line ins{background-color:rgba(46,160,67,.4);background-color:var(--d2h-dark-ins-highlight-bg-color)}.d2h-auto-color-scheme .d2h-diff-tbody{border-color:#30363d;border-color:var(--d2h-dark-border-color)}.d2h-auto-color-scheme .d2h-code-side-linenumber{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);border-color:#21262d;border-color:var(--d2h-dark-line-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-auto-color-scheme .d2h-files-diff .d2h-code-side-emptyplaceholder,.d2h-auto-color-scheme .d2h-files-diff .d2h-emptyplaceholder{background-color:hsla(215,8%,47%,.1);background-color:var(--d2h-dark-empty-placeholder-bg-color);border-color:#30363d;border-color:var(--d2h-dark-empty-placeholder-border-color)}.d2h-auto-color-scheme .d2h-code-linenumber{background-color:#0d1117;background-color:var(--d2h-dark-bg-color);border-color:#21262d;border-color:var(--d2h-dark-line-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-auto-color-scheme .d2h-del{background-color:rgba(248,81,73,.1);background-color:var(--d2h-dark-del-bg-color);border-color:rgba(248,81,73,.4);border-color:var(--d2h-dark-del-border-color)}.d2h-auto-color-scheme .d2h-ins{background-color:rgba(46,160,67,.15);background-color:var(--d2h-dark-ins-bg-color);border-color:rgba(46,160,67,.4);border-color:var(--d2h-dark-ins-border-color)}.d2h-auto-color-scheme .d2h-info{background-color:rgba(56,139,253,.1);background-color:var(--d2h-dark-info-bg-color);border-color:rgba(56,139,253,.4);border-color:var(--d2h-dark-info-border-color);color:#6e7681;color:var(--d2h-dark-dim-color)}.d2h-auto-color-scheme .d2h-file-diff .d2h-del.d2h-change{background-color:rgba(210,153,34,.2);background-color:var(--d2h-dark-change-del-color)}.d2h-auto-color-scheme .d2h-file-diff .d2h-ins.d2h-change{background-color:rgba(46,160,67,.25);background-color:var(--d2h-dark-change-ins-color)}.d2h-auto-color-scheme .d2h-file-wrapper{border:1px solid #30363d;border:1px solid var(--d2h-dark-border-color)}.d2h-auto-color-scheme .d2h-file-collapse{border:1px solid #0d1117;border:1px solid var(--d2h-dark-bg-color)}.d2h-auto-color-scheme .d2h-file-collapse.d2h-selected{background-color:rgba(56,139,253,.1);background-color:var(--d2h-dark-selected-color)}.d2h-auto-color-scheme .d2h-file-list-wrapper a,.d2h-auto-color-scheme .d2h-file-list-wrapper a:visited{color:#3572b0;color:var(--d2h-dark-moved-label-color)}.d2h-auto-color-scheme .d2h-file-list>li{border-bottom:1px solid #0d1117;border-bottom:1px solid var(--d2h-dark-bg-color)}.d2h-dark-color-scheme .d2h-deleted{color:#f85149;color:var(--d2h-dark-del-label-color)}.d2h-auto-color-scheme .d2h-added{color:#3fb950;color:var(--d2h-dark-ins-label-color)}.d2h-auto-color-scheme .d2h-changed{color:#d29922;color:var(--d2h-dark-change-label-color)}.d2h-auto-color-scheme .d2h-moved{color:#3572b0;color:var(--d2h-dark-moved-label-color)}.d2h-auto-color-scheme .d2h-tag{background-color:#0d1117;background-color:var(--d2h-dark-bg-color)}.d2h-auto-color-scheme .d2h-deleted-tag{border:1px solid #f85149;border:1px solid var(--d2h-dark-del-label-color)}.d2h-auto-color-scheme .d2h-added-tag{border:1px solid #3fb950;border:1px solid var(--d2h-dark-ins-label-color)}.d2h-auto-color-scheme .d2h-changed-tag{border:1px solid #d29922;border:1px solid var(--d2h-dark-change-label-color)}.d2h-auto-color-scheme .d2h-moved-tag{border:1px solid #3572b0;border:1px solid var(--d2h-dark-moved-label-color)}}
+
+        /* ===== diff2html 暗色主题适配：用页面调色板重定义 d2h 变量并覆盖关键 .d2h-* 容器 ===== */
+        .diff-view-panel .d2h-wrapper,
+        .diff-view-panel .d2h-file-wrapper {
+            --d2h-bg-color: var(--bg-card);
+            --d2h-border-color: var(--border);
+            --d2h-line-border-color: var(--border-subtle);
+            --d2h-dim-color: var(--text-muted);
+            --d2h-file-header-bg-color: var(--bg-surface);
+            --d2h-file-header-border-color: var(--border);
+            --d2h-empty-placeholder-bg-color: var(--bg-surface);
+            --d2h-empty-placeholder-border-color: var(--border);
+            --d2h-info-bg-color: var(--bg-surface);
+            --d2h-info-border-color: var(--border);
+            --d2h-ins-bg-color: var(--success-bg);
+            --d2h-ins-border-color: rgba(63,185,80,0.35);
+            --d2h-ins-highlight-bg-color: rgba(63,185,80,0.30);
+            --d2h-ins-label-color: var(--success);
+            --d2h-del-bg-color: var(--danger-bg);
+            --d2h-del-border-color: rgba(248,81,73,0.35);
+            --d2h-del-highlight-bg-color: rgba(248,81,73,0.30);
+            --d2h-del-label-color: var(--danger);
+            --d2h-change-ins-color: var(--success-bg);
+            --d2h-change-del-color: var(--danger-bg);
+            --d2h-change-label-color: var(--warning);
+            --d2h-selected-color: var(--accent-glow);
+            --d2h-moved-label-color: var(--purple);
+        }
+        .diff-view-panel .d2h-wrapper { background: var(--bg-card); color: var(--text); }
+        .diff-view-panel .d2h-file-wrapper { border-color: var(--border); }
+        .diff-view-panel .d2h-file-header { background: var(--bg-surface); border-color: var(--border); }
+        .diff-view-panel .d2h-file-name,
+        .diff-view-panel .d2h-tag { color: var(--text-heading); }
+        .diff-view-panel .d2h-code-line,
+        .diff-view-panel .d2h-code-side-line,
+        .diff-view-panel .d2h-code-line-ctn { color: var(--text); }
+        .diff-view-panel .d2h-code-linenumber,
+        .diff-view-panel .d2h-code-side-linenumber {
+            background: var(--bg-surface);
+            color: var(--text-muted);
+            border-color: var(--border-subtle);
+        }
+        .diff-view-panel .d2h-ins { background-color: var(--success-bg); }
+        .diff-view-panel .d2h-del { background-color: var(--danger-bg); }
+        .diff-view-panel .d2h-info { background: var(--bg-surface); color: var(--text-muted); }
+        .diff-view-panel .d2h-emptyplaceholder,
+        .diff-view-panel .d2h-cntx.d2h-emptyplaceholder { background: var(--bg-surface); border-color: var(--border-subtle); }
+
     </style>
 </head>
 <body>
@@ -1868,25 +1918,9 @@
         </div>
     </div>
 
-    <!-- 主画布区域与 SVG 视图 -->
+    <!-- 主画布区域与 Cytoscape 视图 -->
     <main class="canvas-wrapper" id="canvas-container">
-        <svg id="dag-svg" xmlns="http://www.w3.org/2000/svg">
-            <defs>
-                <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#3a475d" />
-                </marker>
-                <marker id="arrow-highlight-up" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#58a6ff" />
-                </marker>
-                <marker id="arrow-highlight-down" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-                    <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#a371f7" />
-                </marker>
-            </defs>
-            <g id="dag-viewport" transform="matrix(1 0 0 1 0 0)">
-                <g id="dag-edges"></g>
-                <g id="dag-nodes"></g>
-            </g>
-        </svg>
+        <div id="dag-cy"></div>
 
         <!-- 任务为空时的引导占位 -->
         <div id="canvas-empty" class="canvas-empty-state" style="display: none;">
@@ -2118,8 +2152,13 @@
     <!-- 开源第三方运行时库 (位于 web/vendor 目录) -->
     <script src="vendor/marked.min.js"></script>
     <script src="vendor/prism.min.js"></script>
-    <script src="vendor/diff.min.js"></script>
     <script src="vendor/fuse.min.js"></script>
+    <script src="vendor/purify.min.js"></script>
+    <script src="vendor/anser.min.js"></script>
+    <script src="vendor/diff2html.min.js"></script>
+    <script src="vendor/cytoscape.min.js"></script>
+    <script src="vendor/dagre.min.js"></script>
+    <script src="vendor/cytoscape-dagre.min.js"></script>
 
 <!-- 前端核心 SPA 驱动脚本 -->
     <script>
@@ -2168,10 +2207,8 @@
         };
 
         // DOM 元素引用
-        const svgElement = document.getElementById('dag-svg');
-        const viewport = document.getElementById('dag-viewport');
-        const edgesGroup = document.getElementById('dag-edges');
-        const nodesGroup = document.getElementById('dag-nodes');
+        let cy = null;                       // Cytoscape 实例（renderDAG 首次调用时创建）
+        const cyContainer = document.getElementById('dag-cy');
         const canvasContainer = document.getElementById('canvas-container');
         const zoomLevelText = document.getElementById('zoom-level-text');
         const flowSelect = document.getElementById('flow-select');
@@ -2194,61 +2231,134 @@
             eventLog.prepend(div);
         }
 
-        // 矩阵变换应用
-        function applyTransform() {
-            viewport.setAttribute('transform', `matrix(${AppState.scale} 0 0 ${AppState.scale} ${AppState.translateX} ${AppState.translateY})`);
-            zoomLevelText.textContent = `${Math.round(AppState.scale * 100)}%`;
+        // Cytoscape 缩放百分比文本同步
+        function updateZoomText() {
+            if (cy) zoomLevelText.textContent = `${Math.round(cy.zoom() * 100)}%`;
         }
 
-        // 居中自适应
+        // 居中自适应：交给 cytoscape 计算包围盒
         function fitToView() {
-            if (!AppState.tasksDAG || !AppState.tasksDAG.nodes || AppState.tasksDAG.nodes.length === 0) {
-                AppState.scale = 1.0;
-                AppState.translateX = 40;
-                AppState.translateY = 40;
-                applyTransform();
-                return;
+            if (cy && cy.nodes().length > 0) {
+                cy.fit(undefined, 40);
+                updateZoomText();
             }
-            const nodes = AppState.tasksDAG.nodes;
-            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            for (const n of nodes) {
-                minX = Math.min(minX, n.x);
-                minY = Math.min(minY, n.y);
-                maxX = Math.max(maxX, n.x + n.width);
-                maxY = Math.max(maxY, n.y + n.height);
-            }
-
-            const cw = canvasContainer.clientWidth || 1000;
-            const ch = canvasContainer.clientHeight || 700;
-            const pad = 60;
-            const graphW = (maxX - minX) + pad * 2;
-            const graphH = (maxY - minY) + pad * 2;
-            const scaleX = cw / Math.max(graphW, 100);
-            const scaleY = ch / Math.max(graphH, 100);
-            let s = Math.min(scaleX, scaleY, 1.15);
-            s = Math.max(0.3, Math.min(s, 2.0));
-
-            AppState.scale = s;
-            AppState.translateX = (cw - (maxX - minX) * s) / 2 - minX * s;
-            AppState.translateY = (ch - (maxY - minY) * s) / 2 - minY * s;
-            applyTransform();
         }
 
-        // 缩放操作
-        function zoomBy(factor, cx, cy) {
-            const oldScale = AppState.scale;
-            let newScale = oldScale * factor;
-            newScale = Math.max(0.25, Math.min(newScale, 2.5));
-            if (newScale === oldScale) return;
+        // 以画布中心为锚点按倍率缩放
+        function zoomByCy(factor) {
+            if (!cy) return;
+            const w = cy.width(), h = cy.height();
+            let z = cy.zoom() * factor;
+            z = Math.max(0.2, Math.min(z, 3.0));
+            cy.zoom({ level: z, renderedPosition: { x: w / 2, y: h / 2 } });
+            updateZoomText();
+        }
 
-            const rect = canvasContainer.getBoundingClientRect();
-            const mouseX = (cx !== undefined) ? (cx - rect.left) : (rect.width / 2);
-            const mouseY = (cy !== undefined) ? (cy - rect.top) : (rect.height / 2);
+        // Cytoscape 节点/边样式（复用页面 CSS 变量对应色值）
+        const CY_STYLE = [
+            {
+                selector: 'node',
+                style: {
+                    'shape': 'round-rectangle',
+                    'background-color': '#131822',
+                    'border-color': '#484f58',
+                    'border-width': 1,
+                    'width': 200,
+                    'height': 54,
+                    'padding': '6px',
+                    'label': 'data(label)',
+                    'color': '#f0f6fc',
+                    'font-size': 11,
+                    'font-family': 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+                    'text-wrap': 'wrap',
+                    'text-max-width': 184,
+                    'text-valign': 'center',
+                    'text-halign': 'center',
+                    'line-height': 1.35,
+                    'transition-property': 'opacity, border-color, border-width',
+                    'transition-duration': '0.15s',
+                },
+            },
+            { selector: 'node[status = "done"]',    style: { 'border-color': '#3fb950' } },
+            { selector: 'node[status = "doing"]',   style: { 'border-color': '#d29922', 'border-width': 2 } },
+            { selector: 'node[status = "blocked"]', style: { 'border-color': '#f85149', 'border-width': 2 } },
+            { selector: 'node[status = "stale"]',   style: { 'border-color': '#f85149', 'border-width': 2 } },
+            { selector: 'node[status = "skipped"]', style: { 'border-color': '#a371f7', 'opacity': 0.7 } },
+            { selector: 'node[status = "todo"]',    style: { 'border-color': '#484f58' } },
+            // 环节点：醒目红色虚线粗边
+            { selector: 'node[?cycle]', style: { 'border-color': '#f85149', 'border-width': 3, 'border-style': 'dashed' } },
+            // 选中态
+            { selector: 'node:selected', style: { 'border-color': '#58a6ff', 'border-width': 3, 'background-color': '#19202e' } },
+            {
+                selector: 'edge',
+                style: {
+                    'width': 2,
+                    'line-color': '#2a3446',
+                    'target-arrow-color': '#3a475d',
+                    'target-arrow-shape': 'triangle',
+                    'curve-style': 'bezier',
+                    'transition-property': 'opacity, line-color, width',
+                    'transition-duration': '0.15s',
+                },
+            },
+            // BFS 依赖高亮
+            { selector: 'node.hl-source', style: { 'border-color': '#58a6ff', 'border-width': 3 } },
+            { selector: 'node.hl-up',     style: { 'border-color': '#388bfd', 'border-width': 2 } },
+            { selector: 'node.hl-down',   style: { 'border-color': '#a371f7', 'border-width': 2 } },
+            { selector: 'edge.hl-up',     style: { 'line-color': '#58a6ff', 'target-arrow-color': '#58a6ff', 'width': 3 } },
+            { selector: 'edge.hl-down',   style: { 'line-color': '#a371f7', 'target-arrow-color': '#a371f7', 'width': 3 } },
+            // 淡化与检索高亮
+            { selector: '.faded',    style: { 'opacity': 0.15 } },
+            { selector: 'node.search-hit', style: { 'border-color': '#58a6ff', 'border-width': 3 } },
+        ];
 
-            AppState.translateX = mouseX - (mouseX - AppState.translateX) * (newScale / oldScale);
-            AppState.translateY = mouseY - (mouseY - AppState.translateY) * (newScale / oldScale);
-            AppState.scale = newScale;
-            applyTransform();
+        // 由后端节点构建 cytoscape 节点 label（id + 标题 + 底部元信息）
+        function buildNodeLabel(node) {
+            const title = (node.title || '').trim();
+            const shortTitle = title.length > 42 ? title.slice(0, 41) + '…' : title;
+            const meta = [];
+            if (node.phase) meta.push(node.phase);
+            if (node.role) meta.push(node.role);
+            if (node.artifacts_count) meta.push(`📎${node.artifacts_count}`);
+            if (node.has_cycle) meta.push('⚠环');
+            const lines = [node.id];
+            if (shortTitle) lines.push(shortTitle);
+            if (meta.length) lines.push(meta.join(' · '));
+            return lines.join('\n');
+        }
+
+        // 首次创建 Cytoscape 实例并绑定交互事件
+        function initCytoscape() {
+            if (cy) return cy;
+            if (window.cytoscape && window.cytoscapeDagre) {
+                try { cytoscape.use(window.cytoscapeDagre); } catch (e) { /* 已注册则忽略 */ }
+            }
+            cy = cytoscape({
+                container: cyContainer,
+                elements: [],
+                style: CY_STYLE,
+                minZoom: 0.2,
+                maxZoom: 3.0,
+                wheelSensitivity: 0.2,
+                boxSelectionEnabled: false,
+            });
+
+            // 点击节点 → 选中并打开抽屉
+            cy.on('tap', 'node', (evt) => {
+                openTaskDrawer(evt.target.id());
+            });
+            // 点击空白 → 清空检索高亮
+            cy.on('tap', (evt) => {
+                if (evt.target === cy) {
+                    cy.elements().removeClass('search-hit faded');
+                }
+            });
+            // 悬停 → 依赖链高亮
+            cy.on('mouseover', 'node', (evt) => highlightDependencies(evt.target.id()));
+            cy.on('mouseout', 'node', () => clearHighlights());
+            // 缩放 → 更新百分比
+            cy.on('zoom', updateZoomText);
+            return cy;
         }
 
         // 渲染顶部与阶段梯队
@@ -2348,10 +2458,7 @@
             if (!q) {
                 if (clearBtn) clearBtn.style.display = 'none';
                 if (dropdown) dropdown.style.display = 'none';
-                document.querySelectorAll('.node-card').forEach(c => {
-                    c.style.opacity = '';
-                    c.style.filter = '';
-                });
+                if (cy) cy.elements().removeClass('search-hit faded');
                 return;
             }
 
@@ -2371,17 +2478,19 @@
 
             const matchedIds = new Set(matches.map(m => m.id));
 
-            // 画布节点高亮/淡化联动
-            document.querySelectorAll('.node-card').forEach(c => {
-                const tid = c.getAttribute('data-id');
-                if (matchedIds.has(tid)) {
-                    c.style.opacity = '1';
-                    c.style.filter = 'drop-shadow(0 0 6px var(--accent))';
-                } else {
-                    c.style.opacity = '0.2';
-                    c.style.filter = 'grayscale(0.8)';
-                }
-            });
+            // 画布节点高亮/淡化联动（cytoscape class 切换）
+            if (cy) {
+                cy.batch(() => {
+                    cy.nodes().forEach(n => {
+                        if (matchedIds.has(n.id())) {
+                            n.addClass('search-hit').removeClass('faded');
+                        } else {
+                            n.removeClass('search-hit').addClass('faded');
+                        }
+                    });
+                    cy.edges().addClass('faded');
+                });
+            }
 
             // 下拉展示即时前 6 个最匹配任务
             if (dropdown) {
@@ -2412,9 +2521,6 @@
 
         // 渲染 DAG 拓扑连线与节点
         function renderDAG(dagData, preserveView) {
-            edgesGroup.innerHTML = '';
-            nodesGroup.innerHTML = '';
-
             const nodes = dagData.nodes || [];
             const edges = dagData.edges || [];
             updateTaskSearchIndex(nodes);
@@ -2429,179 +2535,106 @@
             document.getElementById('stat-doing').textContent = doingCount;
             document.getElementById('stat-blocked').textContent = blockedCount;
 
+            initCytoscape();
+
             const emptyBanner = document.getElementById('canvas-empty');
             if (nodes.length === 0) {
                 emptyBanner.style.display = 'block';
+                cy.elements().remove();
                 return;
             }
             emptyBanner.style.display = 'none';
 
-            const nodeMap = new Map(nodes.map(n => [n.id, n]));
+            const nodeIds = new Set(nodes.map(n => n.id));
 
-            // 1. 绘制三次贝塞尔曲线有向边
-            edges.forEach(edge => {
-                const u = nodeMap.get(edge.source);
-                const v = nodeMap.get(edge.target);
-                if (!u || !v) return;
+            // 构建 cytoscape elements（忽略后端 x/y/col/row 像素坐标，交给 dagre 布局）
+            const cyNodes = nodes.map(node => ({
+                group: 'nodes',
+                data: {
+                    id: node.id,
+                    label: buildNodeLabel(node),
+                    status: node.status || 'todo',
+                    phase: node.phase || '',
+                    role: node.role || '',
+                    title: node.title || '',
+                    artifacts: node.artifacts_count || 0,
+                    cycle: !!node.has_cycle,
+                },
+            }));
+            const cyEdges = edges
+                .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
+                .map(e => ({
+                    group: 'edges',
+                    data: { id: `${e.source}->${e.target}`, source: e.source, target: e.target },
+                }));
 
-                // 连线锚点：源卡片右中点 -> 目标卡片左中点
-                const x1 = u.x + u.width;
-                const y1 = u.y + u.height / 2;
-                const x2 = v.x;
-                const y2 = v.y + v.height / 2;
-                const dx = Math.max(30, (x2 - x1) * 0.5);
-                const d = `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+            // 保留视图时记录当前缩放/平移
+            const savedZoom = cy.zoom();
+            const savedPan = Object.assign({}, cy.pan());
 
-                const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-                path.setAttribute('class', 'dag-edge');
-                path.setAttribute('d', d);
-                path.setAttribute('data-source', edge.source);
-                path.setAttribute('data-target', edge.target);
-                path.setAttribute('marker-end', 'url(#arrow)');
-                edgesGroup.appendChild(path);
-            });
+            cy.elements().remove();
+            cy.add(cyNodes.concat(cyEdges));
 
-            // 2. 绘制节点卡片 (foreignObject)
-            nodes.forEach(node => {
-                const fo = document.createElementNS('http://www.w3.org/2000/svg', 'foreignObject');
-                fo.setAttribute('class', 'dag-node-wrapper');
-                fo.setAttribute('data-id', node.id);
-                fo.setAttribute('x', node.x);
-                fo.setAttribute('y', node.y);
-                fo.setAttribute('width', node.width);
-                fo.setAttribute('height', node.height);
+            cy.layout({
+                name: 'dagre',
+                rankDir: 'LR',        // 原手搓图为横向（源右 → 目标左），保持横向
+                nodeSep: 24,
+                rankSep: 80,
+                edgeSep: 12,
+                animate: false,
+                fit: !preserveView,
+                padding: 40,
+            }).run();
 
-                const statusClass = `status-${node.status || 'todo'}`;
-                const tagClass = `tag-${node.status || 'todo'}`;
-                const isSelected = (AppState.selectedTaskId === node.id);
+            // 恢复选中态
+            if (AppState.selectedTaskId && cy.$id(AppState.selectedTaskId).nonempty()) {
+                cy.$id(AppState.selectedTaskId).select();
+            }
 
-                const card = document.createElement('div');
-                card.className = `node-card ${statusClass} ${isSelected ? 'selected' : ''}`;
-                card.id = `node-${node.id}`;
-
-                const artifactsCount = node.artifacts_count || 0;
-                const artifactsBadge = artifactsCount > 0
-                    ? `<span class="node-artifacts" title="${artifactsCount} 个产物文件"><svg class="ui-icon" width="10" height="10" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>${artifactsCount}</span>`
-                    : '';
-                const cycleBadge = node.has_cycle
-                    ? `<span class="node-cycle-warn" title="存在循环依赖"><svg class="ui-icon" width="10" height="10" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> 环</span>`
-                    : '';
-
-                card.innerHTML = `
-                    <div class="node-top">
-                        <span class="node-id">${node.id}</span>
-                        <span class="node-role" title="${node.role || ''}">${node.role || '未认领'}</span>
-                        <span class="node-status-tag ${tagClass}">${node.status || 'todo'}</span>
-                    </div>
-                    <div class="node-title" title="${escapeHtml(node.title || '')}">${escapeHtml(node.title || '')}</div>
-                    <div class="node-bottom">
-                        <span style="font-family: var(--font-mono);">${node.phase || ''}</span>
-                        <div>${cycleBadge} ${artifactsBadge}</div>
-                    </div>
-                `;
-
-                // 交互事件绑定
-                card.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    openTaskDrawer(node.id);
-                });
-
-                card.addEventListener('mouseenter', () => {
-                    highlightDependencies(node.id);
-                });
-
-                card.addEventListener('mouseleave', () => {
-                    clearHighlights();
-                });
-
-                fo.appendChild(card);
-                nodesGroup.appendChild(fo);
-            });
+            if (preserveView) {
+                cy.zoom(savedZoom);
+                cy.pan(savedPan);
+            }
+            updateZoomText();
 
             // 应用当前状态过滤
             applyStatusFilter(AppState.activeFilter);
         }
 
-        // 依赖链拓扑高亮计算 (BFS 追溯前置与后置)
+        // 依赖链拓扑高亮：用 cytoscape 原生 predecessors()/successors() 追溯上下游
         function highlightDependencies(taskId) {
-            if (!AppState.tasksDAG) return;
-            const edges = AppState.tasksDAG.edges || [];
+            if (!cy) return;
+            const node = cy.$id(taskId);
+            if (node.empty()) return;
 
-            // 1. 查找全部前置祖先
-            const ancestors = new Set();
-            const qUp = [taskId];
-            while (qUp.length > 0) {
-                const curr = qUp.shift();
-                for (const e of edges) {
-                    if (e.target === curr && !ancestors.has(e.source)) {
-                        ancestors.add(e.source);
-                        qUp.push(e.source);
-                    }
-                }
-            }
+            const ancestors = node.predecessors();   // 上游节点 + 边
+            const descendants = node.successors();    // 下游节点 + 边
 
-            // 2. 查找全部后置后代
-            const descendants = new Set();
-            const qDown = [taskId];
-            while (qDown.length > 0) {
-                const curr = qDown.shift();
-                for (const e of edges) {
-                    if (e.source === curr && !descendants.has(e.target)) {
-                        descendants.add(e.target);
-                        qDown.push(e.target);
-                    }
-                }
-            }
-
-            // 3. 高亮或淡化
-            document.querySelectorAll('.dag-node-wrapper').forEach(el => {
-                const id = el.getAttribute('data-id');
-                const card = el.querySelector('.node-card');
-                if (id === taskId) {
-                    card.classList.add('highlight-source');
-                } else if (ancestors.has(id)) {
-                    card.classList.add('highlight-upstream');
-                } else if (descendants.has(id)) {
-                    card.classList.add('highlight-downstream');
-                } else {
-                    el.classList.add('dimmed');
-                }
-            });
-
-            document.querySelectorAll('.dag-edge').forEach(edge => {
-                const s = edge.getAttribute('data-source');
-                const t = edge.getAttribute('data-target');
-                if (ancestors.has(s) && (ancestors.has(t) || t === taskId)) {
-                    edge.classList.add('highlight-upstream');
-                } else if ((s === taskId || descendants.has(s)) && descendants.has(t)) {
-                    edge.classList.add('highlight-downstream');
-                } else {
-                    edge.classList.add('dimmed');
-                }
+            cy.batch(() => {
+                cy.elements().addClass('faded');
+                ancestors.nodes().removeClass('faded').addClass('hl-up');
+                descendants.nodes().removeClass('faded').addClass('hl-down');
+                ancestors.edges().removeClass('faded').addClass('hl-up');
+                descendants.edges().removeClass('faded').addClass('hl-down');
+                node.removeClass('faded').addClass('hl-source');
             });
         }
 
         function clearHighlights() {
-            document.querySelectorAll('.dag-node-wrapper').forEach(el => {
-                el.classList.remove('dimmed');
-                const card = el.querySelector('.node-card');
-                if (card) {
-                    card.classList.remove('highlight-source', 'highlight-upstream', 'highlight-downstream');
-                }
-            });
-            document.querySelectorAll('.dag-edge').forEach(edge => {
-                edge.classList.remove('highlight-upstream', 'highlight-downstream', 'dimmed');
-            });
+            if (!cy) return;
+            cy.elements().removeClass('faded hl-source hl-up hl-down');
         }
 
         // 打开任务细节抽屉并拉取细节
         async function openTaskDrawer(taskId) {
             AppState.selectedTaskId = taskId;
 
-            // 刷新节点选中态
-            document.querySelectorAll('.node-card').forEach(c => c.classList.remove('selected'));
-            const targetCard = document.getElementById(`node-${taskId}`);
-            if (targetCard) targetCard.classList.add('selected');
+            // 刷新节点选中态（cytoscape 单选）
+            if (cy) {
+                cy.nodes().unselect();
+                const target = cy.$id(taskId);
+                if (target.nonempty()) target.select();
+            }
 
             // 基础信息从当前拓扑中回填
             const node = (AppState.tasksDAG.nodes || []).find(n => n.id === taskId);
@@ -2729,143 +2762,22 @@
                 return;
             }
 
-            const codeWrapper = document.createElement('div');
-            codeWrapper.className = 'diff-code-wrapper';
-
-            // 优先尝试 jsdiff 结构化解析，提供双行号与行内字符级差异加深高亮
-            if (typeof Diff !== 'undefined' && typeof Diff.parsePatch === 'function') {
+            // 使用 diff2html 渲染 side-by-side 差异 (单文件 unified diff)
+            if (typeof Diff2Html !== 'undefined' && typeof Diff2Html.html === 'function') {
                 try {
-                    const patches = Diff.parsePatch(rawDiff);
-                    if (patches && patches.length > 0) {
-                        patches.forEach(patch => {
-                            (patch.hunks || []).forEach(hunk => {
-                                // Hunk 头 (@@ -old,len +new,len @@)
-                                const hunkLine = document.createElement('div');
-                                hunkLine.className = 'diff-line diff-hunk';
-                                hunkLine.innerHTML = `
-                                    <span class="diff-num">...</span>
-                                    <span class="diff-num">...</span>
-                                    <span class="diff-prefix">@</span>
-                                    <span class="diff-text">@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@</span>
-                                `;
-                                codeWrapper.appendChild(hunkLine);
-
-                                let oldNum = hunk.oldStart;
-                                let newNum = hunk.newStart;
-                                const lines = hunk.lines || [];
-
-                                for (let i = 0; i < lines.length; i++) {
-                                    const line = lines[i];
-                                    const prefix = line[0] || ' ';
-                                    const text = line.slice(1);
-
-                                    // 检查是否为成对出现的行修改 (单行/多行替换)，进行字符级 (Word-diff) 高亮
-                                    let isPairedChange = false;
-                                    let nextLine = lines[i + 1];
-                                    if (prefix === '-' && nextLine && nextLine[0] === '+') {
-                                        isPairedChange = true;
-                                    }
-
-                                    if (isPairedChange) {
-                                        const delText = text;
-                                        const addText = nextLine.slice(1);
-                                        const wordChanges = Diff.diffWordsWithSpace(delText, addText);
-
-                                        let delHtml = '';
-                                        let addHtml = '';
-                                        wordChanges.forEach(part => {
-                                            const val = escapeHtml(part.value);
-                                            if (part.added) {
-                                                addHtml += `<span class="diff-word-add">${val}</span>`;
-                                            } else if (part.removed) {
-                                                delHtml += `<span class="diff-word-del">${val}</span>`;
-                                            } else {
-                                                delHtml += val;
-                                                addHtml += val;
-                                            }
-                                        });
-
-                                        // 删除行
-                                        const delRow = document.createElement('div');
-                                        delRow.className = 'diff-line diff-del';
-                                        delRow.innerHTML = `
-                                            <span class="diff-num">${oldNum++}</span>
-                                            <span class="diff-num"></span>
-                                            <span class="diff-prefix">-</span>
-                                            <span class="diff-text">${delHtml}</span>
-                                        `;
-                                        codeWrapper.appendChild(delRow);
-
-                                        // 新增行
-                                        const addRow = document.createElement('div');
-                                        addRow.className = 'diff-line diff-add';
-                                        addRow.innerHTML = `
-                                            <span class="diff-num"></span>
-                                            <span class="diff-num">${newNum++}</span>
-                                            <span class="diff-prefix">+</span>
-                                            <span class="diff-text">${addHtml}</span>
-                                        `;
-                                        codeWrapper.appendChild(addRow);
-
-                                        i++; // 跳过已配对处理的下一行
-                                        continue;
-                                    }
-
-                                    if (prefix === '-') {
-                                        const row = document.createElement('div');
-                                        row.className = 'diff-line diff-del';
-                                        row.innerHTML = `
-                                            <span class="diff-num">${oldNum++}</span>
-                                            <span class="diff-num"></span>
-                                            <span class="diff-prefix">-</span>
-                                            <span class="diff-text">${escapeHtml(text)}</span>
-                                        `;
-                                        codeWrapper.appendChild(row);
-                                    } else if (prefix === '+') {
-                                        const row = document.createElement('div');
-                                        row.className = 'diff-line diff-add';
-                                        row.innerHTML = `
-                                            <span class="diff-num"></span>
-                                            <span class="diff-num">${newNum++}</span>
-                                            <span class="diff-prefix">+</span>
-                                            <span class="diff-text">${escapeHtml(text)}</span>
-                                        `;
-                                        codeWrapper.appendChild(row);
-                                    } else {
-                                        const row = document.createElement('div');
-                                        row.className = 'diff-line diff-ctx';
-                                        row.innerHTML = `
-                                            <span class="diff-num">${oldNum++}</span>
-                                            <span class="diff-num">${newNum++}</span>
-                                            <span class="diff-prefix">&nbsp;</span>
-                                            <span class="diff-text">${escapeHtml(text)}</span>
-                                        `;
-                                        codeWrapper.appendChild(row);
-                                    }
-                                }
-                            });
-                        });
-                        panel.appendChild(codeWrapper);
-                        return;
-                    }
+                    panel.innerHTML = Diff2Html.html(rawDiff, {
+                        drawFileList: false,
+                        matching: 'lines',
+                        outputFormat: 'side-by-side'
+                    });
+                    return;
                 } catch (e) {
-                    console.warn('Diff 解析失败，回退原生着色:', e);
+                    console.warn('diff2html 渲染失败，回退纯文本:', e);
                 }
             }
 
-            // 兜底回退：纯文本按行简单着色
-            rawDiff.split('\n').forEach(line => {
-                const dline = document.createElement('div');
-                let cls = 'diff-ctx';
-                if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                else if (line.startsWith('+')) cls = 'diff-add';
-                else if (line.startsWith('-')) cls = 'diff-del';
-                else if (line.startsWith('@@')) cls = 'diff-hunk';
-                dline.className = 'diff-line ' + cls;
-                dline.textContent = line;
-                codeWrapper.appendChild(dline);
-            });
-            panel.appendChild(codeWrapper);
+            // 极简兜底：Diff2Html 不可用时直接展示原始 diff 文本
+            panel.textContent = rawDiff;
         }
 
         function renderDrawerDetail(detail) {
@@ -3027,44 +2939,38 @@
             detailDrawer.classList.remove('open');
             drawerBackdrop.classList.remove('open');
             AppState.selectedTaskId = null;
-            document.querySelectorAll('.node-card').forEach(c => c.classList.remove('selected'));
+            if (cy) cy.nodes().unselect();
         }
 
-        // 聚焦指定任务
+        // 聚焦指定任务：cytoscape 居中并高亮
         function focusTask(taskId) {
-            const node = (AppState.tasksDAG.nodes || []).find(n => n.id === taskId);
-            if (!node) return;
-
-            const rect = canvasContainer.getBoundingClientRect();
-            const drawerOpen = detailDrawer.classList.contains('open');
-            const visibleWidth = (drawerOpen && rect.width > 768) ? Math.max(200, rect.width - 480) : rect.width;
-            AppState.scale = Math.max(AppState.scale, 0.9);
-            AppState.translateX = (visibleWidth / 2) - (node.x + node.width / 2) * AppState.scale;
-            AppState.translateY = (rect.height / 2) - (node.y + node.height / 2) * AppState.scale;
-            applyTransform();
-
+            if (cy) {
+                const node = cy.$id(taskId);
+                if (node.nonempty()) {
+                    cy.animate({ center: { eles: node }, zoom: Math.max(cy.zoom(), 1.0) }, { duration: 300 });
+                }
+            }
             openTaskDrawer(taskId);
         }
 
-        // 状态筛选
+        // 状态筛选：过滤态用 display class 隐藏不匹配节点
         function applyStatusFilter(filter) {
             AppState.activeFilter = filter;
             document.querySelectorAll('.filter-btn').forEach(b => {
                 b.classList.toggle('active', b.getAttribute('data-filter') === filter);
             });
 
-            document.querySelectorAll('.dag-node-wrapper').forEach(el => {
-                const id = el.getAttribute('data-id');
-                const node = (AppState.tasksDAG.nodes || []).find(n => n.id === id);
-                if (!node) return;
-
-                let visible = true;
-                if (filter === 'doing') visible = (node.status === 'doing');
-                else if (filter === 'done') visible = (node.status === 'done');
-                else if (filter === 'blocked') visible = (node.status === 'blocked' || node.status === 'stale');
-                else if (filter === 'todo') visible = (node.status === 'todo');
-
-                el.style.display = visible ? 'block' : 'none';
+            if (!cy) return;
+            cy.batch(() => {
+                cy.nodes().forEach(n => {
+                    const status = n.data('status');
+                    let visible = true;
+                    if (filter === 'doing') visible = (status === 'doing');
+                    else if (filter === 'done') visible = (status === 'done');
+                    else if (filter === 'blocked') visible = (status === 'blocked' || status === 'stale');
+                    else if (filter === 'todo') visible = (status === 'todo');
+                    n.style('display', visible ? 'element' : 'none');
+                });
             });
         }
 
@@ -3417,213 +3323,21 @@
         }
         initMarked();
 
-        // 轻量纯 JS Markdown 渲染器 (支持 marked + Prism 增强，并内置自包含兜底)
+        // Markdown 渲染器 (marked + Prism 增强，输出经 DOMPurify 净化)
         function renderMarkdown(md) {
             if (!md || !md.trim()) return '<div class="empty-tab-state">暂无现场备忘记录</div>';
 
             if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
                 try {
-                    return marked.parse(md);
+                    return DOMPurify.sanitize(marked.parse(md));
                 } catch (e) {
-                    console.warn('Marked 解析失败，使用内置引擎降级:', e);
+                    console.warn('Marked 解析失败，降级为纯文本转义:', e);
                 }
             }
 
-            const rawLines = md.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
-            const out = [];
-            let inCodeBlock = false;
-            let codeLang = '';
-            let codeLines = [];
-            let inTable = false;
-            let tableRows = [];
-            let inUl = false;
-            let inOl = false;
-            let inBlockquote = false;
-            let bqLines = [];
-
-            function flushBlockquote() {
-                if (inBlockquote && bqLines.length > 0) {
-                    out.push(`<blockquote>${bqLines.map(inlineMarkdown).join('<br>')}</blockquote>`);
-                    bqLines = [];
-                    inBlockquote = false;
-                }
-            }
-
-            function flushTable() {
-                if (inTable && tableRows.length > 0) {
-                    let html = '<div class="table-wrapper"><table>';
-                    tableRows.forEach((row, idx) => {
-                        const cols = row.map(c => inlineMarkdown(c.trim()));
-                        if (idx === 0) {
-                            html += `<thead><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr></thead><tbody>`;
-                        } else {
-                            html += `<tr>${cols.map(c => `<td>${c}</td>`).join('')}</tr>`;
-                        }
-                    });
-                    html += '</tbody></table></div>';
-                    out.push(html);
-                    tableRows = [];
-                    inTable = false;
-                }
-            }
-
-            function flushList() {
-                if (inUl) { out.push('</ul>'); inUl = false; }
-                if (inOl) { out.push('</ol>'); inOl = false; }
-            }
-
-            for (let i = 0; i < rawLines.length; i++) {
-                const line = rawLines[i];
-                const trimmed = line.trim();
-
-                if (trimmed.startsWith('```')) {
-                    flushList();
-                    flushTable();
-                    flushBlockquote();
-                    if (!inCodeBlock) {
-                        inCodeBlock = true;
-                        codeLang = trimmed.slice(3).trim();
-                        codeLines = [];
-                    } else {
-                        inCodeBlock = false;
-                        const langLabel = escapeHtml(codeLang || 'code');
-                        const rawCode = codeLines.join('\n');
-                        const escapedCode = escapeHtml(rawCode);
-                        out.push(`<div class="code-container">
-                            <div class="code-header">
-                                <span>${langLabel}</span>
-                                <button class="code-copy-btn" onclick="copySnippet(this)">复制</button>
-                            </div>
-                            <pre><code>${escapedCode}</code></pre>
-                        </div>`);
-                        codeLines = [];
-                        codeLang = '';
-                    }
-                    continue;
-                }
-
-                if (inCodeBlock) {
-                    codeLines.push(line);
-                    continue;
-                }
-
-                if (trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 2) {
-                    flushList();
-                    flushBlockquote();
-                    if (/^\|(\s*:?-+:?\s*\|)+$/.test(trimmed)) {
-                        continue;
-                    }
-                    const cells = trimmed.slice(1, -1).split('|');
-                    if (!inTable) {
-                        inTable = true;
-                        tableRows = [];
-                    }
-                    tableRows.push(cells);
-                    continue;
-                } else if (inTable) {
-                    flushTable();
-                }
-
-                if (trimmed.startsWith('>')) {
-                    flushList();
-                    flushTable();
-                    inBlockquote = true;
-                    bqLines.push(trimmed.replace(/^>\s?/, ''));
-                    continue;
-                } else if (inBlockquote) {
-                    flushBlockquote();
-                }
-
-                const ulMatch = trimmed.match(/^[-*]\s+(.*)$/);
-                if (ulMatch) {
-                    flushTable();
-                    flushBlockquote();
-                    if (inOl) flushList();
-                    if (!inUl) {
-                        out.push('<ul>');
-                        inUl = true;
-                    }
-                    const taskMatch = ulMatch[1].match(/^\[([ xX])\]\s+(.*)$/);
-                    if (taskMatch) {
-                        const isChecked = taskMatch[1].toLowerCase() === 'x';
-                        const checkCls = isChecked ? 'task-checkbox checked' : 'task-checkbox';
-                        const checkMark = isChecked ? '✓' : '';
-                        out.push(`<li class="task-list-item"><span class="${checkCls}">${checkMark}</span><span>${inlineMarkdown(taskMatch[2])}</span></li>`);
-                    } else {
-                        out.push(`<li>${inlineMarkdown(ulMatch[1])}</li>`);
-                    }
-                    continue;
-                }
-
-                const olMatch = trimmed.match(/^(\d+)\.\s+(.*)$/);
-                if (olMatch) {
-                    flushTable();
-                    flushBlockquote();
-                    if (inUl) flushList();
-                    if (!inOl) {
-                        out.push('<ol>');
-                        inOl = true;
-                    }
-                    out.push(`<li>${inlineMarkdown(olMatch[2])}</li>`);
-                    continue;
-                }
-
-                flushList();
-
-                if (trimmed.startsWith('#### ')) {
-                    out.push(`<h4>${inlineMarkdown(trimmed.slice(5))}</h4>`);
-                    continue;
-                }
-                if (trimmed.startsWith('### ')) {
-                    out.push(`<h3>${inlineMarkdown(trimmed.slice(4))}</h3>`);
-                    continue;
-                }
-                if (trimmed.startsWith('## ')) {
-                    out.push(`<h2>${inlineMarkdown(trimmed.slice(3))}</h2>`);
-                    continue;
-                }
-                if (trimmed.startsWith('# ')) {
-                    out.push(`<h1>${inlineMarkdown(trimmed.slice(2))}</h1>`);
-                    continue;
-                }
-
-                if (/^(\*\*\*|---|___)$/.test(trimmed)) {
-                    out.push('<hr class="md-hr">');
-                    continue;
-                }
-
-                if (trimmed) {
-                    out.push(`<p>${inlineMarkdown(trimmed)}</p>`);
-                }
-            }
-
-            if (inCodeBlock && codeLines.length > 0) {
-                out.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`);
-            }
-            flushList();
-            flushTable();
-            flushBlockquote();
-
-            return out.join('\n');
+            return DOMPurify.sanitize(escapeHtml(md));
         }
 
-        function inlineMarkdown(str) {
-            if (!str) return '';
-            let res = escapeHtml(str);
-            res = res.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
-            res = res.replace(/(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
-            res = res.replace(/~~(.*?)~~/g, '<del>$1</del>');
-            res = res.replace(/`([^`]+)`/g, '<code class="inline-code">$1</code>');
-            res = res.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
-                const cleanUrl = (url || '').trim();
-                if (/^(?:javascript|data|vbscript):/i.test(cleanUrl)) {
-                    return text;
-                }
-                const safeUrl = cleanUrl.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
-                return `<a href="${safeUrl}" target="_blank" rel="noopener">${text}</a>`;
-            });
-            return res;
-        }
 
         // 轻量 ANSI 终端状态机 (还原 pytest / selfcheck 终端色彩与样式)
         function ansiToHtml(text) {
@@ -3631,140 +3345,14 @@
 
             const str = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-            const FG_COLORS = {
-                30: '#484f58', 31: '#ff7b72', 32: '#3fb950', 33: '#d29922',
-                34: '#58a6ff', 35: '#bc8cff', 36: '#39c5cf', 37: '#e6edf3',
-                90: '#8b949e', 91: '#ffa198', 92: '#56d364', 93: '#e3b341',
-                94: '#79c0ff', 95: '#d2a8ff', 96: '#56d4dd', 97: '#ffffff'
-            };
-            const BG_COLORS = {
-                40: '#21262d', 41: '#b62324', 42: '#1b4721', 43: '#543e0c',
-                44: '#1f487a', 45: '#5a32a3', 46: '#1b4b50', 47: '#8b949e',
-                100: '#30363d', 101: '#f85149', 102: '#2ea043', 103: '#bb8009',
-                104: '#388bfd', 105: '#8957e5', 106: '#39c5cf', 107: '#f0f6fc'
-            };
-
-            function color256(idx) {
-                if (idx < 16) {
-                    return FG_COLORS[idx < 8 ? 30 + idx : 90 + idx - 8] || '#ffffff';
-                }
-                if (idx >= 16 && idx <= 231) {
-                    const n = idx - 16;
-                    const r = Math.floor(n / 36) * 51;
-                    const g = Math.floor((n % 36) / 6) * 51;
-                    const b = (n % 6) * 51;
-                    return `rgb(${r},${g},${b})`;
-                }
-                if (idx >= 232 && idx <= 255) {
-                    const gray = 8 + (idx - 232) * 10;
-                    return `rgb(${gray},${gray},${gray})`;
-                }
-                return '#ffffff';
+            // anser 不会自动转义 HTML（其文档要求 ansiToHtml 前先转义），
+            // 故先 escapeHtml 再着色；ANSI 转义序列(\x1b[...m)不含 &<>"' 不受影响。
+            if (window.Anser) {
+                return Anser.ansiToHtml(escapeHtml(str), { use_classes: false });
             }
 
-            const re = /\x1b\[([0-9;]*)m|\x1b\[[0-9;]*[a-zA-Z]/g;
-            let lastIndex = 0;
-            let match;
-            let html = '';
-
-            let state = {
-                bold: false,
-                dim: false,
-                italic: false,
-                underline: false,
-                fg: null,
-                bg: null
-            };
-
-            function getSpanStyle() {
-                const styles = [];
-                if (state.bold) styles.push('font-weight:700');
-                if (state.dim) styles.push('opacity:0.65');
-                if (state.italic) styles.push('font-style:italic');
-                if (state.underline) styles.push('text-decoration:underline');
-                if (state.fg) styles.push(`color:${state.fg}`);
-                if (state.bg) styles.push(`background-color:${state.bg}`);
-                return styles.join(';');
-            }
-
-            let openSpan = false;
-
-            while ((match = re.exec(str)) !== null) {
-                const plainText = str.slice(lastIndex, match.index);
-                if (plainText) {
-                    html += escapeHtml(plainText);
-                }
-                lastIndex = match.index + match[0].length;
-
-                if (!match[0].endsWith('m')) {
-                    continue;
-                }
-
-                const rawCodes = match[1] ? match[1].split(';').map(s => parseInt(s, 10)) : [0];
-                let i = 0;
-                while (i < rawCodes.length) {
-                    const code = isNaN(rawCodes[i]) ? 0 : rawCodes[i];
-                    if (code === 0) {
-                        state = { bold: false, dim: false, italic: false, underline: false, fg: null, bg: null };
-                    } else if (code === 1) {
-                        state.bold = true;
-                    } else if (code === 2) {
-                        state.dim = true;
-                    } else if (code === 3) {
-                        state.italic = true;
-                    } else if (code === 4) {
-                        state.underline = true;
-                    } else if (code === 22) {
-                        state.bold = false;
-                        state.dim = false;
-                    } else if (code === 23) {
-                        state.italic = false;
-                    } else if (code === 24) {
-                        state.underline = false;
-                    } else if (code === 39) {
-                        state.fg = null;
-                    } else if (code === 49) {
-                        state.bg = null;
-                    } else if (code === 38 && rawCodes[i + 1] === 5 && rawCodes[i + 2] !== undefined) {
-                        state.fg = color256(rawCodes[i + 2]);
-                        i += 2;
-                    } else if (code === 48 && rawCodes[i + 1] === 5 && rawCodes[i + 2] !== undefined) {
-                        state.bg = color256(rawCodes[i + 2]);
-                        i += 2;
-                    } else if (code === 38 && rawCodes[i + 1] === 2 && rawCodes[i + 4] !== undefined) {
-                        state.fg = `rgb(${rawCodes[i + 2]},${rawCodes[i + 3]},${rawCodes[i + 4]})`;
-                        i += 4;
-                    } else if (code === 48 && rawCodes[i + 1] === 2 && rawCodes[i + 4] !== undefined) {
-                        state.bg = `rgb(${rawCodes[i + 2]},${rawCodes[i + 3]},${rawCodes[i + 4]})`;
-                        i += 4;
-                    } else if (FG_COLORS[code]) {
-                        state.fg = FG_COLORS[code];
-                    } else if (BG_COLORS[code]) {
-                        state.bg = BG_COLORS[code];
-                    }
-                    i++;
-                }
-
-                if (openSpan) {
-                    html += '</span>';
-                    openSpan = false;
-                }
-
-                const spanStyle = getSpanStyle();
-                if (spanStyle) {
-                    html += `<span style="${spanStyle}">`;
-                    openSpan = true;
-                }
-            }
-
-            if (lastIndex < str.length) {
-                html += escapeHtml(str.slice(lastIndex));
-            }
-            if (openSpan) {
-                html += '</span>';
-            }
-
-            return html;
+            // 兜底：库未加载时仅做安全转义
+            return escapeHtml(str);
         }
 
         // 数据拉取与渲染
@@ -3883,56 +3471,7 @@
             }
         }
 
-        // 画布平移交互
-        function setupPanZoom() {
-            canvasContainer.addEventListener('mousedown', (e) => {
-                if (
-                    e.target.closest('.node-card') ||
-                    e.target.closest('button') ||
-                    e.target.closest('#dev-console-drawer') ||
-                    e.target.closest('.dev-console-drawer') ||
-                    e.target.closest('#btn-toggle-dev')
-                ) return;
-                AppState.isDragging = true;
-                AppState.dragStartX = e.clientX - AppState.translateX;
-                AppState.dragStartY = e.clientY - AppState.translateY;
-                canvasContainer.classList.add('dragging');
-            });
-
-            window.addEventListener('mousemove', (e) => {
-                if (!AppState.isDragging) return;
-                AppState.translateX = e.clientX - AppState.dragStartX;
-                AppState.translateY = e.clientY - AppState.dragStartY;
-                applyTransform();
-            });
-
-            window.addEventListener('mouseup', () => {
-                if (AppState.isDragging) {
-                    AppState.isDragging = false;
-                    canvasContainer.classList.remove('dragging');
-                }
-            });
-
-            canvasContainer.addEventListener('wheel', (e) => {
-                // 如果滚轮事件发生在控制台抽屉内部或底栏开关上，不拦截也不缩放画布，交由控制台内部原生滚动
-                if (
-                    e.target.closest('#dev-console-drawer') ||
-                    e.target.closest('.dev-console-drawer') ||
-                    e.target.closest('#btn-toggle-dev')
-                ) {
-                    return;
-                }
-                e.preventDefault();
-                let factor;
-                if (e.ctrlKey) {
-                    factor = Math.exp(-e.deltaY * 0.015);
-                } else {
-                    const clampedDelta = Math.max(-60, Math.min(60, e.deltaY));
-                    factor = 1 - clampedDelta * 0.002;
-                }
-                zoomBy(factor, e.clientX, e.clientY);
-            }, { passive: false });
-        }
+        // 画布平移与缩放：由 Cytoscape 原生 userPanningEnabled/userZoomingEnabled 提供，无需手写。
 
         // 事件监听绑定
         function setupEventListeners() {
@@ -3954,15 +3493,12 @@
                 });
             });
 
-            // 缩放控件
-            document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(1.15));
-            document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(0.85));
+            // 缩放控件（接线到 cytoscape）
+            document.getElementById('btn-zoom-in').addEventListener('click', () => zoomByCy(1.2));
+            document.getElementById('btn-zoom-out').addEventListener('click', () => zoomByCy(0.8));
             document.getElementById('btn-fit-view').addEventListener('click', fitToView);
             document.getElementById('btn-reset-view').addEventListener('click', () => {
-                AppState.scale = 1.0;
-                AppState.translateX = 40;
-                AppState.translateY = 40;
-                applyTransform();
+                if (cy) { cy.reset(); fitToView(); }
             });
 
             // 抽屉开关
@@ -4142,19 +3678,16 @@
                         fitToView();
                     }
                 } else if (e.key === '0') {
-                    AppState.scale = 1.0;
-                    AppState.translateX = 40;
-                    AppState.translateY = 40;
-                    applyTransform();
+                    if (cy) { cy.reset(); fitToView(); }
                 } else if (e.key === '+' || e.key === '=') {
-                    zoomBy(1.15);
+                    zoomByCy(1.2);
                 } else if (e.key === '-' || e.key === '_') {
-                    zoomBy(0.85);
+                    zoomByCy(0.8);
                 }
             });
 
             window.addEventListener('resize', () => {
-                // 窗口尺寸变化保持响应
+                if (cy) cy.resize();
             });
         }
 
@@ -4169,7 +3702,7 @@
 
         // 初始化启动
         window.addEventListener('DOMContentLoaded', () => {
-            setupPanZoom();
+            initCytoscape();
             setupEventListeners();
             initSSE();
             loadData(AppState.currentFlow);
