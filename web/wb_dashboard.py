@@ -243,7 +243,7 @@ DASHBOARD_HTML_TEMPLATE = load_export_template()
 
 def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
     """渲染单文件自包含 HTML 看板 (Live 实时模式)。"""
-    template = DASHBOARD_HTML_TEMPLATE or load_export_template()
+    template = load_export_template() or DASHBOARD_HTML_TEMPLATE
     if not template:
         return "<!DOCTYPE html><html><body><h1>Workbench Dashboard</h1><p>Dashboard template missing.</p></body></html>"
     ov = core.get_overview(root, flow=target_flow) if hasattr(core, "get_overview") else {}

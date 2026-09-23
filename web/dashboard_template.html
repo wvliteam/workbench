@@ -749,6 +749,8 @@
         .drawer-body {
             flex: 1;
             overflow-y: auto;
+            min-height: 0;
+            overscroll-behavior: contain;
             padding: 16px;
             display: flex;
             flex-direction: column;
@@ -1385,6 +1387,9 @@
             z-index: 60;
             display: flex;
             flex-direction: column;
+            user-select: text;
+            cursor: default;
+            overscroll-behavior: contain;
         }
         .bottom-console-drawer.open, .dev-console-drawer.open {
             transform: translateY(0);
@@ -1453,6 +1458,8 @@
             overflow: hidden;
             display: flex;
             position: relative;
+            min-height: 0;
+            overscroll-behavior: contain;
         }
         .console-pane {
             display: none;
@@ -1460,6 +1467,7 @@
             height: 100%;
             flex-direction: column;
             overflow: hidden;
+            min-height: 0;
         }
         .console-pane.active {
             display: flex;
@@ -1533,10 +1541,12 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
+            min-height: 0;
         }
         .terminal-body {
             flex: 1;
             overflow-y: auto;
+            min-height: 0;
             padding: 10px 14px;
             font-family: var(--font-mono);
             font-size: 11.5px;
@@ -1545,6 +1555,8 @@
             white-space: pre-wrap;
             word-break: normal;
             overflow-wrap: break-word;
+            user-select: text;
+            overscroll-behavior: contain;
         }
 
         /* 契约面板 */
@@ -1570,6 +1582,8 @@
         .contracts-list-view {
             flex: 1;
             overflow-y: auto;
+            min-height: 0;
+            overscroll-behavior: contain;
             padding: 8px 14px;
             display: flex;
             flex-direction: column;
@@ -1615,6 +1629,8 @@
         .audit-waterfall {
             flex: 1;
             overflow-y: auto;
+            min-height: 0;
+            overscroll-behavior: contain;
             padding: 8px 14px;
             display: flex;
             flex-direction: column;
@@ -1692,6 +1708,8 @@
             grid-template-columns: repeat(2, 1fr);
             gap: 6px;
             overflow-y: auto;
+            min-height: 0;
+            overscroll-behavior: contain;
         }
         .dev-api-item {
             display: flex;
@@ -1712,6 +1730,8 @@
             border: 1px solid var(--border);
             border-radius: 4px;
             overflow-y: auto;
+            min-height: 0;
+            overscroll-behavior: contain;
             padding: 8px;
             margin: 8px 12px;
             font-family: var(--font-mono);
@@ -3866,7 +3886,13 @@
         // 画布平移交互
         function setupPanZoom() {
             canvasContainer.addEventListener('mousedown', (e) => {
-                if (e.target.closest('.node-card') || e.target.closest('button')) return;
+                if (
+                    e.target.closest('.node-card') ||
+                    e.target.closest('button') ||
+                    e.target.closest('#dev-console-drawer') ||
+                    e.target.closest('.dev-console-drawer') ||
+                    e.target.closest('#btn-toggle-dev')
+                ) return;
                 AppState.isDragging = true;
                 AppState.dragStartX = e.clientX - AppState.translateX;
                 AppState.dragStartY = e.clientY - AppState.translateY;
@@ -3888,6 +3914,14 @@
             });
 
             canvasContainer.addEventListener('wheel', (e) => {
+                // 如果滚轮事件发生在控制台抽屉内部或底栏开关上，不拦截也不缩放画布，交由控制台内部原生滚动
+                if (
+                    e.target.closest('#dev-console-drawer') ||
+                    e.target.closest('.dev-console-drawer') ||
+                    e.target.closest('#btn-toggle-dev')
+                ) {
+                    return;
+                }
                 e.preventDefault();
                 let factor;
                 if (e.ctrlKey) {
@@ -4009,16 +4043,48 @@
             const devToggle = document.getElementById('btn-toggle-dev');
             const devClose = document.getElementById('btn-close-dev');
             const devExpand = document.getElementById('btn-expand-dev');
-            devToggle.addEventListener('click', () => {
-                toggleBottomConsole();
-            });
-            devClose.addEventListener('click', () => {
-                closeBottomConsole();
-            });
+            if (devToggle) {
+                devToggle.addEventListener('click', () => {
+                    toggleBottomConsole();
+                });
+                devToggle.addEventListener('wheel', (e) => {
+                    e.stopPropagation();
+                }, { passive: true });
+                devToggle.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
+                });
+            }
+            if (devClose) {
+                devClose.addEventListener('click', () => {
+                    closeBottomConsole();
+                });
+            }
             if (devExpand) {
                 devExpand.addEventListener('click', () => {
                     const isExp = devConsoleDrawer.classList.toggle('expanded');
                     devExpand.textContent = isExp ? '🗗 恢复' : '⛶ 展开';
+                });
+            }
+
+            // 控制台抽屉手势隔离与滚动穿透防护
+            if (devConsoleDrawer) {
+                devConsoleDrawer.addEventListener('wheel', (e) => {
+                    e.stopPropagation();
+                    const isInsideScrollable = e.target.closest('.terminal-body, .contracts-list-view, .audit-waterfall, #event-log, .dev-api-list');
+                    if (!isInsideScrollable) {
+                        const activePane = devConsoleDrawer.querySelector('.console-pane.active');
+                        if (activePane) {
+                            const target = activePane.querySelector('.terminal-body, .contracts-list-view, .audit-waterfall, #event-log, .dev-api-list');
+                            if (target) {
+                                target.scrollTop += e.deltaY;
+                                if (e.deltaX) target.scrollLeft += e.deltaX;
+                            }
+                        }
+                    }
+                }, { passive: true });
+
+                devConsoleDrawer.addEventListener('mousedown', (e) => {
+                    e.stopPropagation();
                 });
             }
 
