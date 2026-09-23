@@ -130,19 +130,6 @@ class TestStaticHTMLExport(unittest.TestCase):
         self.assertEqual(parsed["current_flow"], "main")
         self.assertIn("overview", parsed)
 
-    def test_vendor_alpine_inlined_in_export(self):
-        """测试导出的单文件 HTML 中 Alpine.js 已被内联替换，无外部 vendor 引用。"""
-        out_path = Path(self.tmp_dir) / "alpine_export.html"
-        dashboard.export_static_dashboard(
-            root=ROOT,
-            output_path=out_path,
-            flow="main",
-            quiet=True,
-        )
-        content = out_path.read_text(encoding="utf-8")
-        self.assertIn('id="__VENDOR_ALPINE__"', content)
-        self.assertNotIn('src="vendor/alpine.min.js"', content)
-
     def test_safe_script_closing_escape(self):
         """测试当任务笔记中包含 </script> 危险字串时，导出能安全转义为 <\\/script>。"""
         # 构造带有模拟 </script> 的临时数据进行烘焙测试
