@@ -1894,9 +1894,11 @@
             console.warn('解析预烘焙初始数据失败:', e);
         }
         window.__INITIAL_DATA__ = bakedInitialData;
+        const urlParams = new URLSearchParams(window.location.search);
+        const urlFlow = urlParams.get('flow');
 
         const AppState = {
-            currentFlow: (window.__INITIAL_DATA__ && window.__INITIAL_DATA__.current_flow) || '{{FLOW}}',
+            currentFlow: urlFlow || (window.__INITIAL_DATA__ && window.__INITIAL_DATA__.current_flow) || '{{FLOW}}',
             overview: null,
             tasksDAG: null,
             selectedTaskId: null,

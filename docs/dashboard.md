@@ -6,12 +6,12 @@ Workbench 可视化看板是一套为软件开发工作台量身打造的高性�
 
 ## 核心设计原则
 
-1. **前后端解耦与现代化 Web 服务（Decoupled Modern Web Service）**：
+1. **高性能自包含 Web 服务（Self-Contained Full-Featured Dashboard）**：
    - 后端位于 `web/backend/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
-   - 根路径 `/` 与 `/index.html` 直接交付看板前端 SPA（Vue 3 生产构建产物，未构建时自动优雅降级为自包含模板）；静态构建资源挂载于 `/assets`；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
-2. **独立现代化前端工程（Vue 3 + Vite SPA）**：
-   - 前端代码位于独立工程 `web/frontend/`，基于 Vue 3 组合式 API（Composition API）+ Vite 6 构建。
-   - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统 Emoji（全自研几何 SVG 图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。
+   - 根路径 `/` 与 `/index.html` 直接交付基于 `web/backend/dashboard_template.html` 渲染的高性能自包含工业看板；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
+2. **纯原生零依赖架构（Zero-Dependency Pure Native Stack）**：
+   - 彻底摒弃厚重的前端工程构建链与 Node.js 依赖，全看板采用标准现代 Web 栈（原生 ES6+ JavaScript、纯 CSS 变量体系、原生矢量 SVG 拓扑画布）。
+   - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统原生彩色 Emoji（全量几何矢量图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。
 3. **无锁只读（Zero-Lock Read-Only Safety）**：
    - 严格以 `load_state(root, flow=flow, lock=False)` 提取主状态，彻底避免与主编排流程或并发 Subagent 竞争文件锁。
 4. **安全路径守卫（Strict Path Traversal Guard）**：
@@ -140,13 +140,13 @@ python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
 
 ---
 
-## 前端工程与开发指南 (`web/frontend/`)
+## 前端架构与极简体验指南
 
-前端采用 Vue 3 独立工程实现，与后端 API 服务完全解耦：
+工作台看板采用**单文件自包含（Single-File Self-Contained）**架构，所有 HTML 骨架、样式、SVG 图元与交互脚本集中维护于 `web/backend/dashboard_template.html`：
 
 ### 1. 终端用户产品形态 (Zero-Dependency User Experience)
 
-在任何已配置 Python 3 依赖的环境下，执行主命令即可直接拉起并浏览看板，无需预装 Node.js 或启动多终端：
+在任何已配置 Python 3 依赖的环境下，执行主命令即可直接拉起并浏览看板，无需预装 Node.js、npm 或执行任何构建命令：
 
 ```bash
 # 方式 1：工作台主入口命令（推荐）
@@ -156,67 +156,36 @@ python3 .claude/hooks/wb.py dashboard --open
 python3 web/backend/wb_dashboard.py --open
 ```
 
-服务在 `http://127.0.0.1:8088` 启动，浏览器直接呈现编译好的现代化 Vue 3 工业看板 SPA。
+服务在 `http://127.0.0.1:8088` 启动，浏览器直接呈现包含原生 SVG DAG 拓扑画布、代码 Diff 折叠透视、ANSI 彩色终端日志以及 SSE 实时双向联动的完整看板。
 
-### 2. 前端源码热重载开发 (HMR Development)
+### 2. 动静两用双轨机制 (Dual-Mode Design)
 
-仅当需要对 `web/frontend/src/` 源码进行二次开发或调试时，才需要启动 Vite 开发服务器：
+模板文件原生内建了动态与静态双重运行分支：
+- **动态实时模式 (Live Mode)**：当通过 HTTP 访问时，页面自动建立 `/api/events` SSE 长连接，并向 `/api/overview`、`/api/tasks` 拉取最新状态；文件变动时后台毫秒级广播并触发前端无刷新平滑重绘。
+- **离线快照模式 (Offline Export)**：执行 `wb dashboard --export /path/to/report.html` 时，Python 后端将全 Flow 拓扑、任务 Diff、门禁日志与审计流水预先烘焙至 `<script id="__INITIAL_DATA__">`，生成的文件无需任何 Web 服务，双击即可脱网完整浏览。
 
-```bash
-# 终端 1：启动 Python 后端数据与 API 服务（监听 8088）
-python3 web/backend/wb_dashboard.py --port 8088
-
-# 终端 2：启动 Vue 3 开发服务器（5173，自动反向代理 /api 到 8088）
-cd web/frontend
-npm install    # 首次运行安装依赖 (Vue 3 + Vite)
-npm run dev    # 启动开发服务器 (默认端口 5173)
-```
-
-访问 `http://localhost:5173` 即可获得毫秒级 HMR 前端热更新体验。
-
-### 3. 生产构建 (Production Build)
-
-```bash
-cd web/frontend
-npm run build
-```
-编译产物输出至 `web/frontend/dist/`，包含高度优化的单页 HTML 与资源文件，由后端直接挂载服务于根路径 `/`。
-
-### 4. 前端工程结构与模块分工
+### 3. 前端结构与模块分工
 
 ```
-web/frontend/
-├── package.json              # 声明 vue 与 vite 依赖
-├── vite.config.js            # 配置 Vue 插件与 /api 代理转发
-├── index.html                # 前端 SPA 入口
-└── src/
-    ├── main.js               # Vue 应用启动挂载
-    ├── App.vue               # 根组件，集成全局快捷键与布局协调
-    ├── assets/
-    │   └── style.css         # 工业暗黑调色盘、几何规范与 prefers-reduced-motion
-    ├── composables/
-    │   ├── useDashboardApi.js# REST 接口封装 (Overview / Tasks / Detail / Gate / Contracts / Audit)
-    │   ├── useSSE.js         # SSE 长连接、状态变动重载与生命周期管理
-    │   ├── useAnsi.js        # 纯 JS 16/256 色 ANSI 终端转义序列解析器
-    │   └── useMarkdown.js    # 轻量 Markdown 渲染器与代码复制
-    └── components/
-        ├── AppHeader.vue     # 顶部栏：Flow 切换、角色锁哨兵、SSE 指示器
-        ├── PipelineBar.vue   # 六阶段流水线进度指示阶梯
-        ├── FloatingHUD.vue   # 悬浮指标与缩放控制台 (释放 40px 垂直画布高度)
-        ├── DAGCanvas.vue     # 原生 SVG 贝塞尔拓扑图，支持祖先/后代双向依赖高亮
-        ├── DetailDrawer.vue  # 任务细节抽屉 (现场笔记 / 源码改动树 / 复核命令)
-        └── BottomConsole.vue # 多功能可折叠底栏 (ANSI 终端 / 契约争议 / 审计流水)
+web/backend/dashboard_template.html
+├── <style>                    # 工业暗黑调色盘、几何规范、动画关键帧与 prefers-reduced-motion
+├── <header> & <nav>           # Flow 切换器、六阶段 Pipeline 阶梯、角色锁与 SSE 状态哨兵
+├── <svg id="dag-svg">         # 原生贝塞尔拓扑图，支持祖先/后代依赖高亮与视口缩放平移
+├── <aside id="detail-drawer">  # 任务现场抽屉（Markdown 笔记 / 源码改动 Diff / 复核命令）
+├── <footer id="bottom-console"># 多功能控制台（ANSI 终端 / 契约争议 / 审计流水 / SSE 日志）
+└── <script>                   # 纯原生状态机、DAG 拓扑分层排版、Markdown 解析器与 ANSI 转换器
 ```
 
 ---
 
 ## REST API 接口清单
 
-动态服务模式下提供以下标准 JSON REST 端点：
+动态服务模式下提供以下标准端点：
 
 | 端点 | 方法 | 查询参数 | 返回内容 |
 | --- | --- | --- | --- |
-| `/` 或 `/index.html` 或 `/api` | `GET` | — | 纯 API 服务的健康状态与元数据（JSON，含端点列表、当前 Flow 与版本）。 |
+| `/` 或 `/index.html` | `GET` | `flow=<name>` | 交付完整的可视化看板单文件前端（HTML）。 |
+| `/api` | `GET` | — | 纯 API 服务的健康状态与元数据（JSON，含可用端点清单、版本）。 |
 | `/api/overview` | `GET` | `flow=<name>` | 当前 Flow、Flow 列表、六阶段准出进度、角色锁与契约争议状态。 |
 | `/api/tasks` | `GET` | `flow=<name>` | 经分层布局算法计算后的 DAG 节点（含坐标、宽高、深度）与有向边。 |
 | `/api/task-detail` | `GET` | `id=<TID>&flow=<name>` | 任务详细信息（现场笔记 Markdown、代码改动树、人工复核命令）。 |

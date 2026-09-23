@@ -197,37 +197,30 @@ class TestDashboardRESTEndpoints(TestDashboardServerBase):
         self.assertIn("/api/overview", data["endpoints"].values())
 
     def test_index_html_landing(self):
-        """测试访问 / 与 /index.html 返回看板 HTML 界面而非裸 JSON 数据。"""
+        """测试访问 / 与 /index.html 返回自包含单文件看板 HTML 界面而非裸 JSON 数据。"""
         for path in ("/", "/index.html"):
             status, text, headers = self.fetch_text(path)
             self.assertEqual(status, 200)
             self.assertIn("text/html", headers.get("content-type", ""))
-            self.assertTrue(
-                ('<div id="app"></div>' in text) or ("Workbench Dashboard" in text),
-                f"Path {path} should deliver Dashboard HTML UI, got: {text[:200]}"
-            )
+            self.assertIn("<!DOCTYPE html>", text)
+            self.assertIn("Workbench Dashboard", text)
+            self.assertIn("renderDAG", text)
 
-    def test_assets_serving(self):
-        """测试挂载的 /assets 静态资源能够正常响应并附带正确 MIME 类型。"""
+    def test_live_dashboard_self_contained_html(self):
+        """测试交付的 Live 看板 HTML 完全自包含（包含内嵌样式、SVG与通信脚本，无需外部构建包）。"""
         status, text, _ = self.fetch_text("/")
-        import re
-        asset_matches = re.findall(r'/assets/[a-zA-Z0-9_\-\.]+', text)
-        if asset_matches:
-            asset_path = asset_matches[0]
-            status_a, content_a, headers_a = self.fetch_text(asset_path)
-            self.assertEqual(status_a, 200)
-            self.assertTrue(len(content_a) > 0)
-            if asset_path.endswith(".js"):
-                self.assertIn("javascript", headers_a.get("content-type", ""))
-            elif asset_path.endswith(".css"):
-                self.assertIn("css", headers_a.get("content-type", ""))
+        self.assertEqual(status, 200)
+        self.assertIn("<style>", text)
+        self.assertIn("function renderDAG", text)
+        self.assertIn('"is_static": false', text)
+        self.assertIn("/api/events", text)
 
-    def test_fallback_rendering_when_dist_absent(self):
-        """测试当 dist 不存在时，能够正确调用模板降级渲染 Live 页面。"""
-        html_fallback = dashboard.render_live_fallback_html(ROOT, target_flow="main")
-        self.assertIn("<!DOCTYPE html>", html_fallback)
-        self.assertIn("Workbench Dashboard", html_fallback)
-        self.assertIn('"is_static": false', html_fallback)
+    def test_render_live_dashboard_html_helper(self):
+        """测试 render_live_dashboard_html 渲染有效性与元数据注入。"""
+        html_out = dashboard.render_live_dashboard_html(ROOT, target_flow="main")
+        self.assertIn("<!DOCTYPE html>", html_out)
+        self.assertIn("Workbench Dashboard", html_out)
+        self.assertIn('"is_static": false', html_out)
 
     def test_cors_and_options(self):
         """测试 CORS 预检 OPTIONS 与响应跨域头。"""

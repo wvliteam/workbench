@@ -27,8 +27,7 @@ from typing import Any
 
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import uvicorn
 
 # 动态引入 core 模块
@@ -241,27 +240,28 @@ def load_export_template() -> str:
 DASHBOARD_HTML_TEMPLATE = load_export_template()
 
 
-_FRONTEND_DIST = _BACKEND_DIR.parent / "frontend" / "dist"
-_DIST_INDEX = _FRONTEND_DIST / "index.html"
-_DIST_ASSETS = _FRONTEND_DIST / "assets"
-
-def render_live_fallback_html(root: Path, target_flow: str = "main") -> str:
-    """当 Vue 生产构建物不存在时，降级渲染单文件自包含 HTML 看板 (Live 模式)。"""
+def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
+    """渲染单文件自包含 HTML 看板 (Live 实时模式)。"""
     template = DASHBOARD_HTML_TEMPLATE or load_export_template()
     if not template:
-        return "<!DOCTYPE html><html><body><h1>Workbench Dashboard</h1><p>Vue dist not built and dashboard template missing.</p></body></html>"
+        return "<!DOCTYPE html><html><body><h1>Workbench Dashboard</h1><p>Dashboard template missing.</p></body></html>"
+    ov = core.get_overview(root, flow=target_flow) if hasattr(core, "get_overview") else {}
+    proj_name = html.escape(str(ov.get("project", "workbench")))
+    phase_name = html.escape(str(ov.get("current_phase", "unknown")))
+    ver = html.escape(str(ov.get("version", getattr(core, "WB_VERSION", "0.1.0"))))
+
     live_meta = {
         "is_static": False,
-        "project": "workbench",
+        "project": proj_name,
         "current_flow": target_flow,
     }
     initial_json = json.dumps(live_meta, ensure_ascii=False)
     return (
         template
-        .replace("{{PROJECT}}", "workbench")
+        .replace("{{PROJECT}}", proj_name)
         .replace("{{FLOW}}", html.escape(target_flow))
-        .replace("{{PHASE}}", "live")
-        .replace("{{VERSION}}", getattr(core, "WB_VERSION", "0.1.0"))
+        .replace("{{PHASE}}", phase_name)
+        .replace("{{VERSION}}", ver)
         .replace("{{INITIAL_DATA_JSON}}", initial_json)
     )
 
@@ -280,14 +280,6 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
         docs_url="/docs",
         redoc_url=None,
     )
-
-    # 挂载前端打包静态资源目录 (/assets)
-    frontend_dist_dir = _FRONTEND_DIST
-    frontend_assets_dir = _DIST_ASSETS
-    dist_index_file = _DIST_INDEX
-
-    if frontend_assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(frontend_assets_dir)), name="assets")
 
     # 统一 CORS 处理（支持所有方法与直接 OPTIONS 请求）
     @app.middleware("http")
@@ -316,23 +308,17 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
     async def value_error_handler(request: Request, exc: ValueError):
         return JSONResponse(status_code=400, content={"error": "Bad Request", "detail": str(exc)})
 
-    # 前端 SPA 页面交付 (优先 Vue 生产构建产物，无构建物时自包含模板兜底，绝不返回裸 JSON)
+    # 前端自包含单文件看板页面交付 (Live 实时模式)
     @app.get("/")
     @app.get("/index.html")
     async def serve_dashboard_ui(flow: str | None = Query(None)):
-        if dist_index_file.is_file():
-            return FileResponse(str(dist_index_file), media_type="text/html")
         current_flow = flow or (core.read_current_flow(actual_root) if getattr(core, "read_current_flow", None) else "main")
-        fallback_html = render_live_fallback_html(actual_root, target_flow=current_flow)
-        return HTMLResponse(content=fallback_html, status_code=200)
+        page_html = render_live_dashboard_html(actual_root, target_flow=current_flow)
+        return HTMLResponse(content=page_html, status_code=200)
 
-    # 根静态文件友好处理 (如 favicon / vite.svg 等，避免控制台刷屏 404)
-    @app.get("/vite.svg")
+    # 根静态文件友好处理 (如 favicon.ico，避免控制台刷屏 404)
     @app.get("/favicon.ico")
     async def serve_favicon():
-        svg_file = frontend_dist_dir / "vite.svg"
-        if svg_file.is_file():
-            return FileResponse(str(svg_file), media_type="image/svg+xml")
         return Response(status_code=204)
 
     # API 规范与服务元数据清单

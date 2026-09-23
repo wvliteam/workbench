@@ -60,8 +60,11 @@ class TestDashboardUIBase(unittest.TestCase):
         cls.server_thread.join(timeout=2.0)
 
     def fetch_page(self, path: str = "/") -> tuple[int, str, dict[str, str]]:
-        template = dashboard.DASHBOARD_HTML_TEMPLATE or dashboard.load_export_template()
-        return 200, template, {"Content-Type": "text/html; charset=utf-8"}
+        url = f"{self.base_url}{path}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            headers = {k.title(): v for k, v in resp.headers.items()}
+            return resp.status, resp.read().decode("utf-8"), headers
 
 
 class TestDashboardHTMLStructure(TestDashboardUIBase):
