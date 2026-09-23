@@ -1815,6 +1815,21 @@
         .diff-view-panel .d2h-emptyplaceholder,
         .diff-view-panel .d2h-cntx.d2h-emptyplaceholder { background: var(--bg-surface); border-color: var(--border-subtle); }
 
+        /* ===== vendored tippy.css (内联以保证静态导出自包含) ===== */
+        .tippy-box[data-animation=fade][data-state=hidden]{opacity:0}[data-tippy-root]{max-width:calc(100vw - 10px)}.tippy-box{position:relative;background-color:#333;color:#fff;border-radius:4px;font-size:14px;line-height:1.4;white-space:normal;outline:0;transition-property:transform,visibility,opacity}.tippy-box[data-placement^=top]>.tippy-arrow{bottom:0}.tippy-box[data-placement^=top]>.tippy-arrow:before{bottom:-7px;left:0;border-width:8px 8px 0;border-top-color:initial;transform-origin:center top}.tippy-box[data-placement^=bottom]>.tippy-arrow{top:0}.tippy-box[data-placement^=bottom]>.tippy-arrow:before{top:-7px;left:0;border-width:0 8px 8px;border-bottom-color:initial;transform-origin:center bottom}.tippy-box[data-placement^=left]>.tippy-arrow{right:0}.tippy-box[data-placement^=left]>.tippy-arrow:before{border-width:8px 0 8px 8px;border-left-color:initial;right:-7px;transform-origin:center left}.tippy-box[data-placement^=right]>.tippy-arrow{left:0}.tippy-box[data-placement^=right]>.tippy-arrow:before{left:-7px;border-width:8px 8px 8px 0;border-right-color:initial;transform-origin:center right}.tippy-box[data-inertia][data-state=visible]{transition-timing-function:cubic-bezier(.54,1.5,.38,1.11)}.tippy-arrow{width:16px;height:16px;color:#333}.tippy-arrow:before{content:"";position:absolute;border-color:transparent;border-style:solid}.tippy-content{position:relative;padding:5px 9px;z-index:1}
+
+        /* tippy 暗色主题 wb：对齐页面调色板 */
+        .tippy-box[data-theme~='wb'] {
+            background-color: var(--bg-card-hover);
+            color: var(--text-heading);
+            border: 1px solid var(--border);
+            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+            font-size: 11.5px;
+            font-family: var(--font-sans);
+        }
+        .tippy-box[data-theme~='wb'] .tippy-arrow { color: var(--bg-card-hover); }
+        .tippy-box[data-theme~='wb'] .tippy-content { padding: 4px 9px; }
+
     </style>
 </head>
 <body>
@@ -2159,6 +2174,8 @@
     <script src="vendor/cytoscape.min.js"></script>
     <script src="vendor/dagre.min.js"></script>
     <script src="vendor/cytoscape-dagre.min.js"></script>
+    <script src="vendor/popper.min.js"></script>
+    <script src="vendor/tippy.umd.min.js"></script>
 
 <!-- 前端核心 SPA 驱动脚本 -->
     <script>
@@ -3701,9 +3718,36 @@
         }
 
         // 初始化启动
+        // 工具提示：这版 tippy 只读 data-tippy-content、不读原生 title，
+        // 所以把每个 [title] 的内容搬到 data-tippy-content 并移除 title（屏蔽原生提示），
+        // 再用 delegate 惰性创建；MutationObserver 覆盖动态渲染出的新 title 节点。无实例泄漏。
+        function initTooltips() {
+            if (typeof tippy === 'undefined' || typeof window.Popper === 'undefined') return;
+            tippy.setDefaultProps({
+                theme: 'wb', animation: 'fade', arrow: true,
+                delay: [200, 0], duration: [120, 80], maxWidth: 260,
+            });
+            const convertOne = (el) => {
+                if (el.nodeType !== 1 || !el.hasAttribute('title')) return;
+                const t = el.getAttribute('title');
+                if (t) { el.setAttribute('data-tippy-content', t); el.removeAttribute('title'); }
+            };
+            const convertTree = (root) => {
+                if (root.nodeType !== 1) return;
+                convertOne(root);
+                root.querySelectorAll('[title]').forEach(convertOne);
+            };
+            convertTree(document.body);
+            tippy.delegate(document.body, { target: '[data-tippy-content]' });
+            new MutationObserver((muts) => {
+                muts.forEach((m) => m.addedNodes.forEach(convertTree));
+            }).observe(document.body, { childList: true, subtree: true });
+        }
+
         window.addEventListener('DOMContentLoaded', () => {
             initCytoscape();
             setupEventListeners();
+            initTooltips();
             initSSE();
             loadData(AppState.currentFlow);
         });
