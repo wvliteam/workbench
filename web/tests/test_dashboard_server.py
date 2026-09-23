@@ -377,6 +377,45 @@ class TestStateWatcherFileMonitoring(unittest.TestCase):
             self.watcher.unsubscribe(sub_queue)
 
 
+class TestDashboardServerShutdown(unittest.TestCase):
+    """测试 DashboardServer 在存在活跃 SSE 长连接时的优雅停机与资源回收。"""
+
+    def test_shutdown_with_active_sse_stream(self):
+        """测试存在活跃 /api/events SSE 连接时，调用 shutdown() 能够在短时间内优雅退出且不报错。"""
+        server = dashboard.create_server(
+            root=ROOT,
+            host="127.0.0.1",
+            port=0,
+            quiet=True,
+            poll_interval=0.1,
+        )
+        port = server.server_address[1]
+        server_thread = threading.Thread(
+            target=server.serve_forever,
+            daemon=True,
+            name="TestShutdownServerThread",
+        )
+        server.watcher.start()
+        server_thread.start()
+        time.sleep(0.1)
+
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5.0)
+        conn.request("GET", "/api/events")
+        resp = conn.getresponse()
+        self.assertEqual(resp.status, 200)
+
+        # 发起停机
+        start_t = time.time()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=3.0)
+        elapsed = time.time() - start_t
+
+        self.assertFalse(server_thread.is_alive(), "服务器线程应在调用 shutdown 后迅速退出")
+        self.assertLess(elapsed, 2.0, "优雅退出耗时应小于 2 秒")
+        conn.close()
+
+
 def main():
     suite = unittest.defaultTestLoader.loadTestsFromModule(sys.modules[__name__])
     runner = unittest.TextTestRunner(verbosity=2)

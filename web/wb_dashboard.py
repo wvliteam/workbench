@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Query, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
 import uvicorn
 
@@ -268,6 +267,48 @@ def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
 
 
 # --------------------------------------------------------------------------
+# 纯 ASGI CORS 中间件 (避免 BaseHTTPMiddleware 对 StreamingResponse 的流缓冲与取消异常)
+# --------------------------------------------------------------------------
+
+class DashboardCORSMiddleware:
+    """轻量纯 ASGI CORS 中间件，避免 BaseHTTPMiddleware 引入 AnyIO 内存流与取消异常。"""
+
+    def __init__(self, app: Any):
+        self.app = app
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("method") == "OPTIONS":
+            response = Response(
+                status_code=204,
+                headers={
+                    "Access-Control-Allow-Origin": "*",
+                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+                    "Access-Control-Allow-Headers": "*",
+                },
+            )
+            await response(scope, receive, send)
+            return
+
+        async def send_wrapper(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append((b"access-control-allow-origin", b"*"))
+                headers.append((b"access-control-allow-methods", b"GET, POST, OPTIONS"))
+                headers.append((b"access-control-allow-headers", b"*"))
+                message["headers"] = headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_wrapper)
+        except asyncio.CancelledError:
+            pass
+
+
+# --------------------------------------------------------------------------
 # FastAPI 应用工厂
 # --------------------------------------------------------------------------
 
@@ -282,23 +323,8 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
         redoc_url=None,
     )
 
-    # 统一 CORS 处理（支持所有方法与直接 OPTIONS 请求）
-    @app.middleware("http")
-    async def add_cors_headers(request: Request, call_next):
-        if request.method == "OPTIONS":
-            return Response(
-                status_code=204,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                },
-            )
-        response = await call_next(request)
-        response.headers["Access-Control-Allow-Origin"] = "*"
-        response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
-        response.headers["Access-Control-Allow-Headers"] = "*"
-        return response
+    # 统一 CORS 处理（基于纯 ASGI 中间件）
+    app.add_middleware(DashboardCORSMiddleware)
 
     # 统一安全与参数异常拦截
     @app.exception_handler(core.SecurityError)
@@ -391,17 +417,29 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
         return core.get_audit_log(actual_root, limit=limit, flow=flow)
 
     @app.get("/api/events")
-    async def api_events():
+    async def api_events(request: Request):
         async def sse_stream():
             q = watcher.subscribe() if watcher else queue.Queue()
             yield ": connected\n\n"
+            last_ping = time.time()
             try:
                 while True:
+                    if await request.is_disconnected():
+                        break
+                    if watcher and watcher._stop_event.is_set():
+                        break
                     try:
-                        ev = await asyncio.to_thread(q.get, True, SSE_PING_INTERVAL)
+                        ev = await asyncio.to_thread(q.get, True, 0.5)
+                        if isinstance(ev, dict) and ev.get("type") == "shutdown":
+                            break
                         yield f"event: state_change\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                        last_ping = time.time()
                     except queue.Empty:
-                        yield ": ping\n\n"
+                        if time.time() - last_ping >= SSE_PING_INTERVAL:
+                            yield ": ping\n\n"
+                            last_ping = time.time()
+            except asyncio.CancelledError:
+                pass
             finally:
                 if watcher:
                     watcher.unsubscribe(q)
@@ -422,6 +460,22 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
 # --------------------------------------------------------------------------
 # 看板独立服务器封装 (兼容标准控制接口与端口分配)
 # --------------------------------------------------------------------------
+
+class _WorkbenchUvicornServer(uvicorn.Server):
+    """定制 Uvicorn 服务端：在捕获退出信号时立即通知 Watcher 与活跃 SSE 流退出。"""
+
+    def __init__(self, config: uvicorn.Config, on_signal: Any = None):
+        super().__init__(config)
+        self._on_signal = on_signal
+
+    def handle_exit(self, sig: int, frame: Any) -> None:
+        if callable(self._on_signal):
+            try:
+                self._on_signal()
+            except Exception:
+                pass
+        super().handle_exit(sig, frame)
+
 
 class DashboardServer:
     """基于 FastAPI + Uvicorn 的看板服务，具备可控生命周期与端口分配能力。"""
@@ -455,15 +509,30 @@ class DashboardServer:
             port=actual_port,
             log_level=log_level,
             access_log=not quiet,
+            timeout_graceful_shutdown=1.5,
         )
-        self.uvicorn_server = uvicorn.Server(self.config)
+        self.uvicorn_server = _WorkbenchUvicornServer(
+            self.config,
+            on_signal=self._on_shutdown_signal,
+        )
+
+    def _on_shutdown_signal(self) -> None:
+        """收到退出信号（如 SIGINT / SIGTERM）时提前停止 watcher 并唤醒所有 SSE 队列。"""
+        try:
+            self.watcher.stop()
+        except Exception:
+            pass
 
     def serve_forever(self) -> None:
         """运行服务器直到外部发出退出信号。"""
-        self.uvicorn_server.run(sockets=[self._sock])
+        try:
+            self.uvicorn_server.run(sockets=[self._sock])
+        except KeyboardInterrupt:
+            pass
 
     def shutdown(self) -> None:
         """优雅关闭服务。"""
+        self._on_shutdown_signal()
         self.uvicorn_server.should_exit = True
 
     def server_close(self) -> None:
@@ -514,9 +583,11 @@ def run_server(server: DashboardServer, open_browser: bool = False, flow: str | 
     except KeyboardInterrupt:
         pass
     finally:
-        server.watcher.stop()
         server.shutdown()
         server.server_close()
+        if not server.quiet:
+            sys.stdout.write("✨ 看板服务已安全退出\n")
+            sys.stdout.flush()
 
 
 # --------------------------------------------------------------------------
