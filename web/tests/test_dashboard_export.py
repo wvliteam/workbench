@@ -5,7 +5,7 @@
 1. build_static_export_data 数据预烘焙完整性 (全 Flow、DAG 节点边、执行细节、门禁 ANSI 日志、契约与审计)。
 2. export_static_dashboard 单文件 HTML 导出、文件自包含性、自动建目录、安全转义防 </script> 注入。
 3. Node.js 运行时离线评估 (验证 window.__INITIAL_DATA__ 读取、离线无网络 loadData、openTaskDrawer、initSSE 表现)。
-4. web/backend/wb_dashboard.py 独立 CLI --export 命令与参数。
+4. web/wb_dashboard.py 独立 CLI --export 命令与参数。
 5. .claude/hooks/wb.py dashboard 子命令接入与全链路验证。
 """
 
@@ -21,9 +21,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent.parent
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BACKEND_DIR))
+ROOT = Path(__file__).resolve().parent.parent.parent
+WEB_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(WEB_DIR))
 sys.path.insert(0, str(ROOT / ".claude" / "hooks"))
 
 import wb_dashboard as dashboard
@@ -255,16 +255,17 @@ class TestDashboardCLIIntegration(unittest.TestCase):
 
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="wb_test_cli_")
+        self.tmp_path = Path(self.tmp_dir)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_wb_dashboard_standalone_export_cli(self):
-        """测试直接运行 web/backend/wb_dashboard.py --export 生成报告。"""
-        out_html = Path(self.tmp_dir) / "standalone_export.html"
+        """测试直接运行 web/wb_dashboard.py --export 生成报告。"""
+        out_html = self.tmp_path / "standalone_cli.html"
         cmd = [
             sys.executable,
-            str(ROOT / "web" / "backend" / "wb_dashboard.py"),
+            str(ROOT / "web" / "wb_dashboard.py"),
             "--root", str(ROOT),
             "--export", str(out_html),
             "--quiet",

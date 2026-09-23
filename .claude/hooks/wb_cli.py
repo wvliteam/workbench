@@ -1583,15 +1583,15 @@ def _run_selfcheck(args) -> None:
 def cmd_dashboard(args) -> None:
     """启动可视化看板 Web 服务，或导出静态单文件 HTML 报告。"""
     root = Path(args.root).resolve() if getattr(args, "root", None) else find_root()
-    backend_dir = root / "web" / "backend"
+    web_dir = root / "web"
     scripts_dir = root / "scripts"
-    for d in (backend_dir, scripts_dir):
+    for d in (web_dir, scripts_dir):
         if str(d) not in sys.path and d.is_dir():
             sys.path.insert(0, str(d))
     try:
         import wb_dashboard
     except ImportError as e:
-        die(f"无法加载看板模块 (web/backend/wb_dashboard.py): {e}")
+        die(f"无法加载看板模块 (web/wb_dashboard.py): {e}")
 
     flow = getattr(args, "explicit_flow", None)
 

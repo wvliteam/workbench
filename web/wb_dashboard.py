@@ -31,9 +31,9 @@ from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Str
 import uvicorn
 
 # 动态引入 core 模块
-_BACKEND_DIR = Path(__file__).resolve().parent
-if str(_BACKEND_DIR) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_DIR))
+_WEB_DIR = Path(__file__).resolve().parent
+if str(_WEB_DIR) not in sys.path:
+    sys.path.insert(0, str(_WEB_DIR))
 
 import wb_dashboard_core as core
 
@@ -229,7 +229,7 @@ class StateWatcher:
 # 离线单文件导出模板 (按需加载，服务运行时不占内存)
 # --------------------------------------------------------------------------
 
-TEMPLATE_FILE = _BACKEND_DIR / "dashboard_template.html"
+TEMPLATE_FILE = _WEB_DIR / "dashboard_template.html"
 
 def load_export_template() -> str:
     """按需加载离线单文件导出模板。"""

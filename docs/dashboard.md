@@ -7,8 +7,8 @@ Workbench 可视化看板是一套为软件开发工作台量身打造的高性�
 ## 核心设计原则
 
 1. **高性能自包含 Web 服务（Self-Contained Full-Featured Dashboard）**：
-   - 后端位于 `web/backend/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
-   - 根路径 `/` 与 `/index.html` 直接交付基于 `web/backend/dashboard_template.html` 渲染的高性能自包含工业看板；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
+   - 后端位于 `web/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
+   - 根路径 `/` 与 `/index.html` 直接交付基于 `web/dashboard_template.html` 渲染的高性能自包含工业看板；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
 2. **纯原生零依赖架构（Zero-Dependency Pure Native Stack）**：
    - 彻底摒弃厚重的前端工程构建链与 Node.js 依赖，全看板采用标准现代 Web 栈（原生 ES6+ JavaScript、纯 CSS 变量体系、原生矢量 SVG 拓扑画布）。
    - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统原生彩色 Emoji（全量几何矢量图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。
@@ -18,7 +18,7 @@ Workbench 可视化看板是一套为软件开发工作台量身打造的高性�
    - 所有任务笔记、门禁日志与契约路径读取均强制经过 `safe_resolve_path(root, target)` 与 `Path.is_relative_to(root)` 校验，严防 `../` 越界读取与路径穿越。
 5. **动静两用（Dual Mode: Live SSE & Static Baking）**：
    - **动态实时模式**：内置 SSE（Server-Sent Events）长连接通道，后台毫秒级监听 `.workbench` 关键文件变动并实时驱动前端平滑无刷重绘。
-   - **静态导出模式 (`--export`)**：基于独立模板 `web/backend/dashboard_template.html` 将所有 Flow 概览、DAG 拓扑、任务细节笔记、门禁日志、契约与审计流水预先烘焙注入单文件 HTML，断网环境下随时双击浏览或随 Git 归档。
+   - **静态导出模式 (`--export`)**：基于独立模板 `web/dashboard_template.html` 将所有 Flow 概览、DAG 拓扑、任务细节笔记、门禁日志、契约与审计流水预先烘焙注入单文件 HTML，断网环境下随时双击浏览或随 Git 归档。
 
 ---
 
@@ -98,16 +98,16 @@ python3 .claude/hooks/wb.py dashboard --flow feature-b
 python3 .claude/hooks/wb.py dashboard --export /path/to/report.html
 ```
 
-### 2. 独立脚本命令 (`web/backend/wb_dashboard.py`)
+### 2. 独立脚本命令 (`web/wb_dashboard.py`)
 
 除 `wb.py` 转发外，也可直接运行脚本：
 
 ```bash
 # 本地服务启动
-python3 web/backend/wb_dashboard.py --port 8088 --open
+python3 web/wb_dashboard.py --port 8088 --open
 
 # 导出静态单文件报告
-python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
+python3 web/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
 ```
 
 ### 3. CLI 参数完整说明
@@ -142,7 +142,7 @@ python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
 
 ## 前端架构与极简体验指南
 
-工作台看板采用**单文件自包含（Single-File Self-Contained）**架构，所有 HTML 骨架、样式、SVG 图元与交互脚本集中维护于 `web/backend/dashboard_template.html`：
+工作台看板采用**单文件自包含（Single-File Self-Contained）**架构，所有 HTML 骨架、样式、SVG 图元与交互脚本集中维护于 `web/dashboard_template.html`：
 
 ### 1. 终端用户产品形态 (Zero-Dependency User Experience)
 
@@ -153,7 +153,7 @@ python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
 python3 .claude/hooks/wb.py dashboard --open
 
 # 方式 2：独立后端脚本
-python3 web/backend/wb_dashboard.py --open
+python3 web/wb_dashboard.py --open
 ```
 
 服务在 `http://127.0.0.1:8088` 启动，浏览器直接呈现包含原生 SVG DAG 拓扑画布、代码 Diff 折叠透视、ANSI 彩色终端日志以及 SSE 实时双向联动的完整看板。
@@ -167,7 +167,7 @@ python3 web/backend/wb_dashboard.py --open
 ### 3. 前端结构与模块分工
 
 ```
-web/backend/dashboard_template.html
+web/dashboard_template.html
 ├── <style>                    # 工业暗黑调色盘、几何规范、动画关键帧与 prefers-reduced-motion
 ├── <header> & <nav>           # Flow 切换器、六阶段 Pipeline 阶梯、角色锁与 SSE 状态哨兵
 ├── <svg id="dag-svg">         # 原生贝塞尔拓扑图，支持祖先/后代依赖高亮与视口缩放平移
@@ -198,19 +198,18 @@ web/backend/dashboard_template.html
 
 ## 自动化测试与质量保障
 
-仪表板模块配备完整的全套测试矩阵（93 项测试全绿）：
+仪表板模块配备完整的全套测试矩阵（82 项测试全绿）：
 
 ```bash
-# 全量测试自动发现与运行 (93 项单测)
-python3 -m unittest discover -s web/backend/tests -p "test_dashboard_*.py"
+# 全量测试自动发现与运行 (82 项单测)
+python3 -m unittest discover -s web/tests -p "test_dashboard_*.py"
 
 # 或单独运行指定模块单测：
-python3 web/backend/tests/test_dashboard_core.py     # 核心算法与数据提取单测
-python3 web/backend/tests/test_dashboard_server.py   # FastAPI 服务与 SSE 实时事件单测
-python3 web/backend/tests/test_dashboard_ui.py       # 画布布局与状态视觉编码单测
-python3 web/backend/tests/test_dashboard_details.py  # 执行细节抽屉与 ANSI 终端状态机单测
-python3 web/backend/tests/test_dashboard_export.py   # 静态离线单文件导出单测
-python3 web/backend/tests/test_dashboard_vue.py      # Vue 3 前端工程规范、布局与 Node 运行时单测
+python3 web/tests/test_dashboard_core.py     # 核心算法与数据提取单测
+python3 web/tests/test_dashboard_server.py   # FastAPI 服务与 SSE 实时事件单测
+python3 web/tests/test_dashboard_ui.py       # 画布布局与状态视觉编码单测
+python3 web/tests/test_dashboard_details.py  # 执行细节抽屉与 ANSI 终端状态机单测
+python3 web/tests/test_dashboard_export.py   # 静态离线单文件导出单测
 
 # 工作台全量全链路自检
 python3 .claude/hooks/wb.py selfcheck

@@ -16,9 +16,9 @@ import unittest
 from pathlib import Path
 
 # 引入被测模块
-ROOT = Path(__file__).resolve().parent.parent.parent.parent
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BACKEND_DIR))
+ROOT = Path(__file__).resolve().parent.parent.parent
+WEB_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(WEB_DIR))
 
 import wb_dashboard_core as core
 
@@ -184,7 +184,7 @@ class TestPathSecurityGuard(unittest.TestCase):
 
     def test_safe_resolve_valid_path(self):
         """测试合法路径正常解析且属于 root。"""
-        resolved = core.safe_resolve_path(self.root, "web/backend/wb_dashboard_core.py")
+        resolved = core.safe_resolve_path(self.root, "web/wb_dashboard_core.py")
         self.assertTrue(resolved.is_file())
         self.assertTrue(resolved.is_relative_to(self.root.resolve()))
 

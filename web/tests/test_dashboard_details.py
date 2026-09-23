@@ -22,9 +22,9 @@ import unittest
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent.parent.parent
-BACKEND_DIR = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BACKEND_DIR))
+ROOT = Path(__file__).resolve().parent.parent.parent
+WEB_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(WEB_DIR))
 
 import wb_dashboard as dashboard
 import wb_dashboard_core as core
