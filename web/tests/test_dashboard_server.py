@@ -5,7 +5,7 @@
 1. 各 REST API 端点响应格式与数据有效性 (/api/overview, /api/tasks, /api/contracts 等)。
 2. 边界与参数校验（缺少必要参数返回 400，不存在资源返回 404）。
 3. 跨目录与路径穿越安全防御（SecurityError 映射为 403 Forbidden）。
-4. CORS 预检与跨域头。
+4. 同源交付：不下发 CORS 跨域头。
 5. SSE 实时事件流与文件变更触发广播。
 6. 优雅停机与资源回收。
 """
@@ -222,14 +222,25 @@ class TestDashboardRESTEndpoints(TestDashboardServerBase):
         self.assertIn("Workbench Dashboard", html_out)
         self.assertIn('"is_static": false', html_out)
 
-    def test_cors_and_options(self):
-        """测试 CORS 预检 OPTIONS 与响应跨域头。"""
+    def test_no_cors_headers_exposed(self):
+        """测试不下发 CORS 跨域头。
+
+        看板页面由本服务同源交付，跨域读取不是需求；一旦下发
+        Access-Control-Allow-Origin: *，任意网页都能 fetch 127.0.0.1 上的
+        /api/task-detail（返回源码 diff）并读出响应。
+        """
         url = f"{self.base_url}/api/overview"
+        with urllib.request.urlopen(url, timeout=5.0) as resp:
+            self.assertEqual(resp.status, 200)
+            self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
+
+        # 无中间件时 OPTIONS 落到路由层：无该路由则 405，不应返回 204 + 跨域头
         req = urllib.request.Request(url, method="OPTIONS")
-        with urllib.request.urlopen(req, timeout=5.0) as resp:
-            self.assertEqual(resp.status, 204)
-            self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")
-            self.assertIn("GET", resp.headers.get("Access-Control-Allow-Methods", ""))
+        try:
+            with urllib.request.urlopen(req, timeout=5.0) as resp:
+                self.assertIsNone(resp.headers.get("Access-Control-Allow-Origin"))
+        except urllib.error.HTTPError as exc:
+            self.assertEqual(exc.code, 405)
 
 
 class TestSecurityDefenses(TestDashboardServerBase):
@@ -316,13 +327,6 @@ class TestVendorAssetsDelivery(TestDashboardServerBase):
         self.assertEqual(status, 200)
         self.assertIn("application/javascript", headers.get("content-type", ""))
         self.assertIn("Prism", content)
-
-    def test_vendor_diff_served_successfully(self):
-        """测试 /vendor/diff.min.js 正确交付且包含 jsdiff。"""
-        status, content, headers = self.fetch_text("/vendor/diff.min.js")
-        self.assertEqual(status, 200)
-        self.assertIn("application/javascript", headers.get("content-type", ""))
-        self.assertIn("jsdiff", content)
 
     def test_vendor_fuse_served_successfully(self):
         """测试 /vendor/fuse.min.js 正确交付且包含 Fuse。"""

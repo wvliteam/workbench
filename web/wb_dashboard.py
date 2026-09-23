@@ -59,6 +59,7 @@ class StateWatcher:
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._last_mtimes: dict[str, float] = self._collect_mtimes()
+        self._last_error: str | None = None
 
     def _get_watch_targets(self) -> list[Path]:
         """收集所有需监听的关键文件路径（定向扫描，避免无界全量递归）。"""
@@ -67,11 +68,21 @@ class StateWatcher:
         if not wbd.is_dir():
             return targets
 
-        # 根级状态与核心元数据
-        for name in ("current-flow", "state.json", "role", "unlock", "dispute", "artifacts.jsonl", "audit.jsonl"):
-            p = wbd / name
-            if p.is_file():
-                targets.append(p)
+        def collect(path: Path) -> None:
+            """文件直接收；unlock / dispute 是目录（一份契约一个文件），收其下全部文件。
+
+            历史实现一律用 is_file() 判定，导致 .workbench/flows/<flow>/unlock/ 这类
+            目录型状态永不触发刷新——打开契约解冻窗口时看板不更新。
+            """
+            if path.is_file():
+                targets.append(path)
+            elif path.is_dir():
+                targets.extend(p for p in path.rglob("*") if p.is_file())
+
+        # 根级状态与核心元数据（frozen 决定冻结清单、task-agents.jsonl 决定任务产物归属）
+        for name in ("current-flow", "state.json", "role", "unlock", "dispute", "frozen",
+                     "artifacts.jsonl", "task-agents.jsonl", "audit.jsonl"):
+            collect(wbd / name)
 
         # flows 目录下各需求线的状态、日志与审计
         flows_dir = wbd / "flows"
@@ -79,10 +90,8 @@ class StateWatcher:
             try:
                 for flow_entry in flows_dir.iterdir():
                     if flow_entry.is_dir():
-                        for name in ("state.json", "role", "unlock", "dispute", "audit.jsonl"):
-                            fp = flow_entry / name
-                            if fp.is_file():
-                                targets.append(fp)
+                        for name in ("state.json", "role", "unlock", "dispute", "frozen", "audit.jsonl"):
+                            collect(flow_entry / name)
                         for log_p in flow_entry.glob("gate-*.log"):
                             if log_p.is_file():
                                 targets.append(log_p)
@@ -220,8 +229,12 @@ class StateWatcher:
                         "changed_files": changed_files,
                         "timestamp": time.time(),
                     })
-            except Exception:
-                pass
+            except Exception as exc:
+                # 不静默：轮询一旦持续抛错，实时推送会整体失效而无人知晓。
+                # 同一错误只报一次，避免每 0.5s 刷屏。
+                if str(exc) != self._last_error:
+                    self._last_error = str(exc)
+                    sys.stderr.write(f"看板状态监听异常（本轮已跳过）: {exc}\n")
 
             self._stop_event.wait(timeout=self.poll_interval)
 
@@ -233,17 +246,19 @@ class StateWatcher:
 TEMPLATE_FILE = _WEB_DIR / "dashboard_template.html"
 
 def load_export_template() -> str:
-    """按需加载离线单文件导出模板。"""
+    """每次调用都从磁盘读模板。
+
+    刻意不缓存：模板是开发期频繁改动的对象，缓存住会让「改模板 → 刷新浏览器」
+    看不到变化，静态导出也会烘进旧版本。Live 与导出两条路径都走这里，读的是同一份。
+    """
     if TEMPLATE_FILE.is_file():
         return TEMPLATE_FILE.read_text(encoding="utf-8")
     return ""
 
-DASHBOARD_HTML_TEMPLATE = load_export_template()
-
 
 def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
     """渲染单文件自包含 HTML 看板 (Live 实时模式)。"""
-    template = load_export_template() or DASHBOARD_HTML_TEMPLATE
+    template = load_export_template()
     if not template:
         return "<!DOCTYPE html><html><body><h1>Workbench Dashboard</h1><p>Dashboard template missing.</p></body></html>"
     ov = core.get_overview(root, flow=target_flow) if hasattr(core, "get_overview") else {}
@@ -268,53 +283,11 @@ def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
 
 
 # --------------------------------------------------------------------------
-# 纯 ASGI CORS 中间件 (避免 BaseHTTPMiddleware 对 StreamingResponse 的流缓冲与取消异常)
-# --------------------------------------------------------------------------
-
-class DashboardCORSMiddleware:
-    """轻量纯 ASGI CORS 中间件，避免 BaseHTTPMiddleware 引入 AnyIO 内存流与取消异常。"""
-
-    def __init__(self, app: Any):
-        self.app = app
-
-    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-
-        if scope.get("method") == "OPTIONS":
-            response = Response(
-                status_code=204,
-                headers={
-                    "Access-Control-Allow-Origin": "*",
-                    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-                    "Access-Control-Allow-Headers": "*",
-                },
-            )
-            await response(scope, receive, send)
-            return
-
-        async def send_wrapper(message: dict[str, Any]) -> None:
-            if message["type"] == "http.response.start":
-                headers = list(message.get("headers", []))
-                headers.append((b"access-control-allow-origin", b"*"))
-                headers.append((b"access-control-allow-methods", b"GET, POST, OPTIONS"))
-                headers.append((b"access-control-allow-headers", b"*"))
-                message["headers"] = headers
-            await send(message)
-
-        try:
-            await self.app(scope, receive, send_wrapper)
-        except asyncio.CancelledError:
-            pass
-
-
-# --------------------------------------------------------------------------
 # FastAPI 应用工厂
 # --------------------------------------------------------------------------
 
 def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
-    """构建看板 FastAPI 实例，挂载路由、CORS 中间件与统一异常拦截。"""
+    """构建看板 FastAPI 实例，挂载路由与统一异常拦截。"""
     actual_root = Path(root).resolve()
 
     app = FastAPI(
@@ -324,8 +297,9 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
         redoc_url=None,
     )
 
-    # 统一 CORS 处理（基于纯 ASGI 中间件）
-    app.add_middleware(DashboardCORSMiddleware)
+    # 不挂 CORS 中间件：看板页面由本服务同源交付，跨域读取不是需求。
+    # 加了 Access-Control-Allow-Origin: * 反而使任意网页都能 fetch 127.0.0.1 上的
+    # /api/task-detail（返回源码 diff）并读出响应——ACAO 正是允许跨源读取的机制。
 
     # 统一安全与参数异常拦截
     @app.exception_handler(core.SecurityError)
@@ -354,7 +328,9 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
     async def serve_vendor_asset(filename: str):
         vendor_dir = (_WEB_DIR / "vendor").resolve()
         vendor_file = (vendor_dir / filename).resolve()
-        if not str(vendor_file).startswith(str(vendor_dir)):
+        # 用 is_relative_to 判边界（同 core.safe_resolve_path）；字符串 startswith 会把
+        # 同前缀的兄弟目录（vendorX/…）也放进来。
+        if not vendor_file.is_relative_to(vendor_dir):
             return JSONResponse(status_code=403, content={"error": "Forbidden", "detail": "Path traversal detected"})
         if not vendor_file.is_file():
             return JSONResponse(status_code=404, content={"error": f"Vendor file '{filename}' not found"})
@@ -691,27 +667,32 @@ def export_static_dashboard(
     initial_json = json.dumps(export_data, ensure_ascii=False).replace("</script>", "<\\/script>")
 
     vendor_dir = _WEB_DIR / "vendor"
-    marked_file = vendor_dir / "marked.min.js"
-    prism_file = vendor_dir / "prism.min.js"
-    diff_file = vendor_dir / "diff.min.js"
-    fuse_file = vendor_dir / "fuse.min.js"
-    diff2html_file = vendor_dir / "diff2html.min.js"
-    cytoscape_file = vendor_dir / "cytoscape.min.js"
-    dagre_file = vendor_dir / "dagre.min.js"
-    cytoscape_dagre_file = vendor_dir / "cytoscape-dagre.min.js"
-    bootstrap_css_file = vendor_dir / "bootstrap.purged.css"
-    marked_code = marked_file.read_text(encoding="utf-8") if marked_file.is_file() else ""
-    prism_code = prism_file.read_text(encoding="utf-8") if prism_file.is_file() else ""
-    diff_code = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else ""
-    fuse_code = fuse_file.read_text(encoding="utf-8") if fuse_file.is_file() else ""
-    diff2html_code = diff2html_file.read_text(encoding="utf-8") if diff2html_file.is_file() else ""
-    cytoscape_code = cytoscape_file.read_text(encoding="utf-8") if cytoscape_file.is_file() else ""
-    dagre_code = dagre_file.read_text(encoding="utf-8") if dagre_file.is_file() else ""
-    cytoscape_dagre_code = cytoscape_dagre_file.read_text(encoding="utf-8") if cytoscape_dagre_file.is_file() else ""
-    bootstrap_css = bootstrap_css_file.read_text(encoding="utf-8") if bootstrap_css_file.is_file() else ""
+
+    # 需内联的 vendor 资源：(文件名, 资源类型, 注入后的元素 id)。
+    # 模板里 <script src> / <link href> 引用了哪个库，就必须在这里登记 —— 漏登的库
+    # 在 file:// 下会 404，而 DOMPurify 缺失会让 renderMarkdown 抛 ReferenceError、
+    # 整个任务抽屉失效。测试 test_export_has_no_external_vendor_refs 兜底。
+    inline_assets = [
+        ("marked.min.js", "script", "__VENDOR_MARKED__"),
+        ("prism.min.js", "script", "__VENDOR_PRISM__"),
+        ("fuse.min.js", "script", "__VENDOR_FUSE__"),
+        ("purify.min.js", "script", "__VENDOR_PURIFY__"),
+        ("anser.min.js", "script", "__VENDOR_ANSER__"),
+        ("diff2html.min.js", "script", "__VENDOR_DIFF2HTML__"),
+        ("cytoscape.min.js", "script", "__VENDOR_CYTOSCAPE__"),
+        ("dagre.min.js", "script", "__VENDOR_DAGRE__"),
+        ("cytoscape-dagre.min.js", "script", "__VENDOR_CYTOSCAPE_DAGRE__"),
+        ("popper.min.js", "script", "__VENDOR_POPPER__"),
+        ("tippy.umd.min.js", "script", "__VENDOR_TIPPY__"),
+        ("bootstrap.purged.css", "style", "__VENDOR_BOOTSTRAP_CSS__"),
+    ]
+
+    template = load_export_template()
+    if not template:
+        raise FileNotFoundError(f"看板模板缺失，无法导出: {TEMPLATE_FILE}")
 
     html_content = (
-        DASHBOARD_HTML_TEMPLATE
+        template
         .replace("{{PROJECT}}", proj_name)
         .replace("{{FLOW}}", html.escape(target_flow))
         .replace("{{PHASE}}", phase_name)
@@ -719,60 +700,23 @@ def export_static_dashboard(
         .replace("{{INITIAL_DATA_JSON}}", initial_json)
     )
 
-    if marked_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)marked\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_MARKED__">\n{marked_code}\n</script>',
-            html_content,
-        )
-    if prism_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)prism\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_PRISM__">\n{prism_code}\n</script>',
-            html_content,
-        )
-    if diff_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)diff\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_DIFF__">\n{diff_code}\n</script>',
-            html_content,
-        )
-    if fuse_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)fuse\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_FUSE__">\n{fuse_code}\n</script>',
-            html_content,
-        )
-    if diff2html_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)diff2html\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_DIFF2HTML__">\n{diff2html_code}\n</script>',
-            html_content,
-        )
-    if cytoscape_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)cytoscape\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_CYTOSCAPE__">\n{cytoscape_code}\n</script>',
-            html_content,
-        )
-    if dagre_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)dagre\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_DAGRE__">\n{dagre_code}\n</script>',
-            html_content,
-        )
-    if cytoscape_dagre_code:
-        html_content = re.sub(
-            r'<script\s+src=["\x27](?:/vendor/|vendor/)cytoscape-dagre\.min\.js["\x27]>\s*</script>',
-            lambda _: f'<script id="__VENDOR_CYTOSCAPE_DAGRE__">\n{cytoscape_dagre_code}\n</script>',
-            html_content,
-        )
-    if bootstrap_css:
-        html_content = re.sub(
-            r'<link\s+[^>]*href=["\x27](?:/vendor/|vendor/)bootstrap\.purged\.css["\x27][^>]*>',
-            lambda _: f'<style id="__VENDOR_BOOTSTRAP_CSS__">\n{bootstrap_css}\n</style>',
-            html_content,
-        )
+    for asset_name, kind, elem_id in inline_assets:
+        asset_file = vendor_dir / asset_name
+        if not asset_file.is_file():
+            sys.stderr.write(f"警告：vendor 资源缺失，导出文件将残留外部引用 {asset_name}\n")
+            continue
+        # 库代码里有反斜杠，替换值必须走 lambda，否则 re 会当作转义序列解释
+        code = asset_file.read_text(encoding="utf-8")
+        src_ref = rf'(?:/vendor/|vendor/){re.escape(asset_name)}'
+        if kind == "script":
+            pattern = rf'<script\s+src=["\']{src_ref}["\']>\s*</script>'
+            replacement = f'<script id="{elem_id}">\n{code}\n</script>'
+        else:
+            pattern = rf'<link\s+[^>]*href=["\']{src_ref}["\'][^>]*>'
+            replacement = f'<style id="{elem_id}">\n{code}\n</style>'
+        html_content, replaced = re.subn(pattern, lambda _: replacement, html_content)
+        if replaced == 0:
+            sys.stderr.write(f"警告：模板中未找到 {asset_name} 的引用标签，该库未内联\n")
 
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)

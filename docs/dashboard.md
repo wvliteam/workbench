@@ -8,7 +8,8 @@ Workbench 可视化看板是一套为软件开发工作台量身打造的高性�
 
 1. **高性能自包含 Web 服务（Self-Contained Full-Featured Dashboard）**：
    - 后端位于 `web/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
-   - 根路径 `/` 与 `/index.html` 直接交付基于 `web/dashboard_template.html` 渲染的高性能自包含工业看板；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
+   - 根路径 `/` 与 `/index.html` 直接交付基于 `web/dashboard_template.html` 渲染的高性能自包含工业看板；API 探测与服务元数据清单收敛至 `/api`。
+   - 刻意**不下发 CORS 跨域头**：页面由本服务同源交付，跨域读取不是需求；一旦放开 `Access-Control-Allow-Origin: *`，任意网页都能 fetch `127.0.0.1:<port>` 上的 `/api/task-detail`（返回源码 diff）并读出响应。
 2. **纯原生零依赖架构（Zero-Dependency Pure Native Stack）**：
    - 彻底摒弃厚重的前端工程构建链与 Node.js 依赖，全看板采用标准现代 Web 栈（原生 ES6+ JavaScript、纯 CSS 变量体系、原生矢量 SVG 拓扑画布）。
    - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统原生彩色 Emoji（全量几何矢量图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。

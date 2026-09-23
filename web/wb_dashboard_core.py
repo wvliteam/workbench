@@ -379,7 +379,7 @@ def _extract_task_artifacts(root: Path, task: dict[str, Any], flow: str) -> list
     agent_ids: set[str] = set()
     if binding_file.is_file():
         try:
-            for line in binding_file.read_text(encoding="utf-8").splitlines():
+            for line in binding_file.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -398,7 +398,7 @@ def _extract_task_artifacts(root: Path, task: dict[str, Any], flow: str) -> list
     since = task.get("started") or task.get("created") or ""
     if art_log.is_file():
         try:
-            for line in art_log.read_text(encoding="utf-8").splitlines():
+            for line in art_log.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -519,7 +519,7 @@ def get_task_detail(root: Path, task_id: str, flow: str | None = None) -> dict[s
             if f.is_file() and (f.stem == task_id or f.stem.startswith(f"{task_id}-")):
                 try:
                     checked_p = safe_resolve_path(root_resolved, f)
-                    note_markdown = checked_p.read_text(encoding="utf-8")
+                    note_markdown = checked_p.read_text(encoding="utf-8", errors="replace")
                     note_path = str(checked_p.relative_to(root_resolved))
                     break
                 except (SecurityError, OSError):
@@ -531,7 +531,7 @@ def get_task_detail(root: Path, task_id: str, flow: str | None = None) -> dict[s
     if ver_path.is_file():
         try:
             checked_ver = safe_resolve_path(root_resolved, ver_path)
-            content = checked_ver.read_text(encoding="utf-8")
+            content = checked_ver.read_text(encoding="utf-8", errors="replace")
             verification_info = _parse_verification_section(content, task_id)
         except (SecurityError, OSError):
             pass
@@ -648,7 +648,7 @@ def get_contracts(root: Path, flow: str | None = None) -> dict[str, Any]:
     if audit_path.is_file():
         try:
             checked_audit = safe_resolve_path(root_resolved, audit_path)
-            for line in checked_audit.read_text(encoding="utf-8").splitlines():
+            for line in checked_audit.read_text(encoding="utf-8", errors="replace").splitlines():
                 if not line.strip():
                     continue
                 try:
@@ -695,7 +695,7 @@ def get_audit_log(root: Path, flow: str | None = None, limit: int | None = None)
     checked = safe_resolve_path(root_resolved, audit_path)
     entries: list[dict[str, Any]] = []
     try:
-        for line in checked.read_text(encoding="utf-8").splitlines():
+        for line in checked.read_text(encoding="utf-8", errors="replace").splitlines():
             if not line.strip():
                 continue
             try:

@@ -2423,6 +2423,8 @@
             contractsData: null,
             auditData: null,
             currentTaskDetail: null,
+            dagSignature: null,   // 上次渲染的 DAG 载荷指纹，用于跳过多余重建
+            reloadTimer: null,    // SSE 突发变更的合并定时器
         };
 
         const PHASE_ORDER = ['clarify', 'analyze', 'design', 'develop', 'verify', 'retro'];
@@ -2689,10 +2691,10 @@
 
             // 角色锁状态
             if (overview.role_locked) {
-                roleGuardBadge.className = 'role-guard-badge locked';
+                roleGuardBadge.className = 'badge role-guard-badge locked';
                 roleGuardBadge.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span>角色锁生效</span>`;
             } else {
-                roleGuardBadge.className = 'role-guard-badge warning';
+                roleGuardBadge.className = 'badge role-guard-badge warning';
                 roleGuardBadge.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span>角色锁未设</span>`;
             }
 
@@ -2854,6 +2856,19 @@
                 return;
             }
             emptyBanner.style.display = 'none';
+
+            // 载荷指纹：只取会影响渲染结果的字段。SSE 在 develop 阶段每秒来好几条事件，
+            // 一律 remove + add + dagre 重排既白烧 CPU，又会把悬停/检索高亮（cytoscape class
+            // 状态）连同节点一起抹掉。指纹没变就只重刷统计与过滤态。
+            const signature = JSON.stringify([
+                nodes.map(n => [n.id, n.status, n.title, n.role, n.phase, n.artifacts_count, n.has_cycle]),
+                edges.map(e => [e.source, e.target]),
+            ]);
+            if (preserveView && signature === AppState.dagSignature && cy.nodes().length > 0) {
+                applyStatusFilter(AppState.activeFilter);
+                return;
+            }
+            AppState.dagSignature = signature;
 
             const nodeIds = new Set(nodes.map(n => n.id));
 
@@ -3112,6 +3127,7 @@
                 noteFileIndicator.style.display = 'none';
             }
             noteContainer.innerHTML = renderMarkdown(noteMarkdown);
+            wireCodeCopy(noteContainer);
 
             // Tab 2: 代码改动文件树 (按项目分组展示，支持复制)
             const artContainer = document.getElementById('drawer-artifacts-list');
@@ -3247,6 +3263,7 @@
                 rawBox.className = 'drawer-markdown-body';
                 rawBox.style.marginTop = '8px';
                 rawBox.innerHTML = renderMarkdown(ver.raw);
+                wireCodeCopy(rawBox);
                 verContainer.appendChild(rawBox);
             }
 
@@ -3355,22 +3372,17 @@
                 }
                 if (rawLog.trim()) {
                     gateLogBody.innerHTML = ansiToHtml(rawLog);
-                    if (/failed|FAIL|error|ERROR/i.test(rawLog)) {
-                        statusPill.textContent = 'FAIL';
-                        statusPill.className = 'status-pill fail';
-                        if (gateBadge) {
-                            gateBadge.textContent = '!';
-                            gateBadge.style.background = 'var(--danger-bg)';
-                            gateBadge.style.color = 'var(--danger)';
-                        }
-                    } else if (/passed|PASS|通过|成功/i.test(rawLog)) {
-                        statusPill.textContent = 'PASS';
-                        statusPill.className = 'status-pill pass';
-                        if (gateBadge) {
-                            gateBadge.textContent = '✓';
-                            gateBadge.style.background = 'var(--success-bg)';
-                            gateBadge.style.color = 'var(--success)';
-                        }
+                    // 结论取日志头部的执行记录（wb_core._record 写入的 [exit=N] / [TIMEOUT]），
+                    // 不用关键词猜正文 —— 通过的日志里出现 "0 errors" 或名为 test_error_handling
+                    // 的用例，会被旧的 /error/i 规则直接判成 FAIL。
+                    const verdict = parseGateVerdict(rawLog);
+                    statusPill.textContent = verdict.label;
+                    statusPill.className = `status-pill ${verdict.cls}`;
+                    if (verdict.hint) cmdDisplay.textContent = verdict.hint;
+                    if (gateBadge) {
+                        gateBadge.textContent = verdict.badge;
+                        gateBadge.style.background = verdict.badgeBg || '';
+                        gateBadge.style.color = verdict.badgeFg || '';
                     }
                 } else {
                     gateLogBody.innerHTML = '<span class="text-muted">该门禁尚未生成日志文件或无需执行。</span>';
@@ -3378,6 +3390,31 @@
             } catch (err) {
                 gateLogBody.innerHTML = `<span class="text-danger">拉取门禁日志异常: ${escapeHtml(err.message)}</span>`;
             }
+        }
+
+        // 门禁结论：只认日志头部的执行记录（wb_core._record 写入 "$ <cmd>\n[exit=N|TIMEOUT] <ts>"）。
+        // 退出码是执行方留下的原始证据，日志正文里的关键词不是。
+        // exit=0 也只陈述退出码本身 —— 后端对「零用例 / 含跳过标志」另有 unverified 判定，
+        // 日志头不体现，故这里不写 PASS 这类更强的断言。
+        function parseGateVerdict(rawLog) {
+            const m = /^\[(?:exit=(-?\d+)|(TIMEOUT))\]/m.exec(rawLog || '');
+            if (!m) {
+                return { label: '', cls: '', badge: '',
+                         hint: '日志中无 [exit=N] 执行记录（旧格式或未执行），不作判定' };
+            }
+            if (m[2] === 'TIMEOUT') {
+                return { label: 'TIMEOUT', cls: 'fail', badge: '!',
+                         badgeBg: 'var(--danger-bg)', badgeFg: 'var(--danger)',
+                         hint: '门禁命令超时，按 FAIL 计' };
+            }
+            if (m[1] === '0') {
+                return { label: 'exit=0', cls: 'pass', badge: '✓',
+                         badgeBg: 'var(--success-bg)', badgeFg: 'var(--success)',
+                         hint: '退出码 0（退出码不是独立证据：零用例或含跳过标志时后端另记 unverified）' };
+            }
+            return { label: `exit=${m[1]}`, cls: 'fail', badge: '!',
+                     badgeBg: 'var(--danger-bg)', badgeFg: 'var(--danger)',
+                     hint: `门禁命令上次执行退出码 ${m[1]}` };
         }
 
         async function loadContracts() {
@@ -3581,6 +3618,14 @@
             }
         }
 
+        // Markdown 代码块的复制按钮：DOMPurify 会剥掉 onclick，只能在 sanitize 之后接线
+        function wireCodeCopy(container) {
+            if (!container) return;
+            container.querySelectorAll('.code-copy-btn').forEach(btn => {
+                btn.onclick = () => copySnippet(btn);
+            });
+        }
+
         // 初始化开源 Marked.js 与 Prism.js 定制渲染器
         function initMarked() {
             if (typeof marked === 'undefined') return;
@@ -3614,7 +3659,9 @@
                     } else {
                         highlighted = escapeHtml(code);
                     }
-                    return `<div class="code-container">\n  <div class="code-header">\n    <span>${escapeHtml(lang)}</span>\n    <button class="code-copy-btn" onclick="copySnippet(this)">复制</button>\n  </div>\n  <pre><code>${highlighted}</code></pre>\n</div>\n`;
+                    // 复制按钮的事件在 sanitize 之后接线（调用方写入 innerHTML 后调 wireCodeCopy）：
+                    // DOMPurify 默认 ALLOWED_ATTR 不含 on*，写死 onclick 会被整条剥掉，按钮变成死的。
+                    return `<div class="code-container">\n  <div class="code-header">\n    <span>${escapeHtml(lang)}</span>\n    <button class="code-copy-btn">复制</button>\n  </div>\n  <pre><code>${highlighted}</code></pre>\n</div>\n`;
                 },
                 link(token) {
                     const href = typeof token === 'object' ? token.href : arguments[0];
@@ -3775,8 +3822,13 @@
                         sseDot.classList.add('pulse');
                         setTimeout(() => sseDot.classList.remove('pulse'), 600);
 
-                        // 自动平滑重载当前 Flow 数据，保留平移与缩放
-                        loadData(AppState.currentFlow, { preserveView: true });
+                        // 自动平滑重载当前 Flow 数据，保留平移与缩放。
+                        // 合并突发：一条 wb.py 命令会同时碰 state.json / audit.jsonl / 任务笔记
+                        // 等多个被监听文件，逐条重载会把开发期打成持续重绘。
+                        clearTimeout(AppState.reloadTimer);
+                        AppState.reloadTimer = setTimeout(() => {
+                            loadData(AppState.currentFlow, { preserveView: true });
+                        }, 250);
                     } catch (err) {
                         logEvent(`解析事件失败: ${e.data}`);
                     }

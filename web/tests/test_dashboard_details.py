@@ -62,7 +62,7 @@ class TestDashboardDetailsBase(unittest.TestCase):
         cls.server_thread.join(timeout=2.0)
 
     def fetch_page(self, path: str = "/") -> tuple[int, str, dict[str, str]]:
-        template = dashboard.DASHBOARD_HTML_TEMPLATE or dashboard.load_export_template()
+        template = dashboard.load_export_template()
         return 200, template, {"Content-Type": "text/html; charset=utf-8"}
 
     def fetch_json(self, path: str) -> tuple[int, dict | list]:
@@ -175,7 +175,7 @@ class TestMarkdownAndANSIEnginesWithNode(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         import os
-        src = dashboard.DASHBOARD_HTML_TEMPLATE
+        src = dashboard.load_export_template()
         cls.template_src = src
 
         def extract_func(name: str) -> str:

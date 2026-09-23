@@ -101,6 +101,35 @@ class TestStaticHTMLExport(unittest.TestCase):
         size_kb = out_path.stat().st_size / 1024
         self.assertGreater(size_kb, 50, f"导出文件大小应该大于 50KB，实际为 {size_kb:.1f}KB")
 
+    def test_export_has_no_external_vendor_refs(self):
+        """测试导出文件完全自包含：不留任何 vendor 外部引用。
+
+        模板里每个 <script src="vendor/..."> / <link href="vendor/..."> 都必须被内联替换，
+        否则 file:// 下这些请求全部 404 —— 其中 DOMPurify 缺失会让 renderMarkdown 在
+        try 之外抛 ReferenceError，调用方 renderDrawerDetail 中断，任务抽屉的笔记/改动/
+        复核三个 Tab 一起静默失效。
+        """
+        out_path = Path(self.tmp_dir) / "selfcontained.html"
+        dashboard.export_static_dashboard(
+            root=ROOT,
+            output_path=out_path,
+            flow="main",
+            quiet=True,
+        )
+        content = out_path.read_text(encoding="utf-8")
+
+        leftovers = re.findall(r'(?:src|href)=["\'](?:/vendor/|vendor/)[^"\']+["\']', content)
+        self.assertEqual(leftovers, [], f"导出文件残留 vendor 外部引用: {leftovers}")
+
+        # 光断言「无残留引用」会被「模板压根没引这个库」蒙混过去，故逐个点名关键库
+        for elem_id in (
+            "__VENDOR_MARKED__", "__VENDOR_PRISM__", "__VENDOR_FUSE__", "__VENDOR_PURIFY__",
+            "__VENDOR_ANSER__", "__VENDOR_DIFF2HTML__", "__VENDOR_CYTOSCAPE__",
+            "__VENDOR_DAGRE__", "__VENDOR_CYTOSCAPE_DAGRE__", "__VENDOR_POPPER__",
+            "__VENDOR_TIPPY__", "__VENDOR_BOOTSTRAP_CSS__",
+        ):
+            self.assertIn(f'id="{elem_id}"', content, f"{elem_id} 未被内联进导出文件")
+
     def test_script_tag_escaping_and_valid_json(self):
         """测试导出的 HTML 中包含合法的 JSON 数据，且未被 </script> 意外闭合破坏。"""
         out_path = Path(self.tmp_dir) / "snapshot.html"
@@ -143,7 +172,14 @@ class TestStaticHTMLExport(unittest.TestCase):
 
 
 class TestNodeJSClientEvaluation(unittest.TestCase):
-    """通过 Node.js 验证导出的离线静态页面中 JavaScript 核心逻辑运行正常。"""
+    """验证烘焙进导出文件的 __INITIAL_DATA__ 载荷自洽。
+
+    注意：本类**不执行导出文件里的前端脚本**，而是用一段等价 JS 复刻
+    loadData / initSSE / openTaskDrawer 的离线分支再断言其返回值。它只能证明
+    「烘焙数据里有 overview/tasks/task_details 且能按 flow 取到」，不能证明
+    交付的看板脚本可用。脚本自身的可用性由上面的
+    TestStaticHTMLExport.test_export_has_no_external_vendor_refs（自包含）兜底。
+    """
 
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="wb_test_node_")
@@ -159,7 +195,7 @@ class TestNodeJSClientEvaluation(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_node_offline_script_execution(self):
-        """在 Node.js 中加载导出的 HTML 并模拟离线初始化，断言无异常、无需发起网络请求。"""
+        """断言烘焙载荷自洽：离线分支可命中静态数据、首个任务有预烘焙细节。"""
         html_content = self.out_html.read_text(encoding="utf-8")
 
         # 提取烘焙好的 JSON 数据
