@@ -17,6 +17,7 @@ import html
 import json
 import os
 import queue
+import re
 import socket
 import sys
 import threading
@@ -321,6 +322,17 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
     async def serve_favicon():
         return Response(status_code=204)
 
+    # 静态第三方库资源交付 (web/vendor 目录)
+    @app.get("/vendor/{filename}")
+    async def serve_vendor_asset(filename: str):
+        vendor_dir = (_WEB_DIR / "vendor").resolve()
+        vendor_file = (vendor_dir / filename).resolve()
+        if not str(vendor_file).startswith(str(vendor_dir)):
+            return JSONResponse(status_code=403, content={"error": "Forbidden", "detail": "Path traversal detected"})
+        if not vendor_file.is_file():
+            return JSONResponse(status_code=404, content={"error": f"Vendor file '{filename}' not found"})
+        return Response(content=vendor_file.read_bytes(), media_type="application/javascript; charset=utf-8")
+
     # API 规范与服务元数据清单
     @app.get("/api")
     async def api_info():
@@ -605,6 +617,16 @@ def export_static_dashboard(
 
     initial_json = json.dumps(export_data, ensure_ascii=False).replace("</script>", "<\\/script>")
 
+    vendor_dir = _WEB_DIR / "vendor"
+    marked_file = vendor_dir / "marked.min.js"
+    prism_file = vendor_dir / "prism.min.js"
+    diff_file = vendor_dir / "diff.min.js"
+    fuse_file = vendor_dir / "fuse.min.js"
+    marked_code = marked_file.read_text(encoding="utf-8") if marked_file.is_file() else ""
+    prism_code = prism_file.read_text(encoding="utf-8") if prism_file.is_file() else ""
+    diff_code = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else ""
+    fuse_code = fuse_file.read_text(encoding="utf-8") if fuse_file.is_file() else ""
+
     html_content = (
         DASHBOARD_HTML_TEMPLATE
         .replace("{{PROJECT}}", proj_name)
@@ -613,6 +635,31 @@ def export_static_dashboard(
         .replace("{{VERSION}}", ver)
         .replace("{{INITIAL_DATA_JSON}}", initial_json)
     )
+
+    if marked_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)marked\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_MARKED__">\n{marked_code}\n</script>',
+            html_content,
+        )
+    if prism_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)prism\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_PRISM__">\n{prism_code}\n</script>',
+            html_content,
+        )
+    if diff_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)diff\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_DIFF__">\n{diff_code}\n</script>',
+            html_content,
+        )
+    if fuse_code:
+        html_content = re.sub(
+            r'<script\s+src=["\x27](?:/vendor/|vendor/)fuse\.min\.js["\x27]>\s*</script>',
+            lambda _: f'<script id="__VENDOR_FUSE__">\n{fuse_code}\n</script>',
+            html_content,
+        )
 
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)

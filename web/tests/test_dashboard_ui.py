@@ -107,6 +107,11 @@ class TestDashboardHTMLStructure(TestDashboardUIBase):
         for f in ("all", "doing", "done", "blocked", "todo"):
             self.assertIn(f'data-filter="{f}"', html_text)
 
+        # 全局任务模糊搜索控件 (Fuse.js)
+        self.assertIn('id="search-task-container"', html_text)
+        self.assertIn('id="search-task-input"', html_text)
+        self.assertIn('id="search-kbd-hint"', html_text)
+
         # 缩放控制
         self.assertIn('id="btn-zoom-in"', html_text)
         self.assertIn('id="btn-zoom-out"', html_text)

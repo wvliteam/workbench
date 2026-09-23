@@ -16,7 +16,8 @@
             --border-focus: #388bfd;
             --text: #c9d1d9;
             --text-heading: #f0f6fc;
-            --text-muted: #768390;
+            --text-secondary: #8b949e;
+            --text-muted: #8b949e;
             --accent: #58a6ff;
             --accent-glow: rgba(88, 166, 255, 0.25);
             --success: #3fb950;
@@ -27,11 +28,17 @@
             --danger-bg: rgba(248, 81, 73, 0.15);
             --purple: #a371f7;
             --purple-bg: rgba(163, 113, 247, 0.15);
-            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", Helvetica, Arial, sans-serif;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: #222938; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #344054; }
+        * { scrollbar-width: thin; scrollbar-color: #222938 var(--bg); }
+
         body {
             background: var(--bg);
             color: var(--text);
@@ -42,6 +49,63 @@
             overflow: hidden;
             display: flex;
             flex-direction: column;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+            .dag-edge.highlight-upstream,
+            .dag-edge.highlight-downstream {
+                animation: none !important;
+            }
+            .node-card.status-doing {
+                animation: none !important;
+            }
+            .phase-step.current .phase-indicator {
+                animation: none !important;
+            }
+        }
+
+        .btn:active, .filter-btn:active, .drawer-tab-btn:active, .console-tab-btn:active, .dep-pill:active {
+            transform: scale(0.98);
+        }
+        .btn:focus-visible, .filter-btn:focus-visible, .select-input:focus-visible, .drawer-tab-btn:focus-visible, .console-tab-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+
+        .ui-icon {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            vertical-align: -2px;
+            stroke-width: 2;
+            stroke: currentColor;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+        }
+        .tab-icon {
+            display: inline-block;
+            width: 14px;
+            height: 14px;
+            vertical-align: -2px;
+            stroke-width: 2;
+            stroke: currentColor;
+            fill: none;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            opacity: 0.8;
+            flex-shrink: 0;
+            transition: stroke 0.15s, opacity 0.15s;
+        }
+        .console-tab-btn.active .tab-icon, .drawer-tab-btn.active .tab-icon {
+            opacity: 1;
+            stroke: var(--accent);
         }
 
         /* 顶部导航与项目/Flow 状态 */
@@ -79,7 +143,7 @@
             display: inline-flex;
             align-items: center;
             padding: 2px 8px;
-            border-radius: 12px;
+            border-radius: 4px;
             font-size: 11px;
             font-weight: 500;
             background: rgba(88, 166, 255, 0.1);
@@ -130,7 +194,10 @@
         .role-guard-badge {
             font-size: 11px;
             padding: 2px 8px;
-            border-radius: 12px;
+            border-radius: 4px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
         .role-guard-badge.locked {
             background: var(--success-bg);
@@ -215,7 +282,7 @@
             align-items: center;
             gap: 8px;
             padding: 4px 12px;
-            border-radius: 6px;
+            border-radius: 4px;
             background: #111622;
             border: 1px solid var(--border);
             font-size: 12px;
@@ -237,7 +304,17 @@
             background: rgba(210, 153, 34, 0.05);
         }
         .phase-step.pending {
-            opacity: 0.55;
+            border-color: var(--border-subtle);
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .phase-step.pending .phase-indicator {
+            color: var(--text-muted);
+        }
+        .phase-step.pending .phase-name-cn {
+            color: var(--text-muted);
+        }
+        .phase-step.pending .phase-name-en {
+            color: #636e7b;
         }
         .phase-indicator {
             font-size: 11px;
@@ -445,6 +522,7 @@
         /* 节点卡片样式 */
         .dag-node-wrapper {
             transition: opacity 0.2s ease, filter 0.2s ease;
+            overflow: visible;
         }
         .node-card {
             width: 100%;
@@ -452,15 +530,15 @@
             box-sizing: border-box;
             background: var(--bg-card);
             border: 1px solid var(--border);
-            border-radius: 8px;
-            padding: 8px 10px;
+            border-radius: 6px;
+            padding: 6px 10px;
             display: flex;
             flex-direction: column;
             justify-content: space-between;
             cursor: pointer;
             transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease, opacity 0.2s ease;
             position: relative;
-            overflow: hidden;
+            overflow: visible;
         }
         .node-card:hover {
             transform: translateY(-2px);
@@ -550,10 +628,10 @@
         .tag-todo { background: rgba(110, 118, 129, 0.15); color: var(--text-muted); }
 
         .node-title {
-            font-size: 12px;
-            line-height: 1.35;
+            font-size: 11.5px;
+            line-height: 1.3;
             color: #c9d1d9;
-            margin: 4px 0;
+            margin: 2px 0;
             display: -webkit-box;
             -webkit-line-clamp: 2;
             -webkit-box-orient: vertical;
@@ -607,6 +685,11 @@
         .drawer-backdrop.open {
             opacity: 1;
             pointer-events: auto;
+        }
+        @media (min-width: 769px) {
+            .drawer-backdrop {
+                display: none !important;
+            }
         }
         .detail-drawer {
             position: fixed;
@@ -794,7 +877,7 @@
             min-width: 16px;
             height: 16px;
             padding: 0 4px;
-            border-radius: 8px;
+            border-radius: 4px;
             font-size: 10px;
             font-family: var(--font-mono);
             background: #1f2736;
@@ -834,8 +917,6 @@
             font-size: 13px;
             color: var(--text);
             line-height: 1.6;
-            max-height: 380px;
-            overflow-y: auto;
             word-break: break-word;
         }
         .drawer-notes-box {
@@ -846,10 +927,37 @@
             font-size: 12px;
             color: var(--text);
             line-height: 1.5;
-            max-height: 200px;
-            overflow-y: auto;
             white-space: pre-wrap;
             word-break: break-word;
+        }
+        .drawer-markdown-body .task-list-item {
+            list-style: none;
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            margin-left: -16px;
+            margin-bottom: 4px;
+        }
+        .task-checkbox {
+            width: 14px;
+            height: 14px;
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: transparent;
+            background: #090d13;
+            margin-top: 3px;
+            flex-shrink: 0;
+            line-height: 1;
+        }
+        .task-checkbox.checked {
+            background: var(--success-bg);
+            border-color: var(--success);
+            color: var(--success);
+            font-weight: 700;
         }
         .drawer-markdown-body h1 {
             font-size: 15px;
@@ -948,6 +1056,21 @@
             line-height: 1.45;
             color: #e6edf3;
         }
+
+        /* Prism.js 语法高亮暗黑主题 (Dark Theme Token Palette) */
+        .token.comment, .token.prolog, .token.doctype, .token.cdata { color: #8b949e; font-style: italic; }
+        .token.punctuation { color: #7d8590; }
+        .token.property, .token.tag, .token.boolean, .token.number, .token.constant, .token.symbol { color: #79c0ff; }
+        .token.selector, .token.attr-name, .token.string, .token.char, .token.builtin { color: #a5d6ff; }
+        .token.operator, .token.entity, .token.url { color: #ff7b72; }
+        .token.atrule, .token.attr-value, .token.keyword { color: #ff7b72; font-weight: 600; }
+        .token.function, .token.class-name { color: #d2a8ff; }
+        .token.regex, .token.important, .token.variable { color: #ffa657; }
+        .token.deleted { color: #ffa198; background-color: rgba(248, 81, 73, 0.15); }
+        .token.inserted { color: #56d364; background-color: rgba(63, 185, 80, 0.15); }
+        .token.important, .token.bold { font-weight: 700; }
+        .token.italic { font-style: italic; }
+
         .drawer-markdown-body .table-wrapper {
             overflow-x: auto;
             margin: 8px 0;
@@ -977,8 +1100,6 @@
             border: 1px solid var(--border);
             border-radius: 6px;
             padding: 8px;
-            max-height: 380px;
-            overflow-y: auto;
             font-family: var(--font-mono);
             font-size: 11px;
             display: flex;
@@ -1084,20 +1205,65 @@
             display: block;
         }
         .diff-code-wrapper {
-            font-size: 10.5px;
-            line-height: 1.45;
-            padding: 6px 0;
+            font-size: 11px;
+            line-height: 1.5;
+            padding: 2px 0;
             font-family: var(--font-mono);
         }
         .diff-line {
-            padding: 1px 10px;
+            display: flex;
+            align-items: stretch;
+            min-height: 20px;
             white-space: pre;
         }
-        .diff-line.diff-add { background: rgba(63, 185, 80, 0.14); color: #7ee787; }
-        .diff-line.diff-del { background: rgba(248, 81, 73, 0.14); color: #ffa198; }
+        .diff-line:hover {
+            filter: brightness(1.15);
+        }
+        .diff-num {
+            width: 36px;
+            padding: 0 6px;
+            text-align: right;
+            user-select: none;
+            color: #484f58;
+            font-size: 10px;
+            flex-shrink: 0;
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+            background: #080c12;
+        }
+        .diff-prefix {
+            width: 20px;
+            text-align: center;
+            user-select: none;
+            flex-shrink: 0;
+            font-weight: 600;
+        }
+        .diff-text {
+            flex: 1;
+            padding: 0 8px;
+            overflow-x: auto;
+        }
+        .diff-line.diff-add { background: rgba(63, 185, 80, 0.12); color: #7ee787; }
+        .diff-line.diff-add .diff-prefix { color: #56d364; }
+        .diff-line.diff-del { background: rgba(248, 81, 73, 0.12); color: #ffa198; }
+        .diff-line.diff-del .diff-prefix { color: #f85149; }
         .diff-line.diff-hunk { background: rgba(56, 139, 253, 0.12); color: #79c0ff; font-weight: 500; }
+        .diff-line.diff-hunk .diff-num { background: rgba(56, 139, 253, 0.08); color: #58a6ff; }
         .diff-line.diff-meta { color: var(--text-muted); font-weight: 600; }
         .diff-line.diff-ctx { color: var(--text-secondary); }
+        .diff-word-del {
+            background-color: rgba(248, 81, 73, 0.38);
+            border-radius: 2px;
+            padding: 1px 2px;
+            color: #ffffff;
+            font-weight: 600;
+        }
+        .diff-word-add {
+            background-color: rgba(46, 160, 67, 0.42);
+            border-radius: 2px;
+            padding: 1px 2px;
+            color: #ffffff;
+            font-weight: 600;
+        }
 
         /* 复核依据容器 */
         .drawer-ver-container {
@@ -1105,8 +1271,6 @@
             border: 1px solid var(--border);
             border-radius: 6px;
             padding: 10px;
-            max-height: 380px;
-            overflow-y: auto;
             display: flex;
             flex-direction: column;
             gap: 8px;
@@ -1130,7 +1294,7 @@
             display: inline-flex;
             align-items: center;
             padding: 1px 7px;
-            border-radius: 10px;
+            border-radius: 4px;
             font-size: 10px;
             font-weight: 600;
             font-family: var(--font-mono);
@@ -1217,13 +1381,17 @@
             border-top: 1px solid var(--border);
             box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.6);
             transform: translateY(100%);
-            transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), height 0.2s ease;
             z-index: 60;
             display: flex;
             flex-direction: column;
         }
         .bottom-console-drawer.open, .dev-console-drawer.open {
             transform: translateY(0);
+        }
+        .bottom-console-drawer.expanded, .dev-console-drawer.expanded {
+            height: 540px;
+            max-height: 80vh;
         }
         .console-header {
             height: 38px;
@@ -1269,7 +1437,7 @@
             align-items: center;
             justify-content: center;
             padding: 0 5px;
-            border-radius: 8px;
+            border-radius: 4px;
             font-size: 9px;
             font-family: var(--font-mono);
             background: #1e2637;
@@ -1334,7 +1502,7 @@
             display: inline-flex;
             align-items: center;
             padding: 1px 7px;
-            border-radius: 10px;
+            border-radius: 4px;
             font-size: 10px;
             font-weight: 600;
             font-family: var(--font-mono);
@@ -1375,7 +1543,8 @@
             line-height: 1.45;
             color: #d1d7e0;
             white-space: pre-wrap;
-            word-break: break-all;
+            word-break: normal;
+            overflow-wrap: break-word;
         }
 
         /* 契约面板 */
@@ -1551,6 +1720,31 @@
         }
         .log-entry { margin-bottom: 3px; border-bottom: 1px dashed #1c2333; padding-bottom: 2px; }
         .log-time { color: var(--accent); margin-right: 6px; }
+
+        @media (max-width: 900px) {
+            .toolbar {
+                overflow-x: auto;
+                scrollbar-width: none;
+            }
+            .toolbar::-webkit-scrollbar {
+                display: none;
+            }
+            .header-center {
+                gap: 6px;
+            }
+        }
+        @media (max-width: 640px) {
+            .app-header {
+                padding: 0 10px;
+            }
+            .brand span {
+                display: none;
+            }
+            .detail-drawer {
+                width: 100vw;
+                max-width: 100vw;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1569,7 +1763,7 @@
             </div>
             <span class="badge" id="header-project">{{PROJECT}}</span>
             <span class="badge badge-version" id="header-version">v{{VERSION}}</span>
-            <span class="badge" id="header-static-badge" style="display: none; background: rgba(56, 139, 253, 0.15); color: var(--accent); border-color: rgba(56, 139, 253, 0.4);">📸 静态快照</span>
+            <span class="badge" id="header-static-badge" style="display: none; background: rgba(56, 139, 253, 0.15); color: var(--accent); border-color: rgba(56, 139, 253, 0.4);"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" style="margin-right: 4px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg><span>静态快照</span></span>
         </div>
 
         <div class="header-center">
@@ -1631,6 +1825,18 @@
                 <button class="filter-btn" data-filter="todo">待处理</button>
             </div>
 
+            <!-- 全局任务模糊检索 (Fuse.js) -->
+            <div class="search-task-container" id="search-task-container">
+                <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="text" id="search-task-input" class="search-task-input" placeholder="搜索任务... (Cmd+K)" autocomplete="off" spellcheck="false" />
+                <kbd class="search-kbd" id="search-kbd-hint">⌘K</kbd>
+                <button id="search-clear-btn" class="search-clear-btn" style="display: none;" title="清空搜索">✕</button>
+                <div id="search-results-dropdown" class="search-results-dropdown" style="display: none;"></div>
+            </div>
+
             <!-- 画布平移与缩放按钮 -->
             <div class="canvas-controls">
                 <button class="btn btn-icon" id="btn-zoom-out" title="缩小 (-)">−</button>
@@ -1664,14 +1870,14 @@
 
         <!-- 任务为空时的引导占位 -->
         <div id="canvas-empty" class="canvas-empty-state" style="display: none;">
-            <div class="empty-icon">📂</div>
+            <div class="empty-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color: var(--text-muted);"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg></div>
             <h3 style="color: var(--text-heading); margin-bottom: 4px;">当前 Flow 暂无任务</h3>
-            <p>该流水线尚未生成任务，或任务列表为空。</p>
+            <p>该流水线尚未生成任务，可通过 <code>wb.py task add</code> 添加任务或启动流程。</p>
         </div>
 
         <!-- 底部折叠多功能控制台开关 -->
         <button id="btn-toggle-dev" class="dev-console-toggle bottom-console-toggle" title="展开/收起控制台">
-            <span class="console-toggle-icon">⌨</span>
+            <svg class="ui-icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
             <span>控制台与门禁日志</span>
             <span id="console-status-dot" class="console-status-dot"></span>
         </button>
@@ -1681,25 +1887,31 @@
             <div class="console-header">
                 <div class="console-tabs">
                     <button class="console-tab-btn active" data-tab="gate" id="tab-btn-gate">
-                        <span>🚪 门禁日志</span>
+                        <svg class="tab-icon" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"></polyline><line x1="12" y1="19" x2="20" y2="19"></line></svg>
+                        <span>门禁日志</span>
                         <span id="console-gate-badge" class="tab-badge-sm"></span>
                     </button>
                     <button class="console-tab-btn" data-tab="contracts" id="tab-btn-contracts">
-                        <span>📜 契约与争议</span>
+                        <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                        <span>契约与争议</span>
                         <span id="console-contract-badge" class="tab-badge-sm">0</span>
                     </button>
                     <button class="console-tab-btn" data-tab="audit" id="tab-btn-audit">
-                        <span>⏱ 审计流水</span>
+                        <svg class="tab-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg>
+                        <span>审计流水</span>
                         <span id="console-audit-badge" class="tab-badge-sm">0</span>
                     </button>
                     <button class="console-tab-btn" data-tab="events" id="tab-btn-events">
-                        <span>⚡ 实时事件</span>
+                        <svg class="tab-icon" viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>
+                        <span>实时事件</span>
                     </button>
                     <button class="console-tab-btn" data-tab="api" id="tab-btn-api">
-                        <span>🔌 API 探测</span>
+                        <svg class="tab-icon" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+                        <span>API 探测</span>
                     </button>
                 </div>
                 <div class="console-header-actions">
+                    <button class="btn btn-control" id="btn-expand-dev" title="切换高度 (540px / 280px)">⛶ 展开</button>
                     <button class="btn btn-control" id="btn-close-dev" title="收起控制台 (Esc)">收起 ✕</button>
                 </div>
             </div>
@@ -1720,7 +1932,7 @@
                         </div>
                         <div class="toolbar-right">
                             <button id="btn-refresh-gate" class="btn btn-sm" title="重新获取当前门禁日志">↺ 刷新</button>
-                            <button id="btn-copy-gate" class="btn btn-sm" title="复制全量日志">📋 复制</button>
+                            <button id="btn-copy-gate" class="btn btn-sm" title="复制全量日志"><svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" style="margin-right: 3px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>复制</button>
                             <button id="btn-scroll-bottom" class="btn btn-sm" title="滚至底部">⬇ 到底部</button>
                         </div>
                     </div>
@@ -1845,14 +2057,17 @@
             <!-- 细节透视 Tab 导航 -->
             <div class="drawer-tabs">
                 <button id="drawer-tab-btn-notes" class="drawer-tab-btn active" data-tab="notes">
-                    <span>📝 现场笔记</span>
+                    <svg class="tab-icon" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>
+                    <span>现场笔记</span>
                 </button>
                 <button id="drawer-tab-btn-changes" class="drawer-tab-btn" data-tab="changes">
-                    <span>📁 代码改动</span>
+                    <svg class="tab-icon" viewBox="0 0 24 24"><line x1="6" y1="3" x2="6" y2="15"></line><circle cx="18" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle><path d="M18 9a9 9 0 0 1-9 9"></path></svg>
+                    <span>代码改动</span>
                     <span id="drawer-artifacts-count" class="tab-badge">0</span>
                 </button>
                 <button id="drawer-tab-btn-ver" class="drawer-tab-btn" data-tab="ver">
-                    <span>🔍 人工复核</span>
+                    <svg class="tab-icon" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                    <span>人工复核</span>
                     <span id="drawer-ver-count" class="tab-badge">0</span>
                 </button>
             </div>
@@ -1880,8 +2095,13 @@
             </div>
         </div>
     </aside>
+    <!-- 开源第三方运行时库 (位于 web/vendor 目录) -->
+    <script src="vendor/marked.min.js"></script>
+    <script src="vendor/prism.min.js"></script>
+    <script src="vendor/diff.min.js"></script>
+    <script src="vendor/fuse.min.js"></script>
 
-    <!-- 前端核心 SPA 驱动脚本 -->
+<!-- 前端核心 SPA 驱动脚本 -->
     <script>
         // 解析预烘焙初始数据 (Task 5 静态离线导出)
         let bakedInitialData = null;
@@ -2030,10 +2250,10 @@
             // 角色锁状态
             if (overview.role_locked) {
                 roleGuardBadge.className = 'role-guard-badge locked';
-                roleGuardBadge.textContent = '🛡 角色锁生效';
+                roleGuardBadge.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span>角色锁生效</span>`;
             } else {
                 roleGuardBadge.className = 'role-guard-badge warning';
-                roleGuardBadge.textContent = '⚠ 角色锁未设';
+                roleGuardBadge.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span>角色锁未设</span>`;
             }
 
             // 渲染六阶段阶梯
@@ -2083,6 +2303,93 @@
             }
         }
 
+        // 全局任务模糊搜索索引与联动 (Fuse.js)
+        let taskFuse = null;
+        function updateTaskSearchIndex(nodes) {
+            if (typeof Fuse !== 'undefined' && Array.isArray(nodes)) {
+                taskFuse = new Fuse(nodes, {
+                    keys: [
+                        { name: 'id', weight: 0.4 },
+                        { name: 'title', weight: 0.35 },
+                        { name: 'role', weight: 0.15 },
+                        { name: 'phase', weight: 0.1 }
+                    ],
+                    threshold: 0.35,
+                    ignoreLocation: true
+                });
+            }
+        }
+
+        function handleTaskSearch(query) {
+            const clearBtn = document.getElementById('search-clear-btn');
+            const dropdown = document.getElementById('search-results-dropdown');
+            const q = (query || '').trim();
+
+            if (!q) {
+                if (clearBtn) clearBtn.style.display = 'none';
+                if (dropdown) dropdown.style.display = 'none';
+                document.querySelectorAll('.node-card').forEach(c => {
+                    c.style.opacity = '';
+                    c.style.filter = '';
+                });
+                return;
+            }
+
+            if (clearBtn) clearBtn.style.display = 'inline-flex';
+
+            let matches = [];
+            if (taskFuse) {
+                matches = taskFuse.search(q).map(res => res.item);
+            } else {
+                const lower = q.toLowerCase();
+                matches = (AppState.tasksDAG.nodes || []).filter(n =>
+                    (n.id && n.id.toLowerCase().includes(lower)) ||
+                    (n.title && n.title.toLowerCase().includes(lower)) ||
+                    (n.role && n.role.toLowerCase().includes(lower))
+                );
+            }
+
+            const matchedIds = new Set(matches.map(m => m.id));
+
+            // 画布节点高亮/淡化联动
+            document.querySelectorAll('.node-card').forEach(c => {
+                const tid = c.getAttribute('data-id');
+                if (matchedIds.has(tid)) {
+                    c.style.opacity = '1';
+                    c.style.filter = 'drop-shadow(0 0 6px var(--accent))';
+                } else {
+                    c.style.opacity = '0.2';
+                    c.style.filter = 'grayscale(0.8)';
+                }
+            });
+
+            // 下拉展示即时前 6 个最匹配任务
+            if (dropdown) {
+                if (matches.length === 0) {
+                    dropdown.innerHTML = '<div class="search-empty-item">未匹配到相关任务</div>';
+                } else {
+                    dropdown.innerHTML = matches.slice(0, 6).map(m => `
+                        <div class="search-result-item" data-id="${escapeHtml(m.id)}">
+                            <div class="search-item-left">
+                                <span class="search-item-id">${escapeHtml(m.id)}</span>
+                                <span class="search-item-title" title="${escapeHtml(m.title)}">${escapeHtml(m.title)}</span>
+                            </div>
+                            <span class="node-status-tag tag-${escapeHtml(m.status)}">${escapeHtml(m.status.toUpperCase())}</span>
+                        </div>
+                    `).join('');
+
+                    dropdown.querySelectorAll('.search-result-item').forEach(item => {
+                        item.addEventListener('click', () => {
+                            const tid = item.getAttribute('data-id');
+                            dropdown.style.display = 'none';
+                            focusTask(tid);
+                        });
+                    });
+                }
+                dropdown.style.display = 'block';
+            }
+        }
+
         // 渲染 DAG 拓扑连线与节点
         function renderDAG(dagData, preserveView) {
             edgesGroup.innerHTML = '';
@@ -2090,6 +2397,7 @@
 
             const nodes = dagData.nodes || [];
             const edges = dagData.edges || [];
+            updateTaskSearchIndex(nodes);
 
             // 统计做工状态
             let doingCount = 0;
@@ -2153,10 +2461,10 @@
 
                 const artifactsCount = node.artifacts_count || 0;
                 const artifactsBadge = artifactsCount > 0
-                    ? `<span class="node-artifacts">📄 ${artifactsCount}</span>`
+                    ? `<span class="node-artifacts" title="${artifactsCount} 个产物文件"><svg class="ui-icon" width="10" height="10" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>${artifactsCount}</span>`
                     : '';
                 const cycleBadge = node.has_cycle
-                    ? `<span class="node-cycle-warn" title="存在循环依赖">⚠ 环</span>`
+                    ? `<span class="node-cycle-warn" title="存在循环依赖"><svg class="ui-icon" width="10" height="10" viewBox="0 0 24 24"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg> 环</span>`
                     : '';
 
                 card.innerHTML = `
@@ -2394,6 +2702,152 @@
             }
         }
 
+        // 基于 jsdiff 的双行号与行内字符级差异渲染器 (带平滑降级)
+        function renderDiffPanel(panel, rawDiff) {
+            if (!rawDiff || !rawDiff.trim()) {
+                panel.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-style:italic;">无文本变动</div>';
+                return;
+            }
+
+            const codeWrapper = document.createElement('div');
+            codeWrapper.className = 'diff-code-wrapper';
+
+            // 优先尝试 jsdiff 结构化解析，提供双行号与行内字符级差异加深高亮
+            if (typeof Diff !== 'undefined' && typeof Diff.parsePatch === 'function') {
+                try {
+                    const patches = Diff.parsePatch(rawDiff);
+                    if (patches && patches.length > 0) {
+                        patches.forEach(patch => {
+                            (patch.hunks || []).forEach(hunk => {
+                                // Hunk 头 (@@ -old,len +new,len @@)
+                                const hunkLine = document.createElement('div');
+                                hunkLine.className = 'diff-line diff-hunk';
+                                hunkLine.innerHTML = `
+                                    <span class="diff-num">...</span>
+                                    <span class="diff-num">...</span>
+                                    <span class="diff-prefix">@</span>
+                                    <span class="diff-text">@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@</span>
+                                `;
+                                codeWrapper.appendChild(hunkLine);
+
+                                let oldNum = hunk.oldStart;
+                                let newNum = hunk.newStart;
+                                const lines = hunk.lines || [];
+
+                                for (let i = 0; i < lines.length; i++) {
+                                    const line = lines[i];
+                                    const prefix = line[0] || ' ';
+                                    const text = line.slice(1);
+
+                                    // 检查是否为成对出现的行修改 (单行/多行替换)，进行字符级 (Word-diff) 高亮
+                                    let isPairedChange = false;
+                                    let nextLine = lines[i + 1];
+                                    if (prefix === '-' && nextLine && nextLine[0] === '+') {
+                                        isPairedChange = true;
+                                    }
+
+                                    if (isPairedChange) {
+                                        const delText = text;
+                                        const addText = nextLine.slice(1);
+                                        const wordChanges = Diff.diffWordsWithSpace(delText, addText);
+
+                                        let delHtml = '';
+                                        let addHtml = '';
+                                        wordChanges.forEach(part => {
+                                            const val = escapeHtml(part.value);
+                                            if (part.added) {
+                                                addHtml += `<span class="diff-word-add">${val}</span>`;
+                                            } else if (part.removed) {
+                                                delHtml += `<span class="diff-word-del">${val}</span>`;
+                                            } else {
+                                                delHtml += val;
+                                                addHtml += val;
+                                            }
+                                        });
+
+                                        // 删除行
+                                        const delRow = document.createElement('div');
+                                        delRow.className = 'diff-line diff-del';
+                                        delRow.innerHTML = `
+                                            <span class="diff-num">${oldNum++}</span>
+                                            <span class="diff-num"></span>
+                                            <span class="diff-prefix">-</span>
+                                            <span class="diff-text">${delHtml}</span>
+                                        `;
+                                        codeWrapper.appendChild(delRow);
+
+                                        // 新增行
+                                        const addRow = document.createElement('div');
+                                        addRow.className = 'diff-line diff-add';
+                                        addRow.innerHTML = `
+                                            <span class="diff-num"></span>
+                                            <span class="diff-num">${newNum++}</span>
+                                            <span class="diff-prefix">+</span>
+                                            <span class="diff-text">${addHtml}</span>
+                                        `;
+                                        codeWrapper.appendChild(addRow);
+
+                                        i++; // 跳过已配对处理的下一行
+                                        continue;
+                                    }
+
+                                    if (prefix === '-') {
+                                        const row = document.createElement('div');
+                                        row.className = 'diff-line diff-del';
+                                        row.innerHTML = `
+                                            <span class="diff-num">${oldNum++}</span>
+                                            <span class="diff-num"></span>
+                                            <span class="diff-prefix">-</span>
+                                            <span class="diff-text">${escapeHtml(text)}</span>
+                                        `;
+                                        codeWrapper.appendChild(row);
+                                    } else if (prefix === '+') {
+                                        const row = document.createElement('div');
+                                        row.className = 'diff-line diff-add';
+                                        row.innerHTML = `
+                                            <span class="diff-num"></span>
+                                            <span class="diff-num">${newNum++}</span>
+                                            <span class="diff-prefix">+</span>
+                                            <span class="diff-text">${escapeHtml(text)}</span>
+                                        `;
+                                        codeWrapper.appendChild(row);
+                                    } else {
+                                        const row = document.createElement('div');
+                                        row.className = 'diff-line diff-ctx';
+                                        row.innerHTML = `
+                                            <span class="diff-num">${oldNum++}</span>
+                                            <span class="diff-num">${newNum++}</span>
+                                            <span class="diff-prefix">&nbsp;</span>
+                                            <span class="diff-text">${escapeHtml(text)}</span>
+                                        `;
+                                        codeWrapper.appendChild(row);
+                                    }
+                                }
+                            });
+                        });
+                        panel.appendChild(codeWrapper);
+                        return;
+                    }
+                } catch (e) {
+                    console.warn('Diff 解析失败，回退原生着色:', e);
+                }
+            }
+
+            // 兜底回退：纯文本按行简单着色
+            rawDiff.split('\n').forEach(line => {
+                const dline = document.createElement('div');
+                let cls = 'diff-ctx';
+                if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+                else if (line.startsWith('+')) cls = 'diff-add';
+                else if (line.startsWith('-')) cls = 'diff-del';
+                else if (line.startsWith('@@')) cls = 'diff-hunk';
+                dline.className = 'diff-line ' + cls;
+                dline.textContent = line;
+                codeWrapper.appendChild(dline);
+            });
+            panel.appendChild(codeWrapper);
+        }
+
         function renderDrawerDetail(detail) {
             // Tab 1: 现场笔记 Markdown 渲染
             const noteContainer = document.getElementById('drawer-notes-preview');
@@ -2401,7 +2855,7 @@
             const noteMarkdown = detail.note_markdown || detail.notes || '';
             if (detail.note_file) {
                 noteFileIndicator.style.display = 'flex';
-                noteFileIndicator.innerHTML = `<span>📄</span><span>${escapeHtml(detail.note_file)}</span>`;
+                noteFileIndicator.innerHTML = `<svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg><span>${escapeHtml(detail.note_file)}</span>`;
             } else {
                 noteFileIndicator.style.display = 'none';
             }
@@ -2429,7 +2883,7 @@
                 if (fDiff) {
                     leftHtml += `<button class="diff-toggle-btn" title="切换展开 Diff">▶</button>`;
                 }
-                leftHtml += `<span>📄</span><span class="file-path-text" title="${escapeHtml(p)}">${escapeHtml(p)}</span>`;
+                leftHtml += `<svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg><span class="file-path-text" title="${escapeHtml(p)}">${escapeHtml(p)}</span>`;
                 if (fDiff && fDiff.status) {
                     const sChar = fDiff.status === 'added' ? 'A' : (fDiff.status === 'deleted' ? 'D' : 'M');
                     leftHtml += `<span class="file-status-tag ${escapeHtml(fDiff.status)}">${sChar}</span>`;
@@ -2462,24 +2916,7 @@
                 if (fDiff) {
                     const panel = document.createElement('div');
                     panel.className = 'diff-view-panel';
-                    if (fDiff.diff) {
-                        const codeWrapper = document.createElement('div');
-                        codeWrapper.className = 'diff-code-wrapper';
-                        fDiff.diff.split('\n').forEach(line => {
-                            const dline = document.createElement('div');
-                            let cls = 'diff-ctx';
-                            if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                            else if (line.startsWith('+')) cls = 'diff-add';
-                            else if (line.startsWith('-')) cls = 'diff-del';
-                            else if (line.startsWith('@@')) cls = 'diff-hunk';
-                            dline.className = 'diff-line ' + cls;
-                            dline.textContent = line;
-                            codeWrapper.appendChild(dline);
-                        });
-                        panel.appendChild(codeWrapper);
-                    } else {
-                        panel.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-style:italic;">无文本变动</div>';
-                    }
+                    renderDiffPanel(panel, fDiff.diff);
                     card.appendChild(panel);
 
                     const toggleBtn = fileRow.querySelector('.diff-toggle-btn');
@@ -2503,7 +2940,7 @@
                     group.className = 'project-changes-group';
                     group.innerHTML = `
                         <div class="project-group-header">
-                            <span>📦 ${escapeHtml(proj)}</span>
+                            <span style="display:flex;align-items:center;gap:6px;"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path><polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline><line x1="12" y1="22.08" x2="12" y2="12"></line></svg>${escapeHtml(proj)}</span>
                             <span class="tab-badge-sm">${files.length} 个文件</span>
                         </div>
                     `;
@@ -2579,8 +3016,10 @@
             if (!node) return;
 
             const rect = canvasContainer.getBoundingClientRect();
+            const drawerOpen = detailDrawer.classList.contains('open');
+            const visibleWidth = (drawerOpen && rect.width > 768) ? Math.max(200, rect.width - 480) : rect.width;
             AppState.scale = Math.max(AppState.scale, 0.9);
-            AppState.translateX = (rect.width / 2) - (node.x + node.width / 2) * AppState.scale;
+            AppState.translateX = (visibleWidth / 2) - (node.x + node.width / 2) * AppState.scale;
             AppState.translateY = (rect.height / 2) - (node.y + node.height / 2) * AppState.scale;
             applyTransform();
 
@@ -2732,7 +3171,7 @@
                 if (disputedCount > 0) {
                     alertBox.style.display = 'flex';
                     const disputeNames = Object.keys(disputes).map(n => `<b>${escapeHtml(n)}</b> (${escapeHtml(disputes[n] || '争议中')})`).join(', ');
-                    alertBox.innerHTML = `<span>⚠ 契约争议熔断中！涉及契约: ${disputeNames}</span>`;
+                    alertBox.innerHTML = `<svg class="ui-icon" width="14" height="14" viewBox="0 0 24 24" style="margin-right:4px;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg><span>契约争议熔断中！涉及契约: ${disputeNames}</span>`;
                 } else {
                     alertBox.style.display = 'none';
                 }
@@ -2771,7 +3210,7 @@
 
                     card.innerHTML = `
                         <div class="contract-card-header">
-                            <span class="contract-name">📄 ${escapeHtml(c.name || '未命名契约')}</span>
+                            <span class="contract-name" style="display:flex;align-items:center;gap:6px;"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>${escapeHtml(c.name || '未命名契约')}</span>
                             <div>${statusTagHtml}</div>
                         </div>
                         <div class="contract-meta-row">
@@ -2879,11 +3318,11 @@
 
         function showCopied(btn) {
             if (!btn) return;
-            const orig = btn.textContent;
-            btn.textContent = '✓ 已复制!';
+            const orig = btn.innerHTML;
+            btn.innerHTML = '✓ 已复制!';
             btn.classList.add('copied');
             setTimeout(() => {
-                btn.textContent = orig;
+                btn.innerHTML = orig;
                 btn.classList.remove('copied');
             }, 1500);
         }
@@ -2896,9 +3335,79 @@
             }
         }
 
-        // 轻量纯 JS Markdown 渲染器 (支持标题、列表、代码块、表格、引用、行内样式)
+        // 初始化开源 Marked.js 与 Prism.js 定制渲染器
+        function initMarked() {
+            if (typeof marked === 'undefined') return;
+            const renderer = {
+                html(token) {
+                    const raw = typeof token === 'object' ? token.text : token;
+                    return escapeHtml(raw);
+                },
+                codespan(text) {
+                    const raw = typeof text === 'object' ? text.text : text;
+                    return `<code class="inline-code">${raw}</code>`;
+                },
+                table(header, body) {
+                    const h = typeof header === 'object' ? header.header : header;
+                    const b = typeof header === 'object' ? header.rows : body;
+                    return `<div class="table-wrapper"><table><thead>${h}</thead><tbody>${b}</tbody></table></div>`;
+                },
+                code(token) {
+                    const code = typeof token === 'object' ? token.text : arguments[0];
+                    const infostring = typeof token === 'object' ? token.lang : arguments[1];
+                    const lang = (infostring || '').trim() || 'code';
+                    let highlighted = '';
+                    const normLang = lang.toLowerCase();
+                    const prismLang = typeof Prism !== 'undefined' ? (Prism.languages[normLang] || (normLang === 'js' ? Prism.languages.javascript : (normLang === 'py' ? Prism.languages.python : (normLang === 'sh' ? Prism.languages.bash : null)))) : null;
+                    if (prismLang) {
+                        try {
+                            highlighted = Prism.highlight(code, prismLang, normLang);
+                        } catch (e) {
+                            highlighted = escapeHtml(code);
+                        }
+                    } else {
+                        highlighted = escapeHtml(code);
+                    }
+                    return `<div class="code-container">\n  <div class="code-header">\n    <span>${escapeHtml(lang)}</span>\n    <button class="code-copy-btn" onclick="copySnippet(this)">复制</button>\n  </div>\n  <pre><code>${highlighted}</code></pre>\n</div>\n`;
+                },
+                link(token) {
+                    const href = typeof token === 'object' ? token.href : arguments[0];
+                    const text = typeof token === 'object' ? token.text : (arguments[2] || arguments[0]);
+                    const cleanUrl = (href || '').trim();
+                    if (/^(?:javascript|data|vbscript):/i.test(cleanUrl)) {
+                        return text;
+                    }
+                    const safeUrl = cleanUrl.replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+                    return `<a href="${safeUrl}" target="_blank" rel="noopener">${text}</a>`;
+                },
+                listitem(token) {
+                    const text = typeof token === 'object' ? token.text : arguments[0];
+                    const task = typeof token === 'object' ? token.task : arguments[1];
+                    const checked = typeof token === 'object' ? token.checked : arguments[2];
+                    if (task) {
+                        const checkCls = checked ? 'task-checkbox checked' : 'task-checkbox';
+                        const checkMark = checked ? '✓' : '';
+                        const cleanText = text.replace(/^<input[^>]*>\s*/, '');
+                        return `<li class="task-list-item"><span class="${checkCls}">${checkMark}</span><span>${cleanText}</span></li>\n`;
+                    }
+                    return `<li>${text}</li>\n`;
+                }
+            };
+            marked.use({ renderer, gfm: true, breaks: true });
+        }
+        initMarked();
+
+        // 轻量纯 JS Markdown 渲染器 (支持 marked + Prism 增强，并内置自包含兜底)
         function renderMarkdown(md) {
             if (!md || !md.trim()) return '<div class="empty-tab-state">暂无现场备忘记录</div>';
+
+            if (typeof marked !== 'undefined' && typeof marked.parse === 'function') {
+                try {
+                    return marked.parse(md);
+                } catch (e) {
+                    console.warn('Marked 解析失败，使用内置引擎降级:', e);
+                }
+            }
 
             const rawLines = md.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
             const out = [];
@@ -3014,7 +3523,15 @@
                         out.push('<ul>');
                         inUl = true;
                     }
-                    out.push(`<li>${inlineMarkdown(ulMatch[1])}</li>`);
+                    const taskMatch = ulMatch[1].match(/^\[([ xX])\]\s+(.*)$/);
+                    if (taskMatch) {
+                        const isChecked = taskMatch[1].toLowerCase() === 'x';
+                        const checkCls = isChecked ? 'task-checkbox checked' : 'task-checkbox';
+                        const checkMark = isChecked ? '✓' : '';
+                        out.push(`<li class="task-list-item"><span class="${checkCls}">${checkMark}</span><span>${inlineMarkdown(taskMatch[2])}</span></li>`);
+                    } else {
+                        out.push(`<li>${inlineMarkdown(ulMatch[1])}</li>`);
+                    }
                     continue;
                 }
 
@@ -3194,6 +3711,12 @@
                     } else if (code === 48 && rawCodes[i + 1] === 5 && rawCodes[i + 2] !== undefined) {
                         state.bg = color256(rawCodes[i + 2]);
                         i += 2;
+                    } else if (code === 38 && rawCodes[i + 1] === 2 && rawCodes[i + 4] !== undefined) {
+                        state.fg = `rgb(${rawCodes[i + 2]},${rawCodes[i + 3]},${rawCodes[i + 4]})`;
+                        i += 4;
+                    } else if (code === 48 && rawCodes[i + 1] === 2 && rawCodes[i + 4] !== undefined) {
+                        state.bg = `rgb(${rawCodes[i + 2]},${rawCodes[i + 3]},${rawCodes[i + 4]})`;
+                        i += 4;
                     } else if (FG_COLORS[code]) {
                         state.fg = FG_COLORS[code];
                     } else if (BG_COLORS[code]) {
@@ -3366,7 +3889,13 @@
 
             canvasContainer.addEventListener('wheel', (e) => {
                 e.preventDefault();
-                const factor = e.deltaY < 0 ? 1.1 : 0.9;
+                let factor;
+                if (e.ctrlKey) {
+                    factor = Math.exp(-e.deltaY * 0.015);
+                } else {
+                    const clampedDelta = Math.max(-60, Math.min(60, e.deltaY));
+                    factor = 1 - clampedDelta * 0.002;
+                }
                 zoomBy(factor, e.clientX, e.clientY);
             }, { passive: false });
         }
@@ -3476,19 +4005,70 @@
                 });
             }
 
-            // 底部控制台开关
+            // 底部控制台开关与高度切换
             const devToggle = document.getElementById('btn-toggle-dev');
             const devClose = document.getElementById('btn-close-dev');
+            const devExpand = document.getElementById('btn-expand-dev');
             devToggle.addEventListener('click', () => {
                 toggleBottomConsole();
             });
             devClose.addEventListener('click', () => {
                 closeBottomConsole();
             });
+            if (devExpand) {
+                devExpand.addEventListener('click', () => {
+                    const isExp = devConsoleDrawer.classList.toggle('expanded');
+                    devExpand.textContent = isExp ? '🗗 恢复' : '⛶ 展开';
+                });
+            }
+
+
+            // 全局任务模糊检索绑定
+            const searchInput = document.getElementById('search-task-input');
+            const searchClearBtn = document.getElementById('search-clear-btn');
+            const searchDropdown = document.getElementById('search-results-dropdown');
+
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    handleTaskSearch(e.target.value);
+                });
+                searchInput.addEventListener('focus', (e) => {
+                    if (e.target.value.trim()) handleTaskSearch(e.target.value);
+                });
+            }
+
+            if (searchClearBtn) {
+                searchClearBtn.addEventListener('click', () => {
+                    if (searchInput) {
+                        searchInput.value = '';
+                        handleTaskSearch('');
+                        searchInput.focus();
+                    }
+                });
+            }
+
+            document.addEventListener('click', (e) => {
+                if (searchDropdown && !e.target.closest('#search-task-container')) {
+                    searchDropdown.style.display = 'none';
+                }
+            });
 
             // 键盘快捷键
             window.addEventListener('keydown', (e) => {
-                if (e.key === 'Escape') {
+                if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+                    e.preventDefault();
+                    const sIn = document.getElementById('search-task-input');
+                    if (sIn) { sIn.focus(); sIn.select(); }
+                } else if (e.key === 'Escape') {
+                    const sIn = document.getElementById('search-task-input');
+                    const sDrop = document.getElementById('search-results-dropdown');
+                    if (sIn && (document.activeElement === sIn || sIn.value)) {
+                        sIn.value = '';
+                        handleTaskSearch('');
+                        sIn.blur();
+                        if (sDrop) sDrop.style.display = 'none';
+                        return;
+                    }
                     closeTaskDrawer();
                     closeBottomConsole();
                 } else if (e.key === 'f' || e.key === 'F') {

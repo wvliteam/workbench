@@ -300,6 +300,48 @@ class TestSSEEventStream(TestDashboardServerBase):
         conn.close()
 
 
+class TestVendorAssetsDelivery(TestDashboardServerBase):
+    """测试开源第三方依赖库静态交付与安全性。"""
+
+    def test_vendor_marked_served_successfully(self):
+        """测试 /vendor/marked.min.js 正确交付且具备正确的 Content-Type。"""
+        status, content, headers = self.fetch_text("/vendor/marked.min.js")
+        self.assertEqual(status, 200)
+        self.assertIn("application/javascript", headers.get("content-type", ""))
+        self.assertIn("marked", content)
+
+    def test_vendor_prism_served_successfully(self):
+        """测试 /vendor/prism.min.js 正确交付且包含支持的语言模块。"""
+        status, content, headers = self.fetch_text("/vendor/prism.min.js")
+        self.assertEqual(status, 200)
+        self.assertIn("application/javascript", headers.get("content-type", ""))
+        self.assertIn("Prism", content)
+
+    def test_vendor_diff_served_successfully(self):
+        """测试 /vendor/diff.min.js 正确交付且包含 jsdiff。"""
+        status, content, headers = self.fetch_text("/vendor/diff.min.js")
+        self.assertEqual(status, 200)
+        self.assertIn("application/javascript", headers.get("content-type", ""))
+        self.assertIn("jsdiff", content)
+
+    def test_vendor_fuse_served_successfully(self):
+        """测试 /vendor/fuse.min.js 正确交付且包含 Fuse。"""
+        status, content, headers = self.fetch_text("/vendor/fuse.min.js")
+        self.assertEqual(status, 200)
+        self.assertIn("application/javascript", headers.get("content-type", ""))
+        self.assertIn("Fuse", content)
+
+    def test_vendor_nonexistent_returns_404(self):
+        """测试请求不存在的第三方库文件返回 404。"""
+        status, _, _ = self.fetch_text("/vendor/nonexistent.js")
+        self.assertEqual(status, 404)
+
+    def test_vendor_path_traversal_blocked(self):
+        """测试对 /vendor/ 的路径穿越探测被安全阻断为 403 或 404。"""
+        status, _, _ = self.fetch_text("/vendor/..%2Fwb_dashboard.py")
+        self.assertIn(status, (400, 403, 404))
+
+
 class TestStateWatcherFileMonitoring(unittest.TestCase):
     """测试 StateWatcher 对物理文件变动的真实轮询探测与广播。"""
 
