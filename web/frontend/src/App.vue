@@ -321,7 +321,9 @@ onKeyStroke(['-', '_'], () => {
 })
 
 onMounted(() => {
-  loadData()
+  const params = new URLSearchParams(window.location.search)
+  const initialFlow = params.get('flow') || currentFlow.value
+  loadData(initialFlow)
 })
 </script>
 

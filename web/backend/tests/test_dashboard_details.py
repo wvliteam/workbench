@@ -301,6 +301,10 @@ class TestBackendDataIntegrationForTask4(TestDashboardDetailsBase):
         self.assertIsInstance(data, dict)
         self.assertIn("note_markdown", data)
         self.assertIn("artifacts_by_project", data)
+        self.assertIn("diffs", data)
+        self.assertIn("diff_summary", data)
+        self.assertIsInstance(data["diffs"], dict)
+        self.assertIsInstance(data["diff_summary"], dict)
         self.assertIn("verification", data)
         self.assertIn("commands", data["verification"])
 

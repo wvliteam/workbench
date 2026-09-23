@@ -6,9 +6,9 @@ Workbench 可视化看板是一套为软件开发工作台量身打造的高性�
 
 ## 核心设计原则
 
-1. **前后端解耦与现代化 API 服务（Decoupled Modern API Service）**：
+1. **前后端解耦与现代化 Web 服务（Decoupled Modern Web Service）**：
    - 后端位于 `web/backend/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
-   - 根路径 `/`、`/index.html` 与 `/api` 统一输出标准 JSON 服务元数据及可用 API 探测清单，支持 CORS 跨域请求与预检。
+   - 根路径 `/` 与 `/index.html` 直接交付看板前端 SPA（Vue 3 生产构建产物，未构建时自动优雅降级为自包含模板）；静态构建资源挂载于 `/assets`；API 探测与服务元数据清单收敛至 `/api`，全域支持 CORS 跨域请求与预检。
 2. **独立现代化前端工程（Vue 3 + Vite SPA）**：
    - 前端代码位于独立工程 `web/frontend/`，基于 Vue 3 组合式 API（Composition API）+ Vite 6 构建。
    - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统 Emoji（全自研几何 SVG 图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。
@@ -144,29 +144,45 @@ python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
 
 前端采用 Vue 3 独立工程实现，与后端 API 服务完全解耦：
 
-### 1. 本地开发流程 (Local Development)
+### 1. 终端用户产品形态 (Zero-Dependency User Experience)
+
+在任何已配置 Python 3 依赖的环境下，执行主命令即可直接拉起并浏览看板，无需预装 Node.js 或启动多终端：
 
 ```bash
-# 终端 1：启动 Python 纯 API 服务（默认监听 8088）
-python3 web/backend/wb_dashboard.py --port 8088
+# 方式 1：工作台主入口命令（推荐）
+python3 .claude/hooks/wb.py dashboard --open
 
-# 终端 2：启动 Vue 3 前端开发服务（支持毫秒级 HMR 热重载）
-cd web/frontend
-npm install    # 首次运行安装依赖 (Vue 3 + Vite)
-npm run dev    # 启动开发服务器 (默认端口 5173，自动反向代理 /api 到 127.0.0.1:8088)
+# 方式 2：独立后端脚本
+python3 web/backend/wb_dashboard.py --open
 ```
 
-访问 `http://localhost:5173` 即可进行前端交互开发与调试。
+服务在 `http://127.0.0.1:8088` 启动，浏览器直接呈现编译好的现代化 Vue 3 工业看板 SPA。
 
-### 2. 生产构建 (Production Build)
+### 2. 前端源码热重载开发 (HMR Development)
+
+仅当需要对 `web/frontend/src/` 源码进行二次开发或调试时，才需要启动 Vite 开发服务器：
+
+```bash
+# 终端 1：启动 Python 后端数据与 API 服务（监听 8088）
+python3 web/backend/wb_dashboard.py --port 8088
+
+# 终端 2：启动 Vue 3 开发服务器（5173，自动反向代理 /api 到 8088）
+cd web/frontend
+npm install    # 首次运行安装依赖 (Vue 3 + Vite)
+npm run dev    # 启动开发服务器 (默认端口 5173)
+```
+
+访问 `http://localhost:5173` 即可获得毫秒级 HMR 前端热更新体验。
+
+### 3. 生产构建 (Production Build)
 
 ```bash
 cd web/frontend
 npm run build
 ```
-编译产物输出至 `web/frontend/dist/`，包含高度优化的单页 HTML 与资源文件。
+编译产物输出至 `web/frontend/dist/`，包含高度优化的单页 HTML 与资源文件，由后端直接挂载服务于根路径 `/`。
 
-### 3. 前端工程结构与模块分工
+### 4. 前端工程结构与模块分工
 
 ```
 web/frontend/

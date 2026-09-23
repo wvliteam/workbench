@@ -536,6 +536,45 @@ def get_task_detail(root: Path, task_id: str, flow: str | None = None) -> dict[s
         except (SecurityError, OSError):
             pass
 
+    # 4. 读取任务代码具体改动快照 (artifacts/<flow>/<phase>/tasks/<id>.diff.json)
+    diff_info: dict[str, Any] = {
+        "files": {},
+        "summary": {"total_files": 0, "additions": 0, "deletions": 0},
+        "recorded_at": None,
+    }
+    task_phase = target_task.get("phase", "develop")
+    candidate_phases = [task_phase]
+    if task_phase != "develop":
+        candidate_phases.append("develop")
+
+    for ph in candidate_phases:
+        diff_file = root_resolved / ".workbench" / "artifacts" / target_flow / ph / "tasks" / f"{task_id}.diff.json"
+        if diff_file.is_file():
+            try:
+                checked_diff = safe_resolve_path(root_resolved, diff_file)
+                diff_data = json.loads(checked_diff.read_text(encoding="utf-8"))
+                files_map = {}
+                raw_files = diff_data.get("files", [])
+                if isinstance(raw_files, list):
+                    for f_entry in raw_files:
+                        if isinstance(f_entry, dict) and "path" in f_entry:
+                            files_map[f_entry["path"]] = f_entry
+                elif isinstance(raw_files, dict):
+                    files_map = raw_files
+
+                diff_info = {
+                    "files": files_map,
+                    "summary": diff_data.get("summary", {
+                        "total_files": len(files_map),
+                        "additions": sum(item.get("additions", 0) for item in files_map.values()),
+                        "deletions": sum(item.get("deletions", 0) for item in files_map.values()),
+                    }),
+                    "recorded_at": diff_data.get("recorded_at"),
+                }
+                break
+            except (SecurityError, OSError, json.JSONDecodeError):
+                pass
+
     return {
         "id": task_id,
         "title": target_task.get("title", ""),
@@ -550,6 +589,9 @@ def get_task_detail(root: Path, task_id: str, flow: str | None = None) -> dict[s
         "note_markdown": note_markdown,
         "artifacts": artifacts,
         "artifacts_by_project": changes_by_project,
+        "diffs": diff_info.get("files", {}),
+        "diff_summary": diff_info.get("summary", {}),
+        "diff_recorded_at": diff_info.get("recorded_at"),
         "verification": verification_info,
         "started": target_task.get("started"),
         "updated": target_task.get("updated"),

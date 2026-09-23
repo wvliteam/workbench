@@ -1036,6 +1036,68 @@
             white-space: nowrap;
             color: #79c0ff;
         }
+        .diff-summary-pill {
+            display: inline-flex;
+            gap: 4px;
+            font-size: 10px;
+            font-weight: 600;
+            margin-left: 4px;
+        }
+        .diff-add-tag { color: #7ee787; }
+        .diff-del-tag { color: #f85149; }
+        .diff-toggle-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 1px 4px;
+            font-size: 10px;
+            border-radius: 3px;
+        }
+        .diff-toggle-btn:hover {
+            color: var(--accent);
+            background: rgba(88, 166, 255, 0.15);
+        }
+        .file-status-tag {
+            font-size: 9px;
+            font-weight: 700;
+            padding: 1px 4px;
+            border-radius: 3px;
+            line-height: 1;
+        }
+        .file-status-tag.added { background: rgba(63, 185, 80, 0.2); color: #7ee787; border: 1px solid rgba(63, 185, 80, 0.35); }
+        .file-status-tag.modified { background: rgba(210, 153, 34, 0.2); color: #e3b341; border: 1px solid rgba(210, 153, 34, 0.35); }
+        .file-status-tag.deleted { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid rgba(248, 81, 73, 0.35); }
+        .project-file-card {
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .project-file-card:last-child {
+            border-bottom: none;
+        }
+        .diff-view-panel {
+            background: #05080c;
+            border-top: 1px solid var(--border-subtle);
+            overflow-x: auto;
+            display: none;
+        }
+        .diff-view-panel.open {
+            display: block;
+        }
+        .diff-code-wrapper {
+            font-size: 10.5px;
+            line-height: 1.45;
+            padding: 6px 0;
+            font-family: var(--font-mono);
+        }
+        .diff-line {
+            padding: 1px 10px;
+            white-space: pre;
+        }
+        .diff-line.diff-add { background: rgba(63, 185, 80, 0.14); color: #7ee787; }
+        .diff-line.diff-del { background: rgba(248, 81, 73, 0.14); color: #ffa198; }
+        .diff-line.diff-hunk { background: rgba(56, 139, 253, 0.12); color: #79c0ff; font-weight: 500; }
+        .diff-line.diff-meta { color: var(--text-muted); font-weight: 600; }
+        .diff-line.diff-ctx { color: var(--text-secondary); }
 
         /* 复核依据容器 */
         .drawer-ver-container {
@@ -2350,6 +2412,86 @@
             document.getElementById('drawer-artifacts-count').textContent = artifacts.length;
             const byProj = detail.artifacts_by_project || {};
             const projects = Object.keys(byProj);
+            const diffs = detail.diffs || {};
+
+            function createFileCard(p) {
+                const card = document.createElement('div');
+                card.className = 'project-file-card';
+                const fDiff = diffs[p];
+
+                const fileRow = document.createElement('div');
+                fileRow.className = 'project-file-item';
+                if (fDiff) fileRow.style.cursor = 'pointer';
+
+                let leftHtml = '';
+                if (fDiff) {
+                    leftHtml += `<button class="diff-toggle-btn" title="切换展开 Diff">▶</button>`;
+                }
+                leftHtml += `<span>📄</span><span class="file-path-text" title="${escapeHtml(p)}">${escapeHtml(p)}</span>`;
+                if (fDiff && fDiff.status) {
+                    const sChar = fDiff.status === 'added' ? 'A' : (fDiff.status === 'deleted' ? 'D' : 'M');
+                    leftHtml += `<span class="file-status-tag ${escapeHtml(fDiff.status)}">${sChar}</span>`;
+                }
+                if (fDiff && (fDiff.additions || fDiff.deletions)) {
+                    leftHtml += `<span class="diff-summary-pill">`;
+                    if (fDiff.additions) leftHtml += `<span class="diff-add-tag">+${fDiff.additions}</span>`;
+                    if (fDiff.deletions) leftHtml += `<span class="diff-del-tag">-${fDiff.deletions}</span>`;
+                    leftHtml += `</span>`;
+                }
+
+                fileRow.innerHTML = `
+                    <div class="file-left">${leftHtml}</div>
+                    <div style="display:flex;gap:4px;">
+                        ${fDiff && fDiff.diff ? '<button class="copy-diff-btn copy-btn-sm" title="复制 Diff">复制 Diff</button>' : ''}
+                        <button class="copy-btn-sm" title="复制路径">复制</button>
+                    </div>
+                `;
+
+                const copyBtn = fileRow.querySelector('.copy-btn-sm');
+                copyBtn.onclick = (e) => { e.stopPropagation(); copyText(p, copyBtn); };
+
+                const copyDiffBtn = fileRow.querySelector('.copy-diff-btn');
+                if (copyDiffBtn && fDiff && fDiff.diff) {
+                    copyDiffBtn.onclick = (e) => { e.stopPropagation(); copyText(fDiff.diff, copyDiffBtn); };
+                }
+
+                card.appendChild(fileRow);
+
+                if (fDiff) {
+                    const panel = document.createElement('div');
+                    panel.className = 'diff-view-panel';
+                    if (fDiff.diff) {
+                        const codeWrapper = document.createElement('div');
+                        codeWrapper.className = 'diff-code-wrapper';
+                        fDiff.diff.split('\n').forEach(line => {
+                            const dline = document.createElement('div');
+                            let cls = 'diff-ctx';
+                            if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
+                            else if (line.startsWith('+')) cls = 'diff-add';
+                            else if (line.startsWith('-')) cls = 'diff-del';
+                            else if (line.startsWith('@@')) cls = 'diff-hunk';
+                            dline.className = 'diff-line ' + cls;
+                            dline.textContent = line;
+                            codeWrapper.appendChild(dline);
+                        });
+                        panel.appendChild(codeWrapper);
+                    } else {
+                        panel.innerHTML = '<div style="padding:10px;color:var(--text-muted);font-style:italic;">无文本变动</div>';
+                    }
+                    card.appendChild(panel);
+
+                    const toggleBtn = fileRow.querySelector('.diff-toggle-btn');
+                    const toggle = (e) => {
+                        if (e) e.stopPropagation();
+                        const isOpen = panel.classList.toggle('open');
+                        if (toggleBtn) toggleBtn.textContent = isOpen ? '▼' : '▶';
+                    };
+                    fileRow.onclick = toggle;
+                    if (toggleBtn) toggleBtn.onclick = toggle;
+                }
+
+                return card;
+            }
 
             if (projects.length > 0 && artifacts.length > 0) {
                 projects.forEach(proj => {
@@ -2364,35 +2506,13 @@
                         </div>
                     `;
                     files.forEach(p => {
-                        const fileRow = document.createElement('div');
-                        fileRow.className = 'project-file-item';
-                        fileRow.innerHTML = `
-                            <div class="file-left">
-                                <span>📄</span>
-                                <span class="file-path-text" title="${escapeHtml(p)}">${escapeHtml(p)}</span>
-                            </div>
-                            <button class="copy-btn-sm" title="复制路径">复制</button>
-                        `;
-                        const copyBtn = fileRow.querySelector('.copy-btn-sm');
-                        copyBtn.onclick = () => copyText(p, copyBtn);
-                        group.appendChild(fileRow);
+                        group.appendChild(createFileCard(p));
                     });
                     artContainer.appendChild(group);
                 });
             } else if (artifacts.length > 0) {
                 artifacts.forEach(path => {
-                    const item = document.createElement('div');
-                    item.className = 'project-file-item';
-                    item.innerHTML = `
-                        <div class="file-left">
-                            <span>📄</span>
-                            <span class="file-path-text" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
-                        </div>
-                        <button class="copy-btn-sm" title="复制路径">复制</button>
-                    `;
-                    const copyBtn = item.querySelector('.copy-btn-sm');
-                    copyBtn.onclick = () => copyText(path, copyBtn);
-                    artContainer.appendChild(item);
+                    artContainer.appendChild(createFileCard(path));
                 });
             } else {
                 artContainer.innerHTML = '<div class="empty-tab-state">暂无关联改动文件</div>';

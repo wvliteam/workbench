@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -266,6 +267,10 @@ class TestRealWorkspaceDataIntegration(unittest.TestCase):
         self.assertIsNotNone(t1_detail)
         self.assertEqual(t1_detail["id"], "T1")
         self.assertEqual(t1_detail["role"], "backend-developer")
+        self.assertIn("diffs", t1_detail)
+        self.assertIn("diff_summary", t1_detail)
+        self.assertIsInstance(t1_detail["diffs"], dict)
+        self.assertIsInstance(t1_detail["diff_summary"], dict)
         # 验证 verification.md 解析
         ver = t1_detail["verification"]
         self.assertGreater(len(ver["commands"]), 0)
@@ -274,6 +279,156 @@ class TestRealWorkspaceDataIntegration(unittest.TestCase):
         # 验证不存在的任务返回 None
         none_detail = core.get_task_detail(self.root, "NON_EXISTENT_TASK_ID", flow="main")
         self.assertIsNone(none_detail)
+
+    def test_task_diff_snapshot_loading(self):
+        """验证加载任务 diff.json 快照及其字段解析。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmproot = Path(tmpdir)
+            wbd = tmproot / ".workbench" / "flows" / "main"
+            wbd.mkdir(parents=True, exist_ok=True)
+            sp = wbd / "state.json"
+            sp.write_text(json.dumps({
+                "project": "test-diff",
+                "phase": "develop",
+                "phases": ["develop"],
+                "tasks": [{
+                    "id": "T99",
+                    "title": "测试 Diff 任务",
+                    "role": "backend-developer",
+                    "phase": "develop",
+                    "status": "done",
+                    "artifacts": ["server/app.py"],
+                }]
+            }), encoding="utf-8")
+
+            # 写入模拟的 T99.diff.json
+            tasks_dir = tmproot / ".workbench" / "artifacts" / "main" / "develop" / "tasks"
+            tasks_dir.mkdir(parents=True, exist_ok=True)
+            diff_file = tasks_dir / "T99.diff.json"
+            diff_file.write_text(json.dumps({
+                "task_id": "T99",
+                "flow": "main",
+                "phase": "develop",
+                "summary": {"total_files": 1, "additions": 5, "deletions": 2},
+                "files": [{
+                    "path": "server/app.py",
+                    "status": "modified",
+                    "additions": 5,
+                    "deletions": 2,
+                    "diff": "@@ -1,2 +1,5 @@\n-old\n+new",
+                }]
+            }), encoding="utf-8")
+
+            detail = core.get_task_detail(tmproot, "T99", flow="main")
+            self.assertIsNotNone(detail)
+            self.assertIn("server/app.py", detail["diffs"])
+            self.assertEqual(detail["diffs"]["server/app.py"]["additions"], 5)
+            self.assertEqual(detail["diffs"]["server/app.py"]["deletions"], 2)
+            self.assertEqual(detail["diff_summary"]["additions"], 5)
+            self.assertEqual(detail["diff_summary"]["deletions"], 2)
+
+    def test_record_task_diff_execution(self):
+        """验证 wb_cli.record_task_diff 正确采集并写入任务 diff 快照。"""
+        import tempfile
+        from wb_cli import record_task_diff
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmproot = Path(tmpdir)
+            wbd = tmproot / ".workbench"
+            wbd.mkdir(parents=True, exist_ok=True)
+
+            # 创建模拟改动文件
+            test_file = tmproot / "sample.py"
+            test_file.write_text("print('hello')\n", encoding="utf-8")
+
+            task = {
+                "id": "T100",
+                "phase": "develop",
+                "artifacts": ["sample.py"],
+            }
+            diff_path = record_task_diff(tmproot, task, "main")
+            self.assertIsNotNone(diff_path)
+            self.assertTrue(diff_path.is_file())
+
+            data = json.loads(diff_path.read_text(encoding="utf-8"))
+            self.assertEqual(data["task_id"], "T100")
+            self.assertEqual(data["summary"]["total_files"], 1)
+            self.assertGreater(data["summary"]["additions"], 0)
+            self.assertEqual(len(data["files"]), 1)
+            self.assertEqual(data["files"][0]["path"], "sample.py")
+
+    def test_record_task_diff_baseline_isolation(self):
+        """验证任务级基线快照（git stash create 与未跟踪备份）隔离前序脏改动。"""
+        import subprocess
+        import tempfile
+        from wb_cli import capture_task_baselines, record_task_diff
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmproot = Path(tmpdir)
+            wbd = tmproot / ".workbench"
+            wbd.mkdir(parents=True, exist_ok=True)
+
+            # 初始化 Git 仓库
+            subprocess.run(["git", "init"], cwd=str(tmproot), capture_output=True, check=True)
+            subprocess.run(["git", "config", "user.name", "Tester"], cwd=str(tmproot), capture_output=True, check=True)
+            subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(tmproot), capture_output=True, check=True)
+
+            # 提交已跟踪初始版本
+            tracked_file = tmproot / "app.py"
+            tracked_file.write_text("line1\nline2\n", encoding="utf-8")
+            subprocess.run(["git", "add", "app.py"], cwd=str(tmproot), capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-m", "initial commit"], cwd=str(tmproot), capture_output=True, check=True)
+
+            # 1. 模拟任务开工前已存在的未提交脏改动
+            tracked_file.write_text("line1\nline2\npre_existing_dirty\n", encoding="utf-8")
+
+            # 2. 模拟任务开工前已存在的未跟踪文件
+            untracked_file = tmproot / "scratch.txt"
+            untracked_file.write_text("old_scratch\n", encoding="utf-8")
+
+            task = {
+                "id": "T200",
+                "phase": "develop",
+                "artifacts": ["app.py", "scratch.txt"],
+            }
+
+            # 3. 任务启动 (task start) 捕获基线
+            baselines = capture_task_baselines(tmproot, task, "main")
+            task["baselines"] = baselines
+            self.assertIn("repos", baselines)
+            self.assertIn(".", baselines["repos"])
+            baseline_sha = baselines["repos"]["."]
+            self.assertTrue(bool(baseline_sha))
+
+            # 4. 任务执行期间新增修改
+            tracked_file.write_text("line1\nline2\npre_existing_dirty\ndeveloper_added_line\n", encoding="utf-8")
+            untracked_file.write_text("old_scratch\ndeveloper_scratch_line\n", encoding="utf-8")
+
+            # 5. 任务完成 (task done) 固化 diff
+            diff_path = record_task_diff(tmproot, task, "main")
+            self.assertIsNotNone(diff_path)
+            self.assertTrue(diff_path.is_file())
+
+            data = json.loads(diff_path.read_text(encoding="utf-8"))
+            file_diffs = {f["path"]: f for f in data["files"]}
+
+            # 验证 tracked_file: 只包含 developer_added_line，不包含 pre_existing_dirty
+            app_diff = file_diffs.get("app.py")
+            self.assertIsNotNone(app_diff)
+            self.assertIn("+developer_added_line", app_diff["diff"])
+            self.assertNotIn("+pre_existing_dirty", app_diff["diff"])
+            self.assertEqual(app_diff["additions"], 1)
+
+            # 验证 untracked_file: 只包含 developer_scratch_line，不包含 old_scratch
+            scratch_diff = file_diffs.get("scratch.txt")
+            self.assertIsNotNone(scratch_diff)
+            self.assertIn("+developer_scratch_line", scratch_diff["diff"])
+            self.assertNotIn("+old_scratch", scratch_diff["diff"])
+            self.assertEqual(scratch_diff["additions"], 1)
+
+            # 验证临时基线备份目录已被自动清理
+            baselines_dir = tmproot / ".workbench" / "artifacts" / "main" / "develop" / "tasks" / ".baselines" / "T200"
+            self.assertFalse(baselines_dir.exists())
 
     def test_contracts_and_audit(self):
         """验证契约与审计日志读取。"""

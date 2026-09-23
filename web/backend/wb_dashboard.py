@@ -27,7 +27,8 @@ from typing import Any
 
 from fastapi import FastAPI, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 import uvicorn
 
 # 动态引入 core 模块
@@ -240,6 +241,31 @@ def load_export_template() -> str:
 DASHBOARD_HTML_TEMPLATE = load_export_template()
 
 
+_FRONTEND_DIST = _BACKEND_DIR.parent / "frontend" / "dist"
+_DIST_INDEX = _FRONTEND_DIST / "index.html"
+_DIST_ASSETS = _FRONTEND_DIST / "assets"
+
+def render_live_fallback_html(root: Path, target_flow: str = "main") -> str:
+    """当 Vue 生产构建物不存在时，降级渲染单文件自包含 HTML 看板 (Live 模式)。"""
+    template = DASHBOARD_HTML_TEMPLATE or load_export_template()
+    if not template:
+        return "<!DOCTYPE html><html><body><h1>Workbench Dashboard</h1><p>Vue dist not built and dashboard template missing.</p></body></html>"
+    live_meta = {
+        "is_static": False,
+        "project": "workbench",
+        "current_flow": target_flow,
+    }
+    initial_json = json.dumps(live_meta, ensure_ascii=False)
+    return (
+        template
+        .replace("{{PROJECT}}", "workbench")
+        .replace("{{FLOW}}", html.escape(target_flow))
+        .replace("{{PHASE}}", "live")
+        .replace("{{VERSION}}", getattr(core, "WB_VERSION", "0.1.0"))
+        .replace("{{INITIAL_DATA_JSON}}", initial_json)
+    )
+
+
 # --------------------------------------------------------------------------
 # FastAPI 应用工厂
 # --------------------------------------------------------------------------
@@ -254,6 +280,14 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
         docs_url="/docs",
         redoc_url=None,
     )
+
+    # 挂载前端打包静态资源目录 (/assets)
+    frontend_dist_dir = _FRONTEND_DIST
+    frontend_assets_dir = _DIST_ASSETS
+    dist_index_file = _DIST_INDEX
+
+    if frontend_assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=str(frontend_assets_dir)), name="assets")
 
     # 统一 CORS 处理（支持所有方法与直接 OPTIONS 请求）
     @app.middleware("http")
@@ -282,10 +316,28 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
     async def value_error_handler(request: Request, exc: ValueError):
         return JSONResponse(status_code=400, content={"error": "Bad Request", "detail": str(exc)})
 
+    # 前端 SPA 页面交付 (优先 Vue 生产构建产物，无构建物时自包含模板兜底，绝不返回裸 JSON)
     @app.get("/")
     @app.get("/index.html")
+    async def serve_dashboard_ui(flow: str | None = Query(None)):
+        if dist_index_file.is_file():
+            return FileResponse(str(dist_index_file), media_type="text/html")
+        current_flow = flow or (core.read_current_flow(actual_root) if getattr(core, "read_current_flow", None) else "main")
+        fallback_html = render_live_fallback_html(actual_root, target_flow=current_flow)
+        return HTMLResponse(content=fallback_html, status_code=200)
+
+    # 根静态文件友好处理 (如 favicon / vite.svg 等，避免控制台刷屏 404)
+    @app.get("/vite.svg")
+    @app.get("/favicon.ico")
+    async def serve_favicon():
+        svg_file = frontend_dist_dir / "vite.svg"
+        if svg_file.is_file():
+            return FileResponse(str(svg_file), media_type="image/svg+xml")
+        return Response(status_code=204)
+
+    # API 规范与服务元数据清单
     @app.get("/api")
-    async def index():
+    async def api_info():
         return {
             "service": "wb-dashboard-api",
             "status": "online",
@@ -442,10 +494,11 @@ def create_server(
     )
 
 
-def run_server(server: DashboardServer, open_browser: bool = False) -> None:
+def run_server(server: DashboardServer, open_browser: bool = False, flow: str | None = None) -> None:
     """启动看板 Web 服务与文件变动轮询。"""
     host, port = server.server_address
     url = f"http://{host}:{port}"
+    open_url = f"{url}/?flow={flow}" if flow else url
     if not server.quiet:
         sys.stdout.write(f"\n=======================================================\n")
         sys.stdout.write(f" 🚀 Workbench Dashboard (FastAPI) 已启动: {url}\n")
@@ -456,7 +509,7 @@ def run_server(server: DashboardServer, open_browser: bool = False) -> None:
 
     server.watcher.start()
     if open_browser:
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.5, lambda: webbrowser.open(open_url)).start()
 
     try:
         server.serve_forever()
@@ -625,7 +678,7 @@ def main() -> None:
         quiet=args.quiet,
         poll_interval=args.poll_interval,
     )
-    run_server(server, open_browser=args.open)
+    run_server(server, open_browser=args.open, flow=args.flow)
 
 
 if __name__ == "__main__":

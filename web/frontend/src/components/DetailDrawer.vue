@@ -15,6 +15,8 @@ import {
   ArrowRight,
   Shield,
   Info,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-vue-next'
 import { renderMarkdown } from '../composables/useMarkdown.js'
 
@@ -27,6 +29,26 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close', 'switch-tab', 'focus-task'])
+
+const expandedFiles = ref(new Set())
+
+const toggleFileDiff = (file) => {
+  const s = new Set(expandedFiles.value)
+  if (s.has(file)) {
+    s.delete(file)
+  } else {
+    s.add(file)
+  }
+  expandedFiles.value = s
+}
+
+const getDiffLineClass = (line) => {
+  if (line.startsWith('+++') || line.startsWith('---')) return 'diff-meta'
+  if (line.startsWith('+')) return 'diff-add'
+  if (line.startsWith('-')) return 'diff-del'
+  if (line.startsWith('@@')) return 'diff-hunk'
+  return 'diff-ctx'
+}
 
 const downstreamTasks = computed(() => {
   if (!props.taskNode?.id || !props.allTasks?.length) return []
@@ -216,6 +238,13 @@ const renderedRawVerification = computed(() => {
             <FolderGit2 :size="13" />
             <span>代码改动</span>
             <span class="tab-badge mono">{{ taskDetail?.artifacts?.length || (taskDetail?.write_scopes?.length ? `${taskDetail.write_scopes.length} 声明` : 0) }}</span>
+            <span
+              v-if="taskDetail?.diff_summary && (taskDetail.diff_summary.additions || taskDetail.diff_summary.deletions)"
+              class="diff-summary-pill mono"
+            >
+              <span v-if="taskDetail.diff_summary.additions" class="diff-add-tag">+{{ taskDetail.diff_summary.additions }}</span>
+              <span v-if="taskDetail.diff_summary.deletions" class="diff-del-tag">-{{ taskDetail.diff_summary.deletions }}</span>
+            </span>
           </button>
           <button
             :class="['drawer-tab-btn', { active: activeTab === 'ver' }]"
@@ -252,38 +281,146 @@ const renderedRawVerification = computed(() => {
                   </div>
                   <span class="tab-badge mono">{{ files.length }}</span>
                 </div>
-                <div v-for="file in files" :key="file" class="file-item">
-                  <div class="file-item-left">
-                    <FileCode :size="12" class="file-icon" />
-                    <span class="file-path mono" :title="file">{{ file }}</span>
-                  </div>
-                  <button
-                    :class="['btn btn-sm copy-btn', { copied: copiedKey === file }]"
-                    @click="copyText(file, file)"
-                    title="复制文件路径"
+                <div v-for="file in files" :key="file" class="file-card">
+                  <div
+                    :class="['file-item', { clickable: !!taskDetail?.diffs?.[file] }]"
+                    @click="taskDetail?.diffs?.[file] && toggleFileDiff(file)"
                   >
-                    <Check v-if="copiedKey === file" :size="11" />
-                    <Copy v-else :size="11" />
-                    <span>{{ copiedKey === file ? '已复制' : '复制' }}</span>
-                  </button>
+                    <div class="file-item-left">
+                      <button
+                        v-if="taskDetail?.diffs?.[file]"
+                        class="toggle-diff-btn"
+                        :title="expandedFiles.has(file) ? '收起 Diff' : '展开查看 Diff'"
+                        @click.stop="toggleFileDiff(file)"
+                      >
+                        <ChevronDown v-if="expandedFiles.has(file)" :size="12" />
+                        <ChevronRight v-else :size="12" />
+                      </button>
+                      <FileCode :size="12" class="file-icon" />
+                      <span class="file-path mono" :title="file">{{ file }}</span>
+                      <span
+                        v-if="taskDetail?.diffs?.[file]?.status"
+                        :class="['status-tag mono', taskDetail.diffs[file].status]"
+                      >
+                        {{ taskDetail.diffs[file].status === 'added' ? 'A' : (taskDetail.diffs[file].status === 'deleted' ? 'D' : 'M') }}
+                      </span>
+                      <span v-if="taskDetail?.diffs?.[file]" class="file-diff-stats mono">
+                        <span v-if="taskDetail.diffs[file].additions" class="diff-add-tag">+{{ taskDetail.diffs[file].additions }}</span>
+                        <span v-if="taskDetail.diffs[file].deletions" class="diff-del-tag">-{{ taskDetail.diffs[file].deletions }}</span>
+                      </span>
+                    </div>
+                    <div class="file-item-actions">
+                      <button
+                        v-if="taskDetail?.diffs?.[file]?.diff"
+                        :class="['btn btn-sm copy-btn', { copied: copiedKey === `diff-${file}` }]"
+                        @click.stop="copyText(taskDetail.diffs[file].diff, `diff-${file}`)"
+                        title="复制该文件 Diff"
+                      >
+                        <Check v-if="copiedKey === `diff-${file}`" :size="11" />
+                        <Copy v-else :size="11" />
+                        <span>{{ copiedKey === `diff-${file}` ? '已复制 Diff' : '复制 Diff' }}</span>
+                      </button>
+                      <button
+                        :class="['btn btn-sm copy-btn', { copied: copiedKey === file }]"
+                        @click.stop="copyText(file, file)"
+                        title="复制文件路径"
+                      >
+                        <Check v-if="copiedKey === file" :size="11" />
+                        <Copy v-else :size="11" />
+                        <span>{{ copiedKey === file ? '已复制' : '复制' }}</span>
+                      </button>
+                    </div>
+                  </div>
+                  <!-- 展开的代码 Diff 视窗 -->
+                  <div
+                    v-if="taskDetail?.diffs?.[file] && expandedFiles.has(file)"
+                    class="diff-view-panel"
+                  >
+                    <div v-if="taskDetail.diffs[file].diff" class="diff-code-wrapper mono">
+                      <div
+                        v-for="(dline, lidx) in taskDetail.diffs[file].diff.split('\n')"
+                        :key="lidx"
+                        :class="['diff-line', getDiffLineClass(dline)]"
+                      >
+                        <span class="diff-line-content">{{ dline }}</span>
+                      </div>
+                    </div>
+                    <div v-else class="diff-empty-hint text-muted">
+                      无文本变动（空变更或二进制文件）
+                    </div>
+                  </div>
                 </div>
               </div>
             </template>
             <template v-else-if="taskDetail?.artifacts?.length > 0">
-              <div v-for="file in taskDetail.artifacts" :key="file" class="file-item">
-                <div class="file-item-left">
-                  <FileCode :size="12" class="file-icon" />
-                  <span class="file-path mono" :title="file">{{ file }}</span>
-                </div>
-                <button
-                  :class="['btn btn-sm copy-btn', { copied: copiedKey === file }]"
-                  @click="copyText(file, file)"
-                  title="复制文件路径"
+              <div v-for="file in taskDetail.artifacts" :key="file" class="file-card">
+                <div
+                  :class="['file-item', { clickable: !!taskDetail?.diffs?.[file] }]"
+                  @click="taskDetail?.diffs?.[file] && toggleFileDiff(file)"
                 >
-                  <Check v-if="copiedKey === file" :size="11" />
-                  <Copy v-else :size="11" />
-                  <span>{{ copiedKey === file ? '已复制' : '复制' }}</span>
-                </button>
+                  <div class="file-item-left">
+                    <button
+                      v-if="taskDetail?.diffs?.[file]"
+                      class="toggle-diff-btn"
+                      :title="expandedFiles.has(file) ? '收起 Diff' : '展开查看 Diff'"
+                      @click.stop="toggleFileDiff(file)"
+                    >
+                      <ChevronDown v-if="expandedFiles.has(file)" :size="12" />
+                      <ChevronRight v-else :size="12" />
+                    </button>
+                    <FileCode :size="12" class="file-icon" />
+                    <span class="file-path mono" :title="file">{{ file }}</span>
+                    <span
+                      v-if="taskDetail?.diffs?.[file]?.status"
+                      :class="['status-tag mono', taskDetail.diffs[file].status]"
+                    >
+                      {{ taskDetail.diffs[file].status === 'added' ? 'A' : (taskDetail.diffs[file].status === 'deleted' ? 'D' : 'M') }}
+                    </span>
+                    <span v-if="taskDetail?.diffs?.[file]" class="file-diff-stats mono">
+                      <span v-if="taskDetail.diffs[file].additions" class="diff-add-tag">+{{ taskDetail.diffs[file].additions }}</span>
+                      <span v-if="taskDetail.diffs[file].deletions" class="diff-del-tag">-{{ taskDetail.diffs[file].deletions }}</span>
+                    </span>
+                  </div>
+                  <div class="file-item-actions">
+                    <button
+                      v-if="taskDetail?.diffs?.[file]?.diff"
+                      :class="['btn btn-sm copy-btn', { copied: copiedKey === `diff-${file}` }]"
+                      @click.stop="copyText(taskDetail.diffs[file].diff, `diff-${file}`)"
+                      title="复制该文件 Diff"
+                    >
+                      <Check v-if="copiedKey === `diff-${file}`" :size="11" />
+                      <Copy v-else :size="11" />
+                      <span>{{ copiedKey === `diff-${file}` ? '已复制 Diff' : '复制 Diff' }}</span>
+                    </button>
+                    <button
+                      :class="['btn btn-sm copy-btn', { copied: copiedKey === file }]"
+                      @click.stop="copyText(file, file)"
+                      title="复制文件路径"
+                    >
+                      <Check v-if="copiedKey === file" :size="11" />
+                      <Copy v-else :size="11" />
+                      <span>{{ copiedKey === file ? '已复制' : '复制' }}</span>
+                    </button>
+                  </div>
+                </div>
+                <!-- 展开的代码 Diff 视窗 -->
+                <div
+                  v-if="taskDetail?.diffs?.[file] && expandedFiles.has(file)"
+                  class="diff-view-panel"
+                >
+                  <div v-if="taskDetail.diffs[file].diff" class="diff-code-wrapper mono">
+                    <div
+                      v-for="(dline, lidx) in taskDetail.diffs[file].diff.split('\n')"
+                      :key="lidx"
+                      :class="['diff-line', getDiffLineClass(dline)]"
+                    >
+                      <span class="diff-line-content">{{ dline }}</span>
+                    </div>
+                  </div>
+                  <div v-else class="diff-empty-hint text-muted">
+                    无文本变动（空变更或二进制文件）
+                  </div>
+                </div>
               </div>
             </template>
             <template v-else-if="taskDetail?.write_scopes && taskDetail.write_scopes.length > 0">
@@ -851,17 +988,149 @@ const renderedRawVerification = computed(() => {
   flex-shrink: 0;
 }
 
+.file-card {
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.file-card:last-child {
+  border-bottom: none;
+}
+
 .file-item {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 5px 10px;
-  border-bottom: 1px solid var(--border-subtle);
   gap: 8px;
+  transition: background-color 0.15s ease;
 }
 
-.file-item:last-child {
-  border-bottom: none;
+.file-item.clickable {
+  cursor: pointer;
+}
+
+.file-item.clickable:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.toggle-diff-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.toggle-diff-btn:hover {
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.12);
+}
+
+.file-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.status-tag {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  line-height: 1.1;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.status-tag.added {
+  background: rgba(63, 185, 80, 0.18);
+  color: #7ee787;
+  border: 1px solid rgba(63, 185, 80, 0.35);
+}
+
+.status-tag.modified {
+  background: rgba(210, 153, 34, 0.18);
+  color: #e3b341;
+  border: 1px solid rgba(210, 153, 34, 0.35);
+}
+
+.status-tag.deleted {
+  background: rgba(248, 81, 73, 0.18);
+  color: #f85149;
+  border: 1px solid rgba(248, 81, 73, 0.35);
+}
+
+.file-diff-stats, .diff-summary-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.diff-add-tag {
+  color: #7ee787;
+}
+
+.diff-del-tag {
+  color: #f85149;
+}
+
+.diff-view-panel {
+  background: #05080c;
+  border-top: 1px solid var(--border-subtle);
+  overflow-x: auto;
+}
+
+.diff-code-wrapper {
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 6px 0;
+}
+
+.diff-line {
+  padding: 1px 12px;
+  white-space: pre;
+  font-family: var(--font-mono);
+}
+
+.diff-line.diff-add {
+  background: rgba(63, 185, 80, 0.14);
+  color: #7ee787;
+}
+
+.diff-line.diff-del {
+  background: rgba(248, 81, 73, 0.14);
+  color: #ffa198;
+}
+
+.diff-line.diff-hunk {
+  background: rgba(56, 139, 253, 0.12);
+  color: #79c0ff;
+  font-weight: 500;
+}
+
+.diff-line.diff-meta {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.diff-line.diff-ctx {
+  color: var(--text-secondary);
+}
+
+.diff-empty-hint {
+  padding: 12px;
+  font-size: 11px;
+  text-align: center;
+  font-style: italic;
 }
 
 .file-item-left {
