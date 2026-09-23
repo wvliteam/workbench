@@ -15,6 +15,7 @@ import argparse
 import asyncio
 import html
 import json
+import mimetypes
 import os
 import queue
 import re
@@ -357,7 +358,8 @@ def create_app(root: Path, watcher: StateWatcher | None = None) -> FastAPI:
             return JSONResponse(status_code=403, content={"error": "Forbidden", "detail": "Path traversal detected"})
         if not vendor_file.is_file():
             return JSONResponse(status_code=404, content={"error": f"Vendor file '{filename}' not found"})
-        return Response(content=vendor_file.read_bytes(), media_type="application/javascript; charset=utf-8")
+        media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        return Response(content=vendor_file.read_bytes(), media_type=media_type)
 
     # API 规范与服务元数据清单
     @app.get("/api")
@@ -697,6 +699,7 @@ def export_static_dashboard(
     cytoscape_file = vendor_dir / "cytoscape.min.js"
     dagre_file = vendor_dir / "dagre.min.js"
     cytoscape_dagre_file = vendor_dir / "cytoscape-dagre.min.js"
+    bootstrap_css_file = vendor_dir / "bootstrap.purged.css"
     marked_code = marked_file.read_text(encoding="utf-8") if marked_file.is_file() else ""
     prism_code = prism_file.read_text(encoding="utf-8") if prism_file.is_file() else ""
     diff_code = diff_file.read_text(encoding="utf-8") if diff_file.is_file() else ""
@@ -705,6 +708,7 @@ def export_static_dashboard(
     cytoscape_code = cytoscape_file.read_text(encoding="utf-8") if cytoscape_file.is_file() else ""
     dagre_code = dagre_file.read_text(encoding="utf-8") if dagre_file.is_file() else ""
     cytoscape_dagre_code = cytoscape_dagre_file.read_text(encoding="utf-8") if cytoscape_dagre_file.is_file() else ""
+    bootstrap_css = bootstrap_css_file.read_text(encoding="utf-8") if bootstrap_css_file.is_file() else ""
 
     html_content = (
         DASHBOARD_HTML_TEMPLATE
@@ -761,6 +765,12 @@ def export_static_dashboard(
         html_content = re.sub(
             r'<script\s+src=["\x27](?:/vendor/|vendor/)cytoscape-dagre\.min\.js["\x27]>\s*</script>',
             lambda _: f'<script id="__VENDOR_CYTOSCAPE_DAGRE__">\n{cytoscape_dagre_code}\n</script>',
+            html_content,
+        )
+    if bootstrap_css:
+        html_content = re.sub(
+            r'<link\s+[^>]*href=["\x27](?:/vendor/|vendor/)bootstrap\.purged\.css["\x27][^>]*>',
+            lambda _: f'<style id="__VENDOR_BOOTSTRAP_CSS__">\n{bootstrap_css}\n</style>',
             html_content,
         )
 

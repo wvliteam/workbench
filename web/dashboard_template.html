@@ -1,10 +1,11 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-bs-theme="dark">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Workbench Dashboard - {{PROJECT}}</title>
     <script id="__INITIAL_DATA__" type="application/json">{{INITIAL_DATA_JSON}}</script>
+    <link rel="stylesheet" href="vendor/bootstrap.purged.css">
     <style>
         :root {
             --bg: #090d13;
@@ -69,10 +70,10 @@
             }
         }
 
-        .btn:active, .filter-btn:active, .drawer-tab-btn:active, .console-tab-btn:active, .dep-pill:active {
+        .btn:active, .drawer-tab-btn:active, .console-tab-btn:active, .dep-pill:active {
             transform: scale(0.98);
         }
-        .btn:focus-visible, .filter-btn:focus-visible, .select-input:focus-visible, .drawer-tab-btn:focus-visible, .console-tab-btn:focus-visible {
+        .btn:focus-visible, .form-select:focus-visible, .form-control:focus-visible, .drawer-tab-btn:focus-visible, .console-tab-btn:focus-visible {
             outline: 2px solid var(--accent);
             outline-offset: 1px;
         }
@@ -139,17 +140,7 @@
             height: 20px;
             color: var(--accent);
         }
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 2px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: 500;
-            background: rgba(88, 166, 255, 0.1);
-            color: var(--accent);
-            border: 1px solid rgba(88, 166, 255, 0.25);
-        }
+        /* Badge 版本与特定微调 */
         .badge-version {
             font-family: var(--font-mono);
             background: rgba(110, 118, 129, 0.15);
@@ -176,7 +167,8 @@
             color: var(--text-muted);
             font-family: var(--font-mono);
         }
-        .select-input {
+        /* 表单选择器微调 (继承 Bootstrap 5.3 form-select 并适配暗色) */
+        .form-select {
             background: transparent;
             color: var(--text-heading);
             border: none;
@@ -186,8 +178,16 @@
             font-weight: 600;
             cursor: pointer;
             padding-right: 4px;
+            display: inline-block;
+            background-color: transparent;
+            border-radius: 4px;
+            line-height: 1.4;
         }
-        .select-input option {
+        .form-select-sm {
+            font-size: 11px;
+            padding: 2px 6px;
+        }
+        .form-select option {
             background: var(--bg-surface);
             color: var(--text);
         }
@@ -239,24 +239,21 @@
             background: var(--danger);
             box-shadow: 0 0 6px var(--danger);
         }
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 4px;
-            padding: 4px 10px;
-            border-radius: 4px;
-            border: 1px solid var(--border);
+        /* 按钮暗色工业风微调 (继承 Bootstrap 5.3 btn 规范) */
+        .btn-outline-secondary {
             background: #151b26;
             color: var(--text);
-            font-size: 12px;
-            cursor: pointer;
-            transition: all 0.15s ease;
+            border-color: var(--border);
         }
-        .btn:hover {
+        .btn-outline-secondary:hover {
             background: #1c2433;
             color: var(--text-heading);
             border-color: #344054;
+        }
+        .btn-outline-secondary:active, .btn-outline-secondary.active {
+            background: #1e283d;
+            color: var(--text-heading);
+            border-color: var(--accent);
         }
 
         /* 六阶段 Pipeline 进度阶梯卡片 */
@@ -398,14 +395,11 @@
         .progress-bar-bg {
             width: 80px;
             height: 6px;
-            background: #1c2333;
-            border-radius: 3px;
-            overflow: hidden;
+            background-color: #1c2333;
         }
         .progress-bar-fill {
             height: 100%;
             background: var(--success);
-            border-radius: 3px;
             transition: width 0.3s ease;
         }
         .progress-percent {
@@ -427,30 +421,121 @@
             gap: 12px;
         }
         .filter-group {
-            display: flex;
             background: #111622;
-            border: 1px solid var(--border);
-            border-radius: 4px;
-            overflow: hidden;
         }
         .filter-btn {
-            padding: 3px 8px;
+            font-size: 11px;
+        }
+        .filter-btn.active {
+            font-weight: 600;
+        }
+
+        /* 任务检索输入组 (Bootstrap input-group 适配) */
+        .search-task-container {
+            position: relative;
+            display: flex;
+            align-items: center;
+            width: 210px;
+        }
+        .search-icon {
+            position: absolute;
+            left: 8px;
+            color: var(--text-muted);
+            pointer-events: none;
+            z-index: 4;
+        }
+        .search-task-input {
+            padding-left: 26px !important;
+            padding-right: 32px !important;
+            height: 26px;
+            background: #111622 !important;
+            color: var(--text-heading) !important;
+            border: 1px solid var(--border) !important;
+            font-size: 11px !important;
+        }
+        .search-task-input:focus {
+            background: #141b2b !important;
+            border-color: var(--accent) !important;
+            outline: none !important;
+            box-shadow: 0 0 0 1px var(--accent) !important;
+        }
+        .search-kbd {
+            position: absolute;
+            right: 6px;
+            background: #1c2433;
+            color: var(--text-muted);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 0 4px;
+            font-size: 10px;
+            font-family: var(--font-mono);
+            pointer-events: none;
+            z-index: 4;
+        }
+        .search-clear-btn {
+            position: absolute;
+            right: 6px;
             background: transparent;
             border: none;
             color: var(--text-muted);
-            font-size: 11px;
             cursor: pointer;
-            transition: all 0.15s;
+            font-size: 11px;
+            padding: 2px 4px;
+            line-height: 1;
+            z-index: 4;
         }
-        .filter-btn:hover {
+        .search-clear-btn:hover {
             color: var(--text-heading);
-            background: #182030;
         }
-        .filter-btn.active {
-            color: var(--text-heading);
-            background: #1e283d;
-            font-weight: 600;
+        .search-results-dropdown {
+            position: absolute;
+            top: calc(100% + 4px);
+            left: 0;
+            right: 0;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.6);
+            max-height: 280px;
+            overflow-y: auto;
+            z-index: 100;
         }
+        .search-result-item {
+            padding: 6px 10px;
+            border-bottom: 1px solid var(--border-subtle);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 11.5px;
+            transition: background 0.15s;
+        }
+        .search-result-item:hover {
+            background: var(--bg-card-hover);
+        }
+        .search-result-item:last-child {
+            border-bottom: none;
+        }
+        .search-item-id {
+            font-family: var(--font-mono);
+            font-weight: 700;
+            color: var(--accent);
+            margin-right: 6px;
+        }
+        .search-item-title {
+            color: var(--text);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 140px;
+        }
+        .search-empty-item {
+            padding: 8px 10px;
+            color: var(--text-muted);
+            text-align: center;
+            font-size: 11px;
+        }
+
         .canvas-controls {
             display: flex;
             align-items: center;
@@ -665,11 +750,59 @@
             transform: translate(-50%, -50%);
             text-align: center;
             color: var(--text-muted);
-            pointer-events: none;
+            pointer-events: auto;
+            max-width: 460px;
+            width: 90%;
+            padding: 28px 32px;
+            background: rgba(18, 24, 36, 0.92);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            box-shadow: 0 16px 36px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(10px);
+            z-index: 10;
         }
         .empty-icon {
-            font-size: 40px;
-            margin-bottom: 8px;
+            margin: 0 auto 14px auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 56px;
+            height: 56px;
+            background: rgba(88, 166, 255, 0.08);
+            border: 1px solid rgba(88, 166, 255, 0.18);
+            border-radius: 12px;
+        }
+        .empty-title {
+            color: var(--text-heading);
+            font-size: 15px;
+            font-weight: 600;
+            margin-bottom: 6px;
+        }
+        .empty-subtitle {
+            color: var(--text-muted);
+            font-size: 12px;
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+        .empty-action-box {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            background: #090d14;
+            border: 1px solid var(--border-subtle);
+            border-radius: 6px;
+            padding: 6px 10px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            text-align: left;
+        }
+        .empty-cmd-code {
+            color: var(--accent);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            flex: 1;
         }
 
         /* 侧边执行细节抽屉 */
@@ -1332,9 +1465,46 @@
         }
         .empty-tab-state {
             color: var(--text-muted);
-            padding: 24px 12px;
+            padding: 36px 16px;
             text-align: center;
             font-size: 12px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+        .empty-tab-icon {
+            color: var(--text-muted);
+            opacity: 0.55;
+            margin-bottom: 2px;
+        }
+        .empty-tab-title {
+            color: var(--text-heading);
+            font-weight: 600;
+            font-size: 13px;
+        }
+        .empty-tab-desc {
+            color: var(--text-muted);
+            font-size: 11px;
+            max-width: 320px;
+            line-height: 1.5;
+        }
+        .empty-tab-desc code {
+            color: var(--accent);
+            background: #161d2b;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+        /* 骨架屏暗色工业风微调 */
+        .terminal-skeleton .placeholder {
+            background-color: #242e3f;
+            border-radius: 2px;
+            display: block;
+        }
+        .card-skeleton .placeholder {
+            background-color: #202b3d;
+            border-radius: 3px;
         }
 
         /* 底部折叠多功能控制台 */
@@ -1846,19 +2016,19 @@
                 </svg>
                 <span>Workbench Dashboard</span>
             </div>
-            <span class="badge" id="header-project">{{PROJECT}}</span>
-            <span class="badge badge-version" id="header-version">v{{VERSION}}</span>
-            <span class="badge" id="header-static-badge" style="display: none; background: rgba(56, 139, 253, 0.15); color: var(--accent); border-color: rgba(56, 139, 253, 0.4);"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" style="margin-right: 4px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg><span>静态快照</span></span>
+            <span class="badge rounded-pill bg-primary-subtle text-primary border border-primary-subtle" id="header-project">{{PROJECT}}</span>
+            <span class="badge rounded-pill bg-secondary-subtle text-secondary-emphasis border border-secondary-subtle badge-version" id="header-version">v{{VERSION}}</span>
+            <span class="badge rounded-pill bg-info-subtle text-info border border-info-subtle" id="header-static-badge" style="display: none; background: rgba(56, 139, 253, 0.15); color: var(--accent); border-color: rgba(56, 139, 253, 0.4);"><svg class="ui-icon" width="12" height="12" viewBox="0 0 24 24" style="margin-right: 4px;"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg><span>静态快照</span></span>
         </div>
 
         <div class="header-center">
             <div class="flow-selector-wrapper">
                 <span class="selector-label">FLOW:</span>
-                <select id="flow-select" class="select-input" title="切换需求线 Flow">
+                <select id="flow-select" class="form-select form-select-sm" title="切换需求线 Flow">
                     <option value="{{FLOW}}">{{FLOW}}</option>
                 </select>
             </div>
-            <div id="role-guard-badge" class="role-guard-badge warning">守卫检测中...</div>
+            <div id="role-guard-badge" class="badge role-guard-badge warning">守卫检测中...</div>
         </div>
 
         <div class="header-right">
@@ -1866,7 +2036,7 @@
                 <span class="pulse-dot" id="sse-dot"></span>
                 <span class="sse-text" id="sse-text">Live SSE</span>
             </div>
-            <button class="btn" id="btn-refresh" title="立即刷新数据">
+            <button class="btn btn-sm btn-outline-secondary" id="btn-refresh" title="立即刷新数据">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                     <path d="M23 4v6h-6"></path>
                     <path d="M1 20v-6h6"></path>
@@ -1892,43 +2062,43 @@
             <div class="stat-item"><span>进行中:</span> <strong id="stat-doing" class="text-warning">0</strong></div>
             <div class="stat-item"><span>阻断:</span> <strong id="stat-blocked" class="text-danger">0</strong></div>
             <div class="stat-progress">
-                <div class="progress-bar-bg">
-                    <div class="progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
+                <div class="progress progress-bar-bg" role="progressbar" aria-label="Task progress" style="height: 6px; width: 80px;">
+                    <div class="progress-bar progress-bar-fill" id="progress-bar-fill" style="width: 0%;"></div>
                 </div>
                 <span class="progress-percent" id="stat-progress-text">0%</span>
             </div>
-            <div id="unconfigured-warning" class="unconfigured-pill" style="display: none;"></div>
+            <div id="unconfigured-warning" class="alert alert-warning py-0 px-2 unconfigured-pill mb-0" role="alert" style="display: none;"></div>
         </div>
 
         <div class="toolbar-actions">
-            <!-- 状态过滤胶囊 -->
-            <div class="filter-group">
-                <button class="filter-btn active" data-filter="all">全部</button>
-                <button class="filter-btn" data-filter="doing">进行中</button>
-                <button class="filter-btn" data-filter="done">已完成</button>
-                <button class="filter-btn" data-filter="blocked">阻断</button>
-                <button class="filter-btn" data-filter="todo">待处理</button>
+            <!-- 状态过滤胶囊 (Bootstrap btn-group 规范) -->
+            <div class="btn-group btn-group-sm filter-group" role="group" aria-label="Task status filter">
+                <button class="btn btn-sm btn-outline-secondary filter-btn active" data-filter="all">全部</button>
+                <button class="btn btn-sm btn-outline-secondary filter-btn" data-filter="doing">进行中</button>
+                <button class="btn btn-sm btn-outline-secondary filter-btn" data-filter="done">已完成</button>
+                <button class="btn btn-sm btn-outline-secondary filter-btn" data-filter="blocked">阻断</button>
+                <button class="btn btn-sm btn-outline-secondary filter-btn" data-filter="todo">待处理</button>
             </div>
 
-            <!-- 全局任务模糊检索 (Fuse.js) -->
-            <div class="search-task-container" id="search-task-container">
+            <!-- 全局任务模糊检索 (Fuse.js + Bootstrap input-group) -->
+            <div class="input-group input-group-sm search-task-container" id="search-task-container">
                 <svg class="search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                     <circle cx="11" cy="11" r="8"></circle>
                     <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                 </svg>
-                <input type="text" id="search-task-input" class="search-task-input" placeholder="搜索任务... (Cmd+K)" autocomplete="off" spellcheck="false" />
+                <input type="text" id="search-task-input" class="form-control form-control-sm search-task-input" placeholder="搜索任务... (Cmd+K)" autocomplete="off" spellcheck="false" />
                 <kbd class="search-kbd" id="search-kbd-hint">⌘K</kbd>
                 <button id="search-clear-btn" class="search-clear-btn" style="display: none;" title="清空搜索">✕</button>
                 <div id="search-results-dropdown" class="search-results-dropdown" style="display: none;"></div>
             </div>
 
-            <!-- 画布平移与缩放按钮 -->
-            <div class="canvas-controls">
-                <button class="btn btn-icon" id="btn-zoom-out" title="缩小 (-)">−</button>
+            <!-- 画布平移与缩放按钮 (Bootstrap btn-group) -->
+            <div class="canvas-controls btn-group btn-group-sm" role="group" aria-label="Canvas zoom and view controls">
+                <button class="btn btn-sm btn-outline-secondary btn-icon" id="btn-zoom-out" title="缩小 (-)">−</button>
                 <span class="zoom-level" id="zoom-level-text">100%</span>
-                <button class="btn btn-icon" id="btn-zoom-in" title="放大 (+)">+</button>
-                <button class="btn btn-control" id="btn-fit-view" title="居中自适应全部任务 (F)">⛶ 自适应</button>
-                <button class="btn btn-control" id="btn-reset-view" title="重置视角 (0)">↺ 重置</button>
+                <button class="btn btn-sm btn-outline-secondary btn-icon" id="btn-zoom-in" title="放大 (+)">+</button>
+                <button class="btn btn-sm btn-outline-secondary btn-control" id="btn-fit-view" title="居中自适应全部任务 (F)">⛶ 自适应</button>
+                <button class="btn btn-sm btn-outline-secondary btn-control" id="btn-reset-view" title="重置视角 (0)">↺ 重置</button>
             </div>
         </div>
     </div>
@@ -1939,9 +2109,18 @@
 
         <!-- 任务为空时的引导占位 -->
         <div id="canvas-empty" class="canvas-empty-state" style="display: none;">
-            <div class="empty-icon"><svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="color: var(--text-muted);"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg></div>
-            <h3 style="color: var(--text-heading); margin-bottom: 4px;">当前 Flow 暂无任务</h3>
-            <p>该流水线尚未生成任务，可通过 <code>wb.py task add</code> 添加任务或启动流程。</p>
+            <div class="empty-icon">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" style="color: var(--accent);">
+                    <rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect>
+                    <path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path>
+                </svg>
+            </div>
+            <h3 class="empty-title">当前 Flow 暂无任务</h3>
+            <p class="empty-subtitle">该流水线尚未生成任务拓扑。可通过命令行直接添加或启动流程：</p>
+            <div class="empty-action-box">
+                <code class="empty-cmd-code">wb.py task add --title "新任务" --role backend-developer</code>
+                <button class="btn btn-sm btn-outline-secondary copy-btn-sm" onclick="copyText('wb.py task add --title &quot;新任务&quot; --role backend-developer', this)">复制</button>
+            </div>
         </div>
 
         <!-- 底部折叠多功能控制台开关 -->
@@ -1980,8 +2159,8 @@
                     </button>
                 </div>
                 <div class="console-header-actions">
-                    <button class="btn btn-control" id="btn-expand-dev" title="切换高度 (540px / 280px)">⛶ 展开</button>
-                    <button class="btn btn-control" id="btn-close-dev" title="收起控制台 (Esc)">收起 ✕</button>
+                    <button class="btn btn-sm btn-outline-secondary btn-control" id="btn-expand-dev" title="切换高度 (540px / 280px)">⛶ 展开</button>
+                    <button class="btn btn-sm btn-outline-secondary btn-control" id="btn-close-dev" title="收起控制台 (Esc)">收起 ✕</button>
                 </div>
             </div>
 
@@ -1991,7 +2170,7 @@
                     <div class="console-toolbar">
                         <div class="toolbar-left">
                             <span class="toolbar-label">门禁命令:</span>
-                            <select id="gate-select" class="select-input select-sm">
+                            <select id="gate-select" class="form-select form-select-sm">
                                 <option value="test">test (测试)</option>
                                 <option value="lint">lint (语法检查)</option>
                                 <option value="build">build (构建验证)</option>
@@ -2000,13 +2179,21 @@
                             <span id="gate-status-pill" class="status-pill"></span>
                         </div>
                         <div class="toolbar-right">
-                            <button id="btn-refresh-gate" class="btn btn-sm" title="重新获取当前门禁日志">↺ 刷新</button>
-                            <button id="btn-copy-gate" class="btn btn-sm" title="复制全量日志"><svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" style="margin-right: 3px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>复制</button>
-                            <button id="btn-scroll-bottom" class="btn btn-sm" title="滚至底部">⬇ 到底部</button>
+                            <button id="btn-refresh-gate" class="btn btn-sm btn-outline-secondary" title="重新获取当前门禁日志">↺ 刷新</button>
+                            <button id="btn-copy-gate" class="btn btn-sm btn-outline-secondary" title="复制全量日志"><svg class="ui-icon" width="11" height="11" viewBox="0 0 24 24" style="margin-right: 3px;"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>复制</button>
+                            <button id="btn-scroll-bottom" class="btn btn-sm btn-outline-secondary" title="滚至底部">⬇ 到底部</button>
                         </div>
                     </div>
                     <div id="gate-log-terminal" class="terminal-container">
-                        <div class="terminal-body" id="gate-log-body">正在载入门禁日志...</div>
+                        <div class="terminal-body" id="gate-log-body">
+                            <div class="placeholder-glow terminal-skeleton" style="padding: 4px 0;">
+                                <div style="margin-bottom: 8px;"><span class="placeholder col-3" style="height: 12px;"></span></div>
+                                <div style="margin-bottom: 6px;"><span class="placeholder col-9" style="height: 10px;"></span></div>
+                                <div style="margin-bottom: 6px;"><span class="placeholder col-7" style="height: 10px;"></span></div>
+                                <div style="margin-bottom: 6px;"><span class="placeholder col-11" style="height: 10px;"></span></div>
+                                <div style="margin-bottom: 6px;"><span class="placeholder col-6" style="height: 10px;"></span></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -2018,11 +2205,23 @@
                             <span>临时解冻: <strong id="contracts-unlocked-count" class="text-warning">0</strong></span>
                             <span>争议熔断: <strong id="contracts-disputed-count" class="text-danger">0</strong></span>
                         </div>
-                        <button id="btn-refresh-contracts" class="btn btn-sm">↺ 刷新</button>
+                        <button id="btn-refresh-contracts" class="btn btn-sm btn-outline-secondary">↺ 刷新</button>
                     </div>
-                    <div id="dispute-alert-box" class="dispute-alert-banner" style="display: none;"></div>
+                    <div id="dispute-alert-box" class="alert alert-danger dispute-alert-banner" role="alert" style="display: none;"></div>
                     <div id="contracts-table-container" class="contracts-list-view">
-                        <div style="color: var(--text-muted); padding: 12px;">正在拉取契约列表...</div>
+                        <div class="placeholder-glow card-skeleton" style="display: flex; flex-direction: column; gap: 8px; padding: 12px;">
+                            <div class="contract-card" style="opacity: 0.7;">
+                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                    <span class="placeholder col-4" style="height: 14px;"></span>
+                                    <span class="placeholder col-2" style="height: 14px; border-radius: 10px;"></span>
+                                </div>
+                                <div style="display: flex; gap: 12px;">
+                                    <span class="placeholder col-3" style="height: 10px;"></span>
+                                    <span class="placeholder col-2" style="height: 10px;"></span>
+                                    <span class="placeholder col-4" style="height: 10px;"></span>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -2031,7 +2230,7 @@
                     <div class="console-toolbar">
                         <div class="toolbar-left">
                             <span class="toolbar-label">过滤事件:</span>
-                            <select id="audit-filter-select" class="select-input select-sm">
+                            <select id="audit-filter-select" class="form-select form-select-sm">
                                 <option value="all">全部事件</option>
                                 <option value="phase_">阶段流转 (phase_*)</option>
                                 <option value="task_">任务变更 (task_*)</option>
@@ -2039,16 +2238,29 @@
                                 <option value="dispute_">争议熔断 (dispute_*)</option>
                             </select>
                             <span class="toolbar-label" style="margin-left: 10px;">条数:</span>
-                            <select id="audit-limit-select" class="select-input select-sm">
+                            <select id="audit-limit-select" class="form-select form-select-sm">
                                 <option value="20">20 条</option>
                                 <option value="50" selected>50 条</option>
                                 <option value="100">100 条</option>
                             </select>
                         </div>
-                        <button id="btn-refresh-audit" class="btn btn-sm">↺ 刷新流水</button>
+                        <button id="btn-refresh-audit" class="btn btn-sm btn-outline-secondary">↺ 刷新流水</button>
                     </div>
                     <div id="audit-waterfall-list" class="audit-waterfall">
-                        <div style="color: var(--text-muted); padding: 12px;">正在加载审计流水...</div>
+                        <div class="placeholder-glow card-skeleton" style="display: flex; flex-direction: column; gap: 6px; padding: 12px;">
+                            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; border: 1px solid var(--border-subtle);">
+                                <span class="placeholder col-2" style="height: 10px;"></span>
+                                <span class="placeholder col-2" style="height: 13px; border-radius: 10px;"></span>
+                                <span class="placeholder col-5" style="height: 10px;"></span>
+                                <span class="placeholder col-2" style="height: 10px; margin-left: auto;"></span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px; padding: 6px 10px; background: rgba(255, 255, 255, 0.02); border-radius: 4px; border: 1px solid var(--border-subtle);">
+                                <span class="placeholder col-2" style="height: 10px;"></span>
+                                <span class="placeholder col-2" style="height: 13px; border-radius: 10px;"></span>
+                                <span class="placeholder col-4" style="height: 10px;"></span>
+                                <span class="placeholder col-2" style="height: 10px; margin-left: auto;"></span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -2056,10 +2268,10 @@
                 <div id="console-pane-events" class="console-pane">
                     <div class="console-toolbar">
                         <span class="toolbar-label">实时通道: /api/events (SSE)</span>
-                        <button id="btn-clear-events" class="btn btn-sm">清空事件记录</button>
+                        <button id="btn-clear-events" class="btn btn-sm btn-outline-secondary">清空事件记录</button>
                     </div>
                     <div id="event-log">
-                        <div class="log-entry">正在连接 SSE 事件流...</div>
+                        <div class="log-entry"><span class="text-muted">正在连接 SSE 实时通道...</span></div>
                     </div>
                 </div>
 
@@ -2088,7 +2300,7 @@
                 <span id="drawer-task-id" class="drawer-task-id">T1</span>
                 <span id="drawer-task-status" class="node-status-tag tag-done">DONE</span>
             </div>
-            <button id="drawer-close-btn" class="drawer-close-btn" title="关闭 (Esc)">✕</button>
+            <button id="drawer-close-btn" class="drawer-close-btn" title="关闭 (Esc)" aria-label="Close">✕</button>
         </div>
         <div class="drawer-body">
             <h2 id="drawer-task-title" class="drawer-task-title">任务标题</h2>
