@@ -1,0 +1,233 @@
+# Workbench 可视化看板 (Dashboard)
+
+Workbench 可视化看板是一套为软件开发工作台量身打造的高性能、轻量级状态透视系统。它将多需求线（Flow）、主干六阶段流水线、任务有向无环图（DAG）、契约演进历史、Subagent 现场执行笔记以及门禁 ANSI 终端日志全面可视化。
+
+---
+
+## 核心设计原则
+
+1. **前后端解耦与现代化 API 服务（Decoupled Modern API Service）**：
+   - 后端位于 `web/backend/wb_dashboard.py`，基于业界成熟的 FastAPI + Uvicorn 框架驱动，提供高性能、类型安全且规范的声明式 REST API 与 SSE 事件推送服务，自带 `/docs` 交互式 Swagger 文档。
+   - 根路径 `/`、`/index.html` 与 `/api` 统一输出标准 JSON 服务元数据及可用 API 探测清单，支持 CORS 跨域请求与预检。
+2. **独立现代化前端工程（Vue 3 + Vite SPA）**：
+   - 前端代码位于独立工程 `web/frontend/`，基于 Vue 3 组合式 API（Composition API）+ Vite 6 构建。
+   - 贯彻 Anti-Slop 工业品控准则：彻底摒弃系统 Emoji（全自研几何 SVG 图标）、几何圆角（4px/6px）、WCAG AA 高对比度、原生 `prefers-reduced-motion` 动效降级支持。
+3. **无锁只读（Zero-Lock Read-Only Safety）**：
+   - 严格以 `load_state(root, flow=flow, lock=False)` 提取主状态，彻底避免与主编排流程或并发 Subagent 竞争文件锁。
+4. **安全路径守卫（Strict Path Traversal Guard）**：
+   - 所有任务笔记、门禁日志与契约路径读取均强制经过 `safe_resolve_path(root, target)` 与 `Path.is_relative_to(root)` 校验，严防 `../` 越界读取与路径穿越。
+5. **动静两用（Dual Mode: Live SSE & Static Baking）**：
+   - **动态实时模式**：内置 SSE（Server-Sent Events）长连接通道，后台毫秒级监听 `.workbench` 关键文件变动并实时驱动前端平滑无刷重绘。
+   - **静态导出模式 (`--export`)**：基于独立模板 `web/backend/dashboard_template.html` 将所有 Flow 概览、DAG 拓扑、任务细节笔记、门禁日志、契约与审计流水预先烘焙注入单文件 HTML，断网环境下随时双击浏览或随 Git 归档。
+
+---
+
+## 核心功能组件
+
+### 1. 响应式顶部与六阶段 Pipeline 阶梯
+- **需求线切换器 (Flow Selector)**：支持在多个并行需求线（`main`、`feature-x` 等）间秒级切换。
+- **阶段进度卡片 (Phase Ladder)**：按 `clarify → analyze → design → develop → verify → retro` 顺序展示当前处于哪个阶段。已完成阶段高亮绿色，进行中阶段呈现呼吸边框与高亮。
+- **守卫状态哨兵 (Guard Status)**：实时检测是否存在全局角色范围锁（Role Lock）、契约争议熔断（Dispute Circuit-Breaker）或未认领仓库。
+
+### 2. 原生 SVG 交互式 DAG 拓扑画布
+- **拓扑分层算法**：基于任务前置依赖 `deps` 计算有向边，通过动态规划与拓扑分层算法分配任务卡片坐标深度 $L(v) = \max_{u \in deps(v)} (L(u) + 1)$。
+- **循环依赖容错**：具备环路检测机制，发现循环依赖时优雅降级并标识黄色环路告警，绝不发生死循环。
+- **节点状态视觉编码**：
+  - `done`：稳定翠绿边框，显示产出代码文件计数与阶段归属。
+  - `doing`：动态呼吸金光边框（带 CSS keyframe 动画），显示当前认领角色与剩余租约。
+  - `blocked` / `stale`：警示红色，提示阻塞原因并高亮前置依赖。
+  - `todo` / `skipped`：工业冷灰与幽灵紫徽标。
+- **交互控制**：
+  - 画布支持鼠标滚轮缩放（Zoom 0.25x ~ 2.5x）与按住平移（Pan）。
+  - 快捷键支持：`F`（适配视图适应屏幕）、`0`（重置 100% 视图）、`+` / `-`（放大/缩小）、`Esc`（收起所有抽屉）。
+  - 悬停任意任务节点，自动以渐变蓝/紫高亮其所有直接前置与后置依赖链。
+
+### 3. 执行细节侧边抽屉 (Detail Drawer)
+点击画布中任意任务节点即可唤出右侧详情抽屉，包含三个透视 Tab：
+- **Tab 1: 现场与笔记 (Notes)**：
+  - 内嵌轻量纯 JS Markdown 渲染器（支持标题、粗斜体、内联代码、表格、有序/无序列表、引用块）。
+  - 自动渲染 Subagent 现场生成的 `artifacts/<flow>/develop/tasks/<id>-<role>.md`。
+- **Tab 2: 代码改动树 (Code Changes)**：
+  - 自动按多仓库项目聚合展示当前任务修改的产品源码清单，支持一键点击复制文件路径。
+- **Tab 3: 复核依据 (Verification)**：
+  - 自动呈现编排者在 `verification.md` 中记录的人工复核命令与验证输出证据。
+
+### 4. 底部多功能控制台 (Bottom Console)
+可折叠的工业暗黑风格底栏，包含五个专属面板：
+- **门禁日志 (Gate Logs)**：
+  - 内嵌终端黑底查看器，集成轻量纯 JS ANSI 转义解析状态机，完美还原 pytest、npm test、selfcheck 终端输出中的 16 色、256 色、粗体、暗色与成功/失败提示。
+  - 支持下拉切换查看 `test`、`lint`、`build` 等不同门禁命令的原始执行日志。
+- **契约与争议 (Contracts & Disputes)**：
+  - 实时展示当前需求线已锁定的所有接口契约清单、Owner 角色、消费方列表、文件 SHA 散列及版本号。
+  - 显式高亮显示当前处于开窗解冻（Unlocked）状态的契约与申报理由，以及争议熔断（Disputed）契约。
+- **审计流水瀑布 (Audit Stream)**：
+  - 时间轴倒序流式呈现 `audit.jsonl` 中的所有流水事件（阶段推进、任务流转、契约锁定、门禁校验等）。
+- **实时事件 (Live Events)**：
+  - 呈现通过 SSE 接收到的实时文件变动事件日志。
+- **API 探测 (REST Probes)**：
+  - 提供各 REST 接口的快捷测试入口与参数说明。
+
+---
+
+## 命令行与使用指南
+
+### 1. 依赖安装 (Python Web)
+
+看板后端基于 FastAPI + Uvicorn 驱动，首次运行前请先安装依赖：
+
+```bash
+pip install -r requirements.txt
+```
+
+### 2. 工作台主命令 (`wb dashboard`)
+
+```bash
+# 启动本地看板服务（默认端口 8088）
+python3 .claude/hooks/wb.py dashboard
+
+# 启动并自动在默认浏览器中打开页面
+python3 .claude/hooks/wb.py dashboard --open
+
+# 指定自定义端口号
+python3 .claude/hooks/wb.py dashboard --port 8999
+
+# 指定查看特定的 Flow 需求线
+python3 .claude/hooks/wb.py dashboard --flow feature-b
+
+# 导出静态单文件 HTML 离线报告（不启动 Web 服务）
+python3 .claude/hooks/wb.py dashboard --export /path/to/report.html
+```
+
+### 2. 独立脚本命令 (`web/backend/wb_dashboard.py`)
+
+除 `wb.py` 转发外，也可直接运行脚本：
+
+```bash
+# 本地服务启动
+python3 web/backend/wb_dashboard.py --port 8088 --open
+
+# 导出静态单文件报告
+python3 web/backend/wb_dashboard.py --export ./artifacts/dashboard_snapshot.html
+```
+
+### 3. CLI 参数完整说明
+
+| 参数 | 默认值 | 说明 |
+| --- | --- | --- |
+| `--host` | `127.0.0.1` | 监听的主机绑定地址。 |
+| `--port` | `8088` | HTTP 服务监听的本地端口。 |
+| `--root` | 自动探测 | Workbench 工作区根目录（优先使用当前或父级含 `.workbench/` 的路径）。 |
+| `--open` | `False` | 服务启动后自动调用系统默认浏览器打开看板。 |
+| `--export <file>` | `None` | 将当前工作区完整状态烘焙为静态单文件 HTML 并退出，不启动 HTTP 服务。 |
+| `--flow <name>` | 当前 Flow | 显式指定要查看或作为默认展示的需求线 Flow。 |
+| `--quiet` | `False` | 静默模式，不输出访问日志。 |
+| `--poll-interval` | `0.5` | SSE 状态轮询线程探测 `.workbench/` 关键文件变动的周期秒数。 |
+
+---
+
+## 静态单文件烘焙机制 (`--export`)
+
+在 CI/CD 流水线构建、需求归档、阶段复盘或离线协同场景下，可生成完全自包含的静态单文件报告：
+
+1. **数据烘焙（Data Baking）**：
+   Python 后端将工作区内所有 Flow 的概览信息、任务 DAG、任务现场笔记、门禁日志、契约列表与审计流水聚合为 JSON 数据，并注入到 HTML 的 `<script id="__INITIAL_DATA__" type="application/json">` 标签中。
+2. **闭合安全防注入**：
+   在序列化过程中，自动对内容中的 `</script>` 进行安全转义（`<\/script>`），避免 HTML 解析器提前闭合脚本标签。
+3. **前端自动离线适配**：
+   前端在加载时探测到 `window.__INITIAL_DATA__`，将跳过网络 `fetch` 与 SSE `EventSource` 连接，直接使用烘焙数据即时渲染。在离线快照模式下：
+   - 顶部状态徽标显示 `📸 静态快照 (生成时间: YYYY-MM-DD HH:MM:SS)`。
+   - 依然支持切换不同 Flow、缩放与平移 DAG 画布、点击查看任务抽屉三 Tab、查看 ANSI 门禁终端日志与审计流水。
+
+---
+
+## 前端工程与开发指南 (`web/frontend/`)
+
+前端采用 Vue 3 独立工程实现，与后端 API 服务完全解耦：
+
+### 1. 本地开发流程 (Local Development)
+
+```bash
+# 终端 1：启动 Python 纯 API 服务（默认监听 8088）
+python3 web/backend/wb_dashboard.py --port 8088
+
+# 终端 2：启动 Vue 3 前端开发服务（支持毫秒级 HMR 热重载）
+cd web/frontend
+npm install    # 首次运行安装依赖 (Vue 3 + Vite)
+npm run dev    # 启动开发服务器 (默认端口 5173，自动反向代理 /api 到 127.0.0.1:8088)
+```
+
+访问 `http://localhost:5173` 即可进行前端交互开发与调试。
+
+### 2. 生产构建 (Production Build)
+
+```bash
+cd web/frontend
+npm run build
+```
+编译产物输出至 `web/frontend/dist/`，包含高度优化的单页 HTML 与资源文件。
+
+### 3. 前端工程结构与模块分工
+
+```
+web/frontend/
+├── package.json              # 声明 vue 与 vite 依赖
+├── vite.config.js            # 配置 Vue 插件与 /api 代理转发
+├── index.html                # 前端 SPA 入口
+└── src/
+    ├── main.js               # Vue 应用启动挂载
+    ├── App.vue               # 根组件，集成全局快捷键与布局协调
+    ├── assets/
+    │   └── style.css         # 工业暗黑调色盘、几何规范与 prefers-reduced-motion
+    ├── composables/
+    │   ├── useDashboardApi.js# REST 接口封装 (Overview / Tasks / Detail / Gate / Contracts / Audit)
+    │   ├── useSSE.js         # SSE 长连接、状态变动重载与生命周期管理
+    │   ├── useAnsi.js        # 纯 JS 16/256 色 ANSI 终端转义序列解析器
+    │   └── useMarkdown.js    # 轻量 Markdown 渲染器与代码复制
+    └── components/
+        ├── AppHeader.vue     # 顶部栏：Flow 切换、角色锁哨兵、SSE 指示器
+        ├── PipelineBar.vue   # 六阶段流水线进度指示阶梯
+        ├── FloatingHUD.vue   # 悬浮指标与缩放控制台 (释放 40px 垂直画布高度)
+        ├── DAGCanvas.vue     # 原生 SVG 贝塞尔拓扑图，支持祖先/后代双向依赖高亮
+        ├── DetailDrawer.vue  # 任务细节抽屉 (现场笔记 / 源码改动树 / 复核命令)
+        └── BottomConsole.vue # 多功能可折叠底栏 (ANSI 终端 / 契约争议 / 审计流水)
+```
+
+---
+
+## REST API 接口清单
+
+动态服务模式下提供以下标准 JSON REST 端点：
+
+| 端点 | 方法 | 查询参数 | 返回内容 |
+| --- | --- | --- | --- |
+| `/` 或 `/index.html` 或 `/api` | `GET` | — | 纯 API 服务的健康状态与元数据（JSON，含端点列表、当前 Flow 与版本）。 |
+| `/api/overview` | `GET` | `flow=<name>` | 当前 Flow、Flow 列表、六阶段准出进度、角色锁与契约争议状态。 |
+| `/api/tasks` | `GET` | `flow=<name>` | 经分层布局算法计算后的 DAG 节点（含坐标、宽高、深度）与有向边。 |
+| `/api/task-detail` | `GET` | `id=<TID>&flow=<name>` | 任务详细信息（现场笔记 Markdown、代码改动树、人工复核命令）。 |
+| `/api/gate-log` | `GET` | `name=<gate>&flow=<name>&format=json\|text` | 门禁执行日志原始文本或 JSON 包装。 |
+| `/api/contracts` | `GET` | `flow=<name>` | 契约清单、开窗记录与争议熔断信息。 |
+| `/api/audit` | `GET` | `flow=<name>&limit=<N>` | 审计事件流水列表。 |
+| `/api/events` | `GET` | — | SSE 实时事件流，文件变动时广播 `event: state_change`。 |
+
+---
+
+## 自动化测试与质量保障
+
+仪表板模块配备完整的全套测试矩阵（93 项测试全绿）：
+
+```bash
+# 全量测试自动发现与运行 (93 项单测)
+python3 -m unittest discover -s web/backend/tests -p "test_dashboard_*.py"
+
+# 或单独运行指定模块单测：
+python3 web/backend/tests/test_dashboard_core.py     # 核心算法与数据提取单测
+python3 web/backend/tests/test_dashboard_server.py   # FastAPI 服务与 SSE 实时事件单测
+python3 web/backend/tests/test_dashboard_ui.py       # 画布布局与状态视觉编码单测
+python3 web/backend/tests/test_dashboard_details.py  # 执行细节抽屉与 ANSI 终端状态机单测
+python3 web/backend/tests/test_dashboard_export.py   # 静态离线单文件导出单测
+python3 web/backend/tests/test_dashboard_vue.py      # Vue 3 前端工程规范、布局与 Node 运行时单测
+
+# 工作台全量全链路自检
+python3 .claude/hooks/wb.py selfcheck
+```
+

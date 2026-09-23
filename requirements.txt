@@ -1,0 +1,8 @@
+# Workbench Dashboard Python Web 服务依赖
+# 使用方法: pip install -r requirements.txt
+
+# 核心 Web 框架 (提供 REST API、SSE 实时流与 OpenAPI /docs 交互式文档)
+fastapi>=0.110.0
+
+# 生产级 ASGI 服务器 (提供异步高并发吞吐与 WebSocket/SSE 管道支持)
+uvicorn[standard]>=0.28.0

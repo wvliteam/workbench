@@ -1,0 +1,193 @@
+:root {
+  --bg-canvas: #090c10;
+  --bg-surface: #0d1117;
+  --bg-card: #161b22;
+  --bg-card-hover: #1f242c;
+  --border-subtle: #21262d;
+  --border-default: #30363d;
+  --border-focus: #58a6ff;
+
+  --text-primary: #f0f6fc;
+  --text-secondary: #c9d1d9;
+  --text-muted: #8b949e;
+
+  --accent: #58a6ff;
+  --accent-glow: rgba(88, 166, 255, 0.2);
+  --status-done: #3fb950;
+  --status-done-bg: rgba(63, 185, 80, 0.15);
+  --status-doing: #d29922;
+  --status-doing-bg: rgba(210, 153, 34, 0.15);
+  --status-blocked: #f85149;
+  --status-blocked-bg: rgba(248, 81, 73, 0.15);
+  --status-skipped: #6e7681;
+  --status-skipped-bg: rgba(110, 118, 129, 0.15);
+  --purple: #a371f7;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 按钮基础 */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-default);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-primary);
+  border-color: var(--text-muted);
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn-sm {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.btn-icon {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-weight: bold;
+}
+
+/* 下拉选择器 */
+.select-input {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  outline: none;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  cursor: pointer;
+  padding: 3px 8px;
+  transition: border-color 0.15s;
+}
+
+.select-input:hover, .select-input:focus {
+  border-color: var(--border-focus);
+}
+
+/* 状态标签徽标 */
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.2px;
+}
+
+.status-pill.done, .status-pill.pass {
+  background: var(--status-done-bg);
+  color: var(--status-done);
+  border: 1px solid rgba(63, 185, 80, 0.3);
+}
+
+.status-pill.doing {
+  background: var(--status-doing-bg);
+  color: var(--status-doing);
+  border: 1px solid rgba(210, 153, 34, 0.3);
+}
+
+.status-pill.blocked, .status-pill.stale, .status-pill.fail {
+  background: var(--status-blocked-bg);
+  color: var(--status-blocked);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+}
+
+.status-pill.skipped, .status-pill.waived {
+  background: var(--status-skipped-bg);
+  color: var(--status-skipped);
+  border: 1px solid rgba(110, 118, 129, 0.3);
+}
+
+.status-pill.todo {
+  background: rgba(110, 118, 129, 0.1);
+  color: var(--text-muted);
+  border: 1px solid var(--border-subtle);
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* 工具样式 */
+.mono {
+  font-family: var(--font-mono);
+}
+
+.text-done { color: var(--status-done); }
+.text-doing { color: var(--status-doing); }
+.text-blocked { color: var(--status-blocked); }
+.text-muted { color: var(--text-muted); }
+.text-primary { color: var(--text-primary); }
+
+/* 无障碍：减弱动效 */
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

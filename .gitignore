@@ -15,3 +15,5 @@ repos/.source/*
 __pycache__/
 *.py[cod]
 output/
+web/frontend/dist/
+web/frontend/node_modules/

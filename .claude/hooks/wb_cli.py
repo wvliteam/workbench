@@ -1322,6 +1322,40 @@ def _run_selfcheck(args) -> None:
     cmd_selfcheck(args)
 
 
+def cmd_dashboard(args) -> None:
+    """启动可视化看板 Web 服务，或导出静态单文件 HTML 报告。"""
+    root = Path(args.root).resolve() if getattr(args, "root", None) else find_root()
+    backend_dir = root / "web" / "backend"
+    scripts_dir = root / "scripts"
+    for d in (backend_dir, scripts_dir):
+        if str(d) not in sys.path and d.is_dir():
+            sys.path.insert(0, str(d))
+    try:
+        import wb_dashboard
+    except ImportError as e:
+        die(f"无法加载看板模块 (web/backend/wb_dashboard.py): {e}")
+
+    flow = getattr(args, "explicit_flow", None)
+
+    if getattr(args, "export", None):
+        wb_dashboard.export_static_dashboard(
+            root=root,
+            output_path=args.export,
+            flow=flow,
+            quiet=getattr(args, "quiet", False),
+        )
+        return
+
+    server = wb_dashboard.create_server(
+        root=root,
+        host=args.host,
+        port=args.port,
+        quiet=args.quiet,
+        poll_interval=args.poll_interval,
+    )
+    wb_dashboard.run_server(server, open_browser=args.open)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="wb", description="软件开发工作台状态内核")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1456,6 +1490,17 @@ def build_parser() -> argparse.ArgumentParser:
                    action="store_true",
                    help="跳过静态布局检查，只跑动态全链路（静态项在途、要验证动态逻辑时用）")
     p.set_defaults(func=_run_selfcheck)
+
+    p = sub.add_parser("dashboard", help="可视化看板：启动本地 Web 服务或导出单文件静态报告")
+    p.add_argument("--host", default="127.0.0.1", help="监听主机地址 (默认: 127.0.0.1)")
+    p.add_argument("--port", type=int, default=8088, help="监听端口号 (默认: 8088)")
+    p.add_argument("--root", help="Workbench 工作区根目录 (默认自动探测)")
+    p.add_argument("--open", action="store_true", help="启动后自动在浏览器中打开")
+    p.add_argument("--export", help="导出静态单文件 HTML 报告路径 (不启动 Web 服务)")
+    p.add_argument("--flow", dest="explicit_flow", help="指定需求线 flow (默认当前 flow)")
+    p.add_argument("--quiet", action="store_true", help="静默模式，不输出请求日志")
+    p.add_argument("--poll-interval", type=float, default=0.5, help="SSE 轮询探测周期秒数 (默认: 0.5)")
+    p.set_defaults(func=cmd_dashboard)
 
     return ap
 
