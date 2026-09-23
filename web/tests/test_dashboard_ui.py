@@ -213,6 +213,21 @@ class TestDashboardJavaScriptEngine(TestDashboardUIBase):
         _, html_text, _ = self.fetch_page("/")
         self.assertIn("window.__INITIAL_DATA__", html_text)
 
+    def test_node_dynamic_dimension_and_overflow_protection(self):
+        """验证 Cytoscape 节点高度动态自适应与文本防溢出计算。"""
+        _, html_text, _ = self.fetch_page("/")
+        # 验证文本折行与任意位置换行规则
+        self.assertIn("'text-overflow-wrap': 'anywhere'", html_text)
+        self.assertIn("'text-wrap': 'wrap'", html_text)
+        # 验证节点宽高与文本宽度使用动态数据映射与安全兜底
+        self.assertIn("nodeWidth", html_text)
+        self.assertIn("nodeHeight", html_text)
+        self.assertIn("textMaxWidth", html_text)
+        # 验证包含自适应折行计算函数
+        self.assertIn("function countWrappedLines(", html_text)
+        self.assertIn("function calculateNodeDimensions(", html_text)
+
+
 
 class TestDAGCoordinateAndBezierMath(unittest.TestCase):
     """算法与数学验证：拓扑坐标计算与贝塞尔曲线端点连贯性。"""

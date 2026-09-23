@@ -2492,15 +2492,16 @@
                     'background-color': '#131822',
                     'border-color': '#484f58',
                     'border-width': 1,
-                    'width': 200,
-                    'height': 54,
-                    'padding': '6px',
+                    'width': ele => ele.data('nodeWidth') || 260,
+                    'height': ele => ele.data('nodeHeight') || 72,
+                    'padding': '8px',
                     'label': 'data(label)',
                     'color': '#f0f6fc',
                     'font-size': 11,
                     'font-family': 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
                     'text-wrap': 'wrap',
-                    'text-max-width': 184,
+                    'text-max-width': ele => ele.data('textMaxWidth') || 236,
+                    'text-overflow-wrap': 'anywhere',
                     'text-valign': 'center',
                     'text-halign': 'center',
                     'line-height': 1.35,
@@ -2541,9 +2542,89 @@
             { selector: 'node.search-hit', style: { 'border-color': '#58a6ff', 'border-width': 3 } },
         ];
 
+        // 动态测量 / 估算节点 label 实际折行数并计算自适应高度
+        let _measureCanvas = null;
+        let _measureCtx = null;
+        function getMeasureContext(font) {
+            if (typeof document === 'undefined') return null;
+            if (!_measureCanvas) {
+                _measureCanvas = document.createElement('canvas');
+                _measureCtx = _measureCanvas.getContext('2d');
+            }
+            if (_measureCtx) {
+                _measureCtx.font = font;
+            }
+            return _measureCtx;
+        }
+
+        function measureTextWidth(text, font) {
+            const ctx = getMeasureContext(font);
+            if (ctx) {
+                return ctx.measureText(text).width;
+            }
+            let w = 0;
+            for (let i = 0; i < text.length; i++) {
+                w += text.charCodeAt(i) > 255 ? 11 : 6.6;
+            }
+            return w;
+        }
+
+        function countWrappedLines(text, maxWidth, font) {
+            if (!text) return 1;
+            const paragraphs = text.split('\n');
+            let totalLines = 0;
+            for (const p of paragraphs) {
+                if (!p) {
+                    totalLines++;
+                    continue;
+                }
+                let currentWidth = 0;
+                let lineCount = 1;
+                const tokens = p.split(/(\s+)/);
+                for (const token of tokens) {
+                    if (!token) continue;
+                    const tokenWidth = measureTextWidth(token, font);
+                    if (currentWidth + tokenWidth <= maxWidth) {
+                        currentWidth += tokenWidth;
+                    } else {
+                        if (token.trim() === '') {
+                            continue;
+                        }
+                        if (tokenWidth <= maxWidth) {
+                            lineCount++;
+                            currentWidth = tokenWidth;
+                        } else {
+                            for (let i = 0; i < token.length; i++) {
+                                const ch = token[i];
+                                const chWidth = measureTextWidth(ch, font);
+                                if (currentWidth + chWidth <= maxWidth) {
+                                    currentWidth += chWidth;
+                                } else {
+                                    lineCount++;
+                                    currentWidth = chWidth;
+                                }
+                            }
+                        }
+                    }
+                }
+                totalLines += lineCount;
+            }
+            return Math.max(1, totalLines);
+        }
+
+        function calculateNodeDimensions(label, textMaxWidth) {
+            const font = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+            const lines = countWrappedLines(label, textMaxWidth, font);
+            const lineHeight = 15.5;
+            const verticalPadding = 24;
+            const minHeight = 68;
+            const nodeHeight = Math.max(minHeight, Math.round(lines * lineHeight + verticalPadding));
+            return { lines, nodeHeight };
+        }
+
         // 由后端节点构建 cytoscape 节点 label（id + 标题 + 底部元信息）
         function buildNodeLabel(node) {
-            const title = (node.title || '').trim();
+            const title = (node.title || '').replace(/\r\n/g, '\n').replace(/\n+/g, ' ').trim();
             const shortTitle = title.length > 42 ? title.slice(0, 41) + '…' : title;
             const meta = [];
             if (node.phase) meta.push(node.phase);
@@ -2776,20 +2857,30 @@
 
             const nodeIds = new Set(nodes.map(n => n.id));
 
-            // 构建 cytoscape elements（忽略后端 x/y/col/row 像素坐标，交给 dagre 布局）
-            const cyNodes = nodes.map(node => ({
-                group: 'nodes',
-                data: {
-                    id: node.id,
-                    label: buildNodeLabel(node),
-                    status: node.status || 'todo',
-                    phase: node.phase || '',
-                    role: node.role || '',
-                    title: node.title || '',
-                    artifacts: node.artifacts_count || 0,
-                    cycle: !!node.has_cycle,
-                },
-            }));
+            const NODE_WIDTH = 260;
+            const TEXT_MAX_WIDTH = 236;
+
+            // 构建 cytoscape elements（动态计算节点高度以防文本溢出方框，交给 dagre 布局）
+            const cyNodes = nodes.map(node => {
+                const label = buildNodeLabel(node);
+                const { nodeHeight } = calculateNodeDimensions(label, TEXT_MAX_WIDTH);
+                return {
+                    group: 'nodes',
+                    data: {
+                        id: node.id,
+                        label: label,
+                        status: node.status || 'todo',
+                        phase: node.phase || '',
+                        role: node.role || '',
+                        title: node.title || '',
+                        artifacts: node.artifacts_count || 0,
+                        cycle: !!node.has_cycle,
+                        nodeWidth: NODE_WIDTH,
+                        nodeHeight: nodeHeight,
+                        textMaxWidth: TEXT_MAX_WIDTH,
+                    },
+                };
+            });
             const cyEdges = edges
                 .filter(e => nodeIds.has(e.source) && nodeIds.has(e.target))
                 .map(e => ({
