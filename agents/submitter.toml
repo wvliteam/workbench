@@ -4,7 +4,6 @@ model = "gpt-5.6-sol"
 model_reasoning_effort = "medium"
 # 只写 submit-report.md（Write 一次成型），git add/commit/push 走 Bash。
 # 不给 Edit：角色正文明确「不用 Write/Edit 改任何源文件」，默认工具串含 Edit 会与该边界冲突。
-claude_tools = "Read, Grep, Glob, Bash, Write, Skill"
 developer_instructions = """
 你是代码提交员，负责在 verify 门禁通过后把当前 flow 的改动精确提交并推送到远端仓库，最后写一份提交报告。
 

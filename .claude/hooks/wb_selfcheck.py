@@ -35,7 +35,10 @@ from wb_core import (
     task_contract_names, task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
     ensure_repo_orientation_tasks,
 )
-from wb_guard import frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop, mark_session_attributed
+from wb_guard import (
+    frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop, hook_user_prompt,
+    mark_session_attributed,
+)
 from wb_cli import cmd_task, main, merge_artifacts
 from wb_selfcheck_static import check_static_layout
 
@@ -779,6 +782,10 @@ def cmd_selfcheck(args) -> None:
             encoding="utf-8").strip().splitlines()[-1])
         assert last["role"] == "backend-developer", last
         assert last["agent_type"] == "backend-developer", last
+        hook_post_tool({"tool_name": "Write", "cwd": cw, "tool_input": {"path": "web/path.tsx"}})
+        last = json.loads((wb_dir(tmp) / ARTIFACT_LOG).read_text(
+            encoding="utf-8").strip().splitlines()[-1])
+        assert last["path"] == "web/path.tsx", last
         before_read_log = (wb_dir(tmp) / ARTIFACT_LOG).read_text(encoding="utf-8")
         hook_post_tool({"tool_name": "Read", "cwd": cw,
                         "tool_input": {"file_path": "README.md"}})
@@ -1306,6 +1313,55 @@ def cmd_selfcheck(args) -> None:
         assert "systemMessage" in payload and "user-api" in payload["systemMessage"], payload
         assert not read_unlocks(tmp), "codex 形态也应关闭解冻窗口"
         assert not (wb_dir(tmp) / "role").is_file()
+
+        # 走真实 CLI 确认 --format codex 被传到 UserPromptSubmit / PreToolUse。
+        wb_path = str(Path(__file__).resolve().parent / "wb.py")
+        prompt = subprocess.run(
+            [sys.executable, wb_path, "hook", "user-prompt", "--format", "codex"],
+            cwd=tmp,
+            input=json.dumps({"cwd": cw, "session_id": "codex-unattributed"}),
+            text=True, capture_output=True,
+        )
+        assert prompt.returncode == 0, prompt.stderr
+        payload = json.loads(prompt.stdout.strip())
+        specific = payload["hookSpecificOutput"]
+        assert specific["hookEventName"] == "UserPromptSubmit", payload
+        assert specific["additionalContext"], payload
+        prompt_without_session = subprocess.run(
+            [sys.executable, wb_path, "hook", "user-prompt", "--format", "codex"],
+            cwd=tmp, input=json.dumps({"cwd": cw}), text=True, capture_output=True,
+        )
+        assert prompt_without_session.returncode == 0 and not prompt_without_session.stdout, \
+            prompt_without_session.stdout
+        warnings = subprocess.run(
+            [sys.executable, wb_path, "hook", "pre-tool", "--format", "codex"],
+            cwd=tmp,
+            input=json.dumps({
+                "tool_name": "Bash", "cwd": cw,
+                "tool_input": {"command": "git reset --hard HEAD && npm publish"},
+            }),
+            text=True, capture_output=True,
+        )
+        assert warnings.returncode == 0, warnings.stderr
+        payload = json.loads(warnings.stdout.strip())
+        assert "git reset --hard" in payload["systemMessage"], payload
+        assert "对外发布" in payload["systemMessage"], payload
+
+        invalid = subprocess.run(
+            [sys.executable, wb_path, "hook", "pre-tool", "--format", "codex"],
+            cwd=tmp, input="not json", text=True, capture_output=True,
+        )
+        assert invalid.returncode == 2 and "合法 JSON" in invalid.stderr, invalid.stderr
+        missing = subprocess.run(
+            [sys.executable, wb_path, "hook", "pre-tool", "--format", "codex"],
+            cwd=tmp, input=json.dumps({"cwd": cw}), text=True, capture_output=True,
+        )
+        assert missing.returncode == 2 and "tool_name" in missing.stderr, missing.stderr
+        missing_cwd = subprocess.run(
+            [sys.executable, wb_path, "hook", "pre-tool", "--format", "codex"],
+            cwd=tmp, input=json.dumps({"tool_name": "Bash"}), text=True, capture_output=True,
+        )
+        assert missing_cwd.returncode == 2 and "cwd" in missing_cwd.stderr, missing_cwd.stderr
 
         # 强推的阶段必须与真正过门禁的区分开：status 是最常看的看板
         # --force 需要 WB_ALLOW_FORCE 环境变量门（防止误拼参数导致无声强推）

@@ -869,7 +869,7 @@ def load_allowed_skills(root: Path) -> list:
     return v if isinstance(v, list) else []
 
 
-def hook_pre_tool(data: dict) -> None:
+def hook_pre_tool(data: dict, fmt: str = "claude") -> None:
     tool = data.get("tool_name", "")
     ti = data.get("tool_input") or {}
     cwd = Path(data.get("cwd") or os.getcwd())
@@ -1032,9 +1032,16 @@ def hook_pre_tool(data: dict) -> None:
             _check_write_target(rootr, root, rel_tgt, data)
         # 放行但提示：这些命令确有正当用途（丢弃未提交改动、对外发布），
         # 拦掉会很烦人；提示出现在 transcript 里模型能看见。
+        warnings = []
         for pat, why in WARN_BASH:
             if re.search(pat, cmd, re.IGNORECASE):
-                print(f"[工作台提示] {why}。确认这是你要的操作。")
+                warnings.append(f"[工作台提示] {why}。确认这是你要的操作。")
+        if fmt == "codex":
+            if warnings:
+                print(json.dumps({"systemMessage": "\n".join(warnings)}, ensure_ascii=False))
+        else:
+            for warning in warnings:
+                print(warning)
         return
 
     if READ_TOOL.search(tool):
@@ -1129,14 +1136,12 @@ def hook_post_tool(data: dict) -> None:
                 pass
         return
 
-    raw = ti.get("file_path") or ti.get("notebook_path")
-    if not raw:
-        return
-    try:
-        rel = os.path.relpath(resolve_target(cwd, str(raw), rootr), rootr).replace(os.sep, "/")
-    except ValueError:
-        return
-    append_entry(rel)
+    for raw in dict.fromkeys(_tool_path_values(ti)):
+        try:
+            rel = os.path.relpath(resolve_target(cwd, raw, rootr), rootr).replace(os.sep, "/")
+        except ValueError:
+            continue
+        append_entry(rel)
 
 
 def hook_session_start(data: dict) -> None:
@@ -1275,7 +1280,7 @@ def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
         print(msg)
 
 
-def hook_user_prompt(data: dict) -> None:
+def hook_user_prompt(data: dict, fmt: str = "claude") -> None:
     """UserPromptSubmit：本会话尚未做 flow 归属时，每轮用户发话主动推送一条提醒；
     已归属则静默。归属本质是任务级判断，SessionStart 时任务未知（那时提醒必然显示
     「未归属」且无的放矢），所以把「是否已归属」放到用户每次发话时推——此时任务已知。
@@ -1291,11 +1296,21 @@ def hook_user_prompt(data: dict) -> None:
             return
         if _session_attributed(root, data):
             return
-        print(
+        msg = (
             "[工作台] 本会话尚未做 flow 归属。若本轮涉及实现/修复/接口/跨模块/验证/留痕，"
             "先按用户目标·影响仓库·验收标准判断归属：完全匹配 `wb.py flow switch <名>` 复用，"
             "否则 `wb.py flow new <语义名>`；纯只读或低风险单次改动可跳过并说明理由。"
-            "查全部需求线：`wb.py flow list`。")
+            "查全部需求线：`wb.py flow list`。"
+        )
+        if fmt == "codex":
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": msg,
+                }
+            }, ensure_ascii=False))
+        else:
+            print(msg)
     except Exception:
         return
 
@@ -1306,13 +1321,33 @@ def cmd_hook(args) -> None:
     try:
         data = json.loads(raw or "{}")
     except json.JSONDecodeError:
-        data = {}
+        if args.event == "pre-tool":
+            hook_deny("PreToolUse 输入不是合法 JSON，已拒绝调用。")
+        if args.event == "user-prompt":
+            return
+        print(f"[工作台 hook 输入异常] {args.event} 输入不是合法 JSON。", file=sys.stderr)
+        return
+    if not isinstance(data, dict):
+        if args.event == "pre-tool":
+            hook_deny("PreToolUse 输入必须是 JSON object，已拒绝调用。")
+        if args.event == "user-prompt":
+            return
+        print(f"[工作台 hook 输入异常] {args.event} 输入必须是 JSON object。", file=sys.stderr)
+        return
+    if args.event == "pre-tool":
+        missing = []
+        if not isinstance(data.get("cwd"), str) or not data["cwd"]:
+            missing.append("cwd")
+        if not isinstance(data.get("tool_name"), str) or not data["tool_name"]:
+            missing.append("tool_name")
+        if missing:
+            hook_deny(f"PreToolUse 输入缺少必需字段：{', '.join(missing)}。")
     try:
         {
-            "pre-tool": lambda d: hook_pre_tool(d),
+            "pre-tool": lambda d: hook_pre_tool(d, fmt=args.format),
             "post-tool": lambda d: hook_post_tool(d),
             "session-start": lambda d: hook_session_start(d),
-            "user-prompt": lambda d: hook_user_prompt(d),
+            "user-prompt": lambda d: hook_user_prompt(d, fmt=args.format),
             "subagent-stop": lambda d: hook_subagent_stop(d, fmt=args.format),
         }[args.event](data)
     except KeyError:

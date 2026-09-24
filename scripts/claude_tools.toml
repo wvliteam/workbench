@@ -1,0 +1,17 @@
+[dba]
+tools = "Read, Grep, Glob, Bash, Write, Edit, Skill"
+
+[debugger]
+tools = "Read, Grep, Glob, Bash"
+
+[devops]
+tools = "Read, Grep, Glob, Bash, Write, Edit, Skill"
+
+[impact-scout]
+tools = "Read, Grep, Glob, Bash"
+
+[security-auditor]
+tools = "Read, Grep, Glob, Bash"
+
+[submitter]
+tools = "Read, Grep, Glob, Bash, Write, Skill"

@@ -27,6 +27,7 @@ def check_static_layout(real_root: Path) -> None:
     if codex_hooks.is_file():
         hooks = json.loads(codex_hooks.read_text(encoding="utf-8")).get("hooks", {})
         for event, hook_name in {
+            "SessionStart": "session-start",
             "PreToolUse": "pre-tool",
             "PostToolUse": "post-tool",
             "UserPromptSubmit": "user-prompt",
@@ -41,6 +42,9 @@ def check_static_layout(real_root: Path) -> None:
         for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit"):
             assert hooks[event][0].get("matcher") == ".*", \
                 f".codex/hooks.json 的 {event} 必须 catch-all，枚举工具名会漏掉新写入工具"
+        assert hooks["SessionStart"][0].get("matcher") == \
+            "^(startup|resume|clear|compact|fork)$", \
+            ".codex/hooks.json 的 SessionStart 必须覆盖 fork"
 
     claude_skills = real_root / ".claude" / "skills"
     agents_skills = real_root / ".agents" / "skills"

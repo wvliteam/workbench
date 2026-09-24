@@ -8,10 +8,23 @@ import tomllib
 from pathlib import Path
 
 
-def render(data: dict) -> str:
+DEFAULT_CLAUDE_TOOLS = "Read, Grep, Glob, Bash, Write, Edit, Skill"
+
+
+def load_claude_tool_overrides(root: Path) -> dict[str, str]:
+    path = root / "scripts" / "claude_tools.toml"
+    if not path.is_file():
+        return {}
+    return {
+        name: values["tools"]
+        for name, values in tomllib.loads(path.read_text(encoding="utf-8")).items()
+    }
+
+
+def render(data: dict, claude_tool_overrides: dict[str, str]) -> str:
     description = data["description"]
     model = data.get("claude_model", "opus" if data.get("model_reasoning_effort") == "high" else "sonnet")
-    tools = data.get("claude_tools", "Read, Grep, Glob, Bash, Write, Edit, Skill")
+    tools = claude_tool_overrides.get(data["name"], DEFAULT_CLAUDE_TOOLS)
     return (
         "---\n"
         f"name: {data['name']}\n"
@@ -30,11 +43,12 @@ def main() -> int:
     args = parser.parse_args()
 
     agents = args.root / "agents"
+    claude_tool_overrides = load_claude_tool_overrides(args.root)
     changed = []
     for source in sorted(agents.glob("*.toml")):
         data = tomllib.loads(source.read_text(encoding="utf-8"))
         target = source.with_suffix(".md")
-        content = render(data)
+        content = render(data, claude_tool_overrides)
         if not target.exists() or target.read_text(encoding="utf-8") != content:
             changed.append(target.name)
             if not args.check:
