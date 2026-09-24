@@ -34,7 +34,7 @@
 | `frontend-developer` | develop (主干) | 前端代码 + 校验命令输出 + 异常执行记录 | 前端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
 | `backend-developer` | develop (主干) | 后端代码 + 校验命令输出 + 异常执行记录 | 后端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
 | `dba` | develop (条件旁路) | 数据库双向迁移脚本 + 回滚校验 | `migrations/**`, `schemas/**`, `schema/**`, `sql/**`, `tasks/**` | sonnet |
-| `integrator` | develop (条件旁路) | `artifacts/<flow>/develop/integration-cases.md` + 真实联调证据 | `artifacts/*/develop/integration-cases.md`, `tasks/**`, `tests/**` + 脚本扩展名 | sonnet |
+| `integrator` | develop (条件旁路) | `artifacts/<flow>/develop/integration-cases.md` + 真实联调证据 | 报告、测试/E2E 与 architect 通过任务 `write_scopes` 明确授权的联调适配路径 | sonnet |
 | `qa` | verify (主干) | `artifacts/<flow>/verify/test-report.md` | `tests/**` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
 | `submitter` | verify (主干) | `artifacts/<flow>/verify/submit-report.md` + git commit/push | `artifacts/*/verify/**` | sonnet |
 | `devops` | verify/release (交付旁路) | `artifacts/<flow>/verify/deploy-report.md` | `deploy/**`, `k8s/**`, `docker/**`, `.github/workflows/**`, `ci/**`, `helm/**`, `artifacts/*/verify/**` | sonnet |
@@ -199,7 +199,7 @@ wb.py task reopen T1 --note "分页 total 恒为 0"     # 或者已完成的任�
 ### 6. `integrator`（本地环境部署与集成联调专家，开发/验证条件旁路）
 * **定位**：在开发完成之后、QA 验证之前唤醒。
 * **场景**：涉及跨仓库、前后端连通、多微服务协同或核心接口契约变更。
-* **机制**：依据各仓 `setup.md` 编排拉起本地运行环境、执行服务 readiness 探活、发起真实端到端流量核验，并产出 `artifacts/<flow>/develop/integration-cases.md`（含人工验收指引与自动化自测证据）。联调收尾时安全收敛后台服务进程。报告的人工签章由编排者在推进前向用户确认（没有对应的门禁 check 项，`gate_waivers` 只豁免未配置的 `cmd:*` 门禁，配 `integration_signoff` 不生效）。
+* **机制**：依据各仓 `setup.md` 编排拉起本地运行环境、执行服务 readiness 探活、发起真实端到端流量核验，并产出 `artifacts/<flow>/develop/integration-cases.md`（含人工验收指引与自动化自测证据）。任务 `write_scopes` 必须同时覆盖报告、执行记录和实际联调适配路径；如需修改线下 Redis 客户端、服务配置或指定下游连接，必须由 architect 在任务图中明确授权，守卫将该范围作为实际写入上限。联调收尾时安全收敛后台服务进程。报告的人工签章由编排者在推进前向用户确认（没有对应的门禁 check 项，`gate_waivers` 只豁免未配置的 `cmd:*` 门禁，配 `integration_signoff` 不生效）。
 
 ---
 

@@ -1252,6 +1252,82 @@ def cmd_selfcheck(args) -> None:
         tasks = {t["id"]: t for t in load_state(tmp)["tasks"]}
         assert tasks[old_id]["artifacts"] == ["web/old.tsx"], tasks[old_id]
         assert tasks[new_id]["artifacts"] == ["web/new.tsx"], tasks[new_id]
+
+        # 任务 write_scopes 是显式 subagent 的实际写入上限：联调适配可授权，
+        # 未授权的业务源码、Bash 重定向和 apply_patch 都要拦；/tmp 仍是临时工作区。
+        code, out = quiet("task", "add", "--title", "联调适配范围", "--phase", "develop",
+                          "--role", "integrator", "--write-scopes",
+                          "service/config/local.yaml,service/redis/**,e2e/**")
+        assert code == 0, out
+        scoped_id = out.split()[0]
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw,
+                       "agent_type": "integrator", "agent_id": "integ-1",
+                       "tool_input": {"command": f"python3 {wb_path} task start {scoped_id}"}})
+        quiet("task", "start", scoped_id)
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"file_path": "service/redis/client.py"}}) == 0
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"file_path": "service/core/business.py"}}) == 2
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "echo x > service/config/local.yaml"}}) == 0
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "echo x > service/core/business.py"}}) == 2
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "python3 -c \"open('service/core/business.py','w').write('x')\""}}) == 2
+        assert guard({"tool_name": "Bash", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "echo x > /tmp/integrator.log"}}) == 0
+        assert guard({"tool_name": "apply_patch", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "*** Add File: e2e/flow.py\n---\n+1\n"}}) == 0
+        assert guard({"tool_name": "apply_patch", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"command": "*** Add File: service/core/business.py\n---\n+1\n"}}) == 2
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-1",
+                      "tool_input": {"file_path": "/tmp/integrator.log"}}) == 0
+        quiet("task", "done", scoped_id)
+
+        # 失败启动与 reopen 后的旧 attempt 都不能复用任务范围。
+        code, out = quiet("task", "add", "--title", "失败联调启动", "--phase", "develop",
+                          "--role", "integrator", "--write-scopes", "service/only/**")
+        assert code == 0, out
+        failed_id = out.split()[0]
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw,
+                       "agent_type": "integrator", "agent_id": "integ-fail",
+                       "tool_input": {"command": f"python3 {wb_path} task start {failed_id}"}})
+        quiet("task", "block", failed_id, "--reason", "模拟启动失败")
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-fail",
+                      "tool_input": {"file_path": "service/only/client.py"}}) == 2
+
+        code, out = quiet("task", "add", "--title", "联调重试", "--phase", "develop",
+                          "--role", "integrator", "--write-scopes", "service/retry/**")
+        assert code == 0, out
+        retry_id = out.split()[0]
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw,
+                       "agent_type": "integrator", "agent_id": "integ-old",
+                       "tool_input": {"command": f"python3 {wb_path} task start {retry_id}"}})
+        quiet("task", "start", retry_id)
+        quiet("task", "block", retry_id, "--reason", "第一次联调失败")
+        quiet("task", "reopen", retry_id)
+        hook_pre_tool({"tool_name": "exec_command", "cwd": cw,
+                       "agent_type": "integrator", "agent_id": "integ-new",
+                       "tool_input": {"command": f"python3 {wb_path} task start {retry_id}"}})
+        quiet("task", "start", retry_id)
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-old",
+                      "tool_input": {"file_path": "service/retry/client.py"}}) == 2
+        assert guard({"tool_name": "Write", "cwd": cw, "agent_type": "integrator",
+                      "agent_id": "integ-new",
+                      "tool_input": {"file_path": "service/retry/client.py"}}) == 0
+        quiet("task", "done", retry_id)
+
         # 兄弟 subagent 还在跑时，先结束的那个不能清掉角色锁 —— 后者会进入无限制状态
         hook_subagent_stop({"cwd": cw})
         assert (wb_dir(tmp) / "role").is_file(), "有 doing 任务时不该解除角色锁"

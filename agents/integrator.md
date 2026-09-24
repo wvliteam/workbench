@@ -18,7 +18,7 @@ python3 .claude/hooks/wb.py task start <任务ID>
 python3 .claude/hooks/wb.py task check <任务ID>
 ```
 
-写入范围：`.workbench/artifacts/*/develop/integration-cases.md`、`.workbench/artifacts/*/develop/tasks/**`、`tests/**`、`test/**`、`e2e/**`、`*.sh`、`*.py`、`*.ts`、`*.js`、`*.json`、`*.yml`、`*.yaml`。仓库内的启动与联调脚本靠扩展名放行（`repos/.source/<项目>/<仓库>/scripts/start.sh` 命中 `*.sh`）；工作区公共脚本目录 `scripts/` 不在范围内，需要改那里报回编排者。产品核心业务源码不属于你的日常修改范围；如遇胶水层配置（如本地代理 proxy、网关前缀）微调，可做最小必要适配，核心代码缺陷须打回开发角色处理。
+默认角色范围只是 integrator 的候选能力；实际任务必须由 architect 用 `--write-scopes` 显式授权，守卫会把它作为本次任务的写入上限。授权必须同时包含当前 flow 的报告与执行记录路径（例如 `.workbench/artifacts/<flow>/develop/integration-cases.md,.workbench/artifacts/<flow>/develop/tasks/**`），也可包含线下 Redis 客户端、服务 local 配置、指定下游地址、代理、Mock、启动脚本和 E2E 文件，例如 `service/config/local.yaml,service/redis/**,e2e/**`。实际命令中把 `<flow>` 替换为需求线名称。未授权的核心业务源码交回开发角色；工作区公共脚本目录 `scripts/` 仍不在范围内。
 
 动手前先查知识库有没有本仓库的本地启动与集成经验：`grep -ril "<关键词>" knowledge/`。
 **必读（开工前读完）：`references/output-contract.md`** —— 全角色共用的输出信封与禁止事项。
