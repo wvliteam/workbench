@@ -295,6 +295,8 @@ Bash 调用除了冻结检查，还按命令文本查危险命令，两级：`DE
 
 **载荷里有 subagent 标识，`agent_type` 就是角色名。** 实测（Claude Code 2.1.252、Codex CLI 0.152.1）subagent 的 `PreToolUse` / `PostToolUse` / `SubagentStop` 都带 `agent_type` 与 `agent_id`，主线程两个都没有；`session_id` 反而是共享的。`current_role()` 优先按 `agent_type` 判定；已带 `agent_id` 但缺少 `agent_type` 的旧/异常载荷会拒绝受管写入，避免把 subagent 误当主线程放行。
 
+**任务 `write_scopes` 是显式任务的实际写入上限。** `next --all` 用它避开并发范围冲突；PreToolUse 还会按 `agent_id`、flow、角色和 attempt 找到当前 `doing` 任务，并把任务范围应用到项目内的 Write、Bash 和 `apply_patch` 目标。受守工作流路径同时要通过角色默认范围；没有 `write_scopes` 的历史任务保持兼容。任务启动失败、任务重试后的旧绑定不授予新任务范围；冻结文件和契约争议检查优先于任务范围。
+
 ### 失败语义
 
 ```python

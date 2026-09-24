@@ -249,8 +249,8 @@ python3 .claude/hooks/wb.py task add --title "role scopes 按角色分节输出"
 - **跨仓影响面研判（Pre-flow 旁路）**：规模研判说不准时（不知道牵动几个仓、几个文件、有没有跨仓契约）-> 派只读侦查 agent `impact-scout` 拿影响面清单，据此判定走不走完整 flow。明显小直接做、明显大直接进 flow，都不派。`impact-scout` 是非角色只读 agent，不占阶段、不写任何文件。
 - **故障与告警归因（Pre-flow 旁路）**：收到线上报警、错误日志、崩溃堆栈或偶发 Bug 现象时 -> 派只读排障 agent `debugger` 调查堆栈与根因代码（`file:line`），产出四段式根因报告；若确认是微小确定的单点修补，由主线程或开发角色直接修，若是系统性/跨仓缺陷，以该报告作为 clarify/analyze 的输入拉起 `wb-flow`。
 - **数据库与平滑迁移（Develop 条件旁路）**：若 `design` 方案涉及数据模型变更（DDL、历史数据迁移、分库分表、大表索引）-> 由 `architect` 在任务图中按需动态创建 `dba` 任务（`wb.py task add --role dba --phase develop --write-scopes "migrations/**"`），专职负责编写并验证对称回滚（Up/Down）脚本与零停机（Expand & Contract）模式，普通业务开发不碰 DDL。
+- **本地环境与集成联调（Develop/Verify 条件旁路）**：若需求涉及跨仓库、前后端连通或接口契约变更 -> 由 `architect` 在任务图中动态创建 `integrator` 任务，并用 `--write-scopes` 同时列出当前 flow 的报告/执行记录路径（如 `.workbench/artifacts/<flow>/develop/integration-cases.md,.workbench/artifacts/<flow>/develop/tasks/**`，实际命令把 `<flow>` 换成需求线名称）与本次允许修改的联调适配路径（如 `service/config/local.yaml,service/redis/**,e2e/**`）。任务范围是该 integrator 的实际写入上限，允许线下 Redis、指定下游、代理、Mock 与启动脚本适配，不要用裸扩展名代替路径授权。Integrator 负责依据 `setup.md` 编排拉起本地运行环境、服务 readiness 存活探活、真实端到端流量自测，并产出 `artifacts/<flow>/develop/integration-cases.md`（含人工验收指引），推进前由编排者把该报告的人工验收清单交给用户确认（门禁无此 check 项，不要配 `gate_waivers.integration_signoff` —— `gate_waivers` 只豁免未配置的 `cmd:*` 门禁）。
 - **安全与合规审计（Advisory 旁路）**：在方案设计阶段涉及鉴权与数据流转，或代码涉及敏感凭据/外部调用时 -> 派只读 `security-auditor` 开展威胁建模或静态合规扫描（OWASP Top 10、越权漏洞、PII 脱敏），产出安全阻断清单。
 - **发布与环境部署（Post-verify 交付旁路）**：在 `submitter` 提交推送后，或在独立发布流程中 -> 派 `devops` 角色感知远程 CI/CD 构建状态、核对容器与 K8s 部署配置、在授权下执行发布与健康巡检，产出 `artifacts/<flow>/verify/deploy-report.md`。
 - 用户中途插入新需求 -> 派 `pm` 追加变更记录，别悄悄扩大范围。
 - 需要无人值守连续排空任务 -> 用 `/wb-loop`。
-

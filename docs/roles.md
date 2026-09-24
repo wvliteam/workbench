@@ -8,7 +8,7 @@
 1. **主干流水线角色（In-Flow Backbone）**：负责必须闭环的 6 阶段核心链路（`pm` → `analyst` → `architect` → `fe/be-dev` → `qa` → `submitter` → `reviewer`/`knowledger`）。
 2. **旁路与按需角色（Off-Flow / Sidecar / On-Demand）**：
    - **前置只读旁路**：`impact-scout`（跨仓规模与影响面调研）、`debugger`（线上告警与故障堆栈根因归因）；
-   - **开发条件旁路**：`dba`（仅当方案涉及数据库 Schema/DDL/迁移变更时由 architect 动态插入任务）；
+   - **开发与集成条件旁路**：`dba`（仅当方案涉及数据库 Schema/DDL/迁移变更时由 architect 动态插入任务）、`integrator`（跨仓/跨端/接口契约变更时的本地环境部署、存活探活与集成联调自测）；
    - **只读审计旁路**：`security-auditor`（威胁建模、OWASP 与权限数据合规静态审查）；
    - **交付部署旁路**：`devops`（代码 push 后的远端 CI/CD 感知、K8s/容器物料校验与发布健康巡检）。
 
@@ -34,6 +34,7 @@
 | `frontend-developer` | develop (主干) | 前端代码 + 校验命令输出 + 异常执行记录 | 前端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
 | `backend-developer` | develop (主干) | 后端代码 + 校验命令输出 + 异常执行记录 | 后端源码目录与扩展名 + `*.md` + `tasks/**` | sonnet |
 | `dba` | develop (条件旁路) | 数据库双向迁移脚本 + 回滚校验 | `migrations/**`, `schemas/**`, `schema/**`, `sql/**`, `tasks/**` | sonnet |
+| `integrator` | develop (条件旁路) | `artifacts/<flow>/develop/integration-cases.md` + 真实联调证据 | 报告、测试/E2E 与 architect 通过任务 `write_scopes` 明确授权的联调适配路径 | sonnet |
 | `qa` | verify (主干) | `artifacts/<flow>/verify/test-report.md` | `tests/**` + 测试框架配置 + `artifacts/*/verify/**` | sonnet |
 | `submitter` | verify (主干) | `artifacts/<flow>/verify/submit-report.md` + git commit/push | `artifacts/*/verify/**` | sonnet |
 | `devops` | verify/release (交付旁路) | `artifacts/<flow>/verify/deploy-report.md` | `deploy/**`, `k8s/**`, `docker/**`, `.github/workflows/**`, `ci/**`, `helm/**`, `artifacts/*/verify/**` | sonnet |
@@ -197,6 +198,11 @@ wb.py task reopen T1 --note "分页 total 恒为 0"     # 或者已完成的任�
 * **定位**：在 `submitter` 提交推送后，或在独立发布流程中调用。
 * **场景**：代码已提交至分支，需确认远程 CI/CD 结果、核对容器与 K8s 编排并执行上线巡检。
 * **机制**：写入部署物料配置与 `artifacts/<flow>/verify/deploy-report.md`。轮询远程构建状态、检查探针与环境变量凭据安全，并在异常时执行预备的回滚指令。
+
+### 6. `integrator`（本地环境部署与集成联调专家，开发/验证条件旁路）
+* **定位**：在开发完成之后、QA 验证之前唤醒。
+* **场景**：涉及跨仓库、前后端连通、多微服务协同或核心接口契约变更。
+* **机制**：依据各仓 `setup.md` 编排拉起本地运行环境、执行服务 readiness 探活、发起真实端到端流量核验，并产出 `artifacts/<flow>/develop/integration-cases.md`（含人工验收指引与自动化自测证据）。任务 `write_scopes` 必须同时覆盖报告、执行记录和实际联调适配路径；如需修改线下 Redis 客户端、服务配置或指定下游连接，必须由 architect 在任务图中明确授权，守卫将该范围作为实际写入上限。联调收尾时安全收敛后台服务进程。报告的人工签章由编排者在推进前向用户确认（没有对应的门禁 check 项，`gate_waivers` 只豁免未配置的 `cmd:*` 门禁，配 `integration_signoff` 不生效）。
 
 ---
 

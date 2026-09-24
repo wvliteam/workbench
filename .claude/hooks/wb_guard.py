@@ -480,6 +480,69 @@ def _role_scope_allows(root: Path, scopes: dict, role: str, rel: str) -> list[st
     return [g for g in globs if fnmatch.fnmatch(rel, g)]
 
 
+def _task_write_scopes(root: Path, data: dict, role: str) -> list[str] | None:
+    """Return the active task's write ceiling, or None for legacy behavior.
+
+    A binding recorded before `task start` is only usable after the task reaches
+    doing with the same attempt number. This keeps failed starts and reopened
+    tasks from inheriting an old agent binding.
+    """
+    agent_id = data.get("agent_id")
+    if not agent_id or role not in DEVELOPER_ROLES:
+        return None
+    binding_path = wb_dir(root) / "task-agents.jsonl"
+    if not binding_path.is_file():
+        return None
+    flow = attribution_flow(root)
+    state = load_state_of(root, flow)
+    tasks = {str(t.get("id", "")).upper(): t for t in state.get("tasks", [])}
+    matched = []
+    scoped_binding_seen = False
+    try:
+        rows = binding_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw in rows:
+        try:
+            binding = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if (binding.get("agent_id") != agent_id
+                or binding.get("flow", "main") != flow
+                or binding.get("agent_type") not in (None, data.get("agent_type"))):
+            continue
+        if "attempt" not in binding:
+            continue
+        scoped_binding_seen = True
+        task = tasks.get(str(binding.get("id", "")).upper())
+        if not task or task.get("status") != "doing" or task.get("role") != role:
+            continue
+        try:
+            attempt = int(task.get("attempts", 0))
+        except (TypeError, ValueError):
+            continue
+        if binding.get("attempt") != attempt:
+            continue
+        matched.append(task)
+    if not matched:
+        return [] if scoped_binding_seen else None
+    if any(not isinstance(t.get("write_scopes"), list) or not t["write_scopes"]
+           for t in matched):
+        return None
+    scopes = []
+    for task in matched:
+        for scope in task["write_scopes"]:
+            if scope not in scopes:
+                scopes.append(scope)
+    return scopes
+
+
+def _task_scope_allows(scopes: list[str], rel: str) -> bool:
+    if rel == ".." or rel.startswith("../"):
+        return True
+    return any(rel == scope or rel.startswith(scope + "/") for scope in scopes)
+
+
 # 受守卫的公共脚本：它们的写入不走 Bash 能解析的形态（`python3 x.py` 不是写命令），
 # 脚本内部却写 .vscode/、.workbench/*.code-workspace、repos.json 与 repos/* 软链 ——
 # 角色执行就把「工作区材料角色只读」整个绕开。脚本没有角色用得上的合法形态，非主线程一律拒。
@@ -585,6 +648,17 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
     except OSError:
         pass
 
+    role = current_role(rootr, data)
+
+    # 显式任务范围是 developer subagent 的额外上限；没有范围的历史任务保持旧行为。
+    task_scopes = _task_write_scopes(rootr, data, role)
+    if task_scopes is not None and not _task_scope_allows(task_scopes, rel):
+        hook_deny(
+            f"当前任务绑定不允许写入 {rel}："
+            f"{role} 的 write-scopes 未覆盖该路径，或任务尚未成功启动。"
+            "请把联调适配文件加入当前任务范围，或把核心业务修改交回对应开发任务。"
+        )
+
     # 3. 角色写入范围：**只对工作流核心路径强制执行** —— 受守前缀下的东西
     #    （.workbench/ 的阶段产物与契约、knowledge/ 知识库、references/ 规范、
     #    .claude/ 等守卫本体、workbench 布局下的工作区材料）。这些文件坏了，工作流
@@ -595,7 +669,6 @@ def _check_write_target(cwd: Path, root: Path, raw_path: str, data: dict) -> Non
     #    常态，且不影响工作流推进。这层规范（谁该写哪里、别乱写文件乱执行脚本）
     #    交给 harness 与模型自己，不是本工作台的职责；工作台管得越宽，越容易在
     #    正常开发动作上误拦，把「守卫」变成流程的阻力。
-    role = current_role(rootr, data)
     guarded = _guarded_prefix(rootr, rel)
     if not guarded:
         return
@@ -973,6 +1046,7 @@ def hook_pre_tool(data: dict, fmt: str = "claude") -> None:
                         # flow 进绑定：任务 ID 每条 flow 独立从 T1 编起，绑定文件是
                         # 工作区共享的，不记 flow 时 A flow 的 T1 会认领 B flow 的 agent
                         entry = {"at": now(), "id": t["id"], "role": t["role"],
+                                 "attempt": int(t.get("attempts", 0)) + 1,
                                  "flow": attr}
                         for key in ("agent_id", "agent_type", "session_id", "turn_id"):
                             if data.get(key):
@@ -1030,6 +1104,13 @@ def hook_pre_tool(data: dict, fmt: str = "claude") -> None:
 
         for rel_tgt in sorted(all_targets):
             _check_write_target(rootr, root, rel_tgt, data)
+        if uncertain and BASH_WRITE.search(cmd):
+            role = current_role(rootr, data)
+            if _task_write_scopes(rootr, data, role) is not None:
+                hook_deny(
+                    "当前任务声明了 write-scopes，但 Bash 写入目标无法静态解析，拒绝执行。"
+                    "请改用可解析的明确目标写法。"
+                )
         # 放行但提示：这些命令确有正当用途（丢弃未提交改动、对外发布），
         # 拦掉会很烦人；提示出现在 transcript 里模型能看见。
         warnings = []
