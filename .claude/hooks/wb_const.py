@@ -71,20 +71,43 @@ ROLE_NATURAL_PHASE = {
     "knowledger": "retro",
 }
 
+# 结构化章节校验（artifact_section）用的别名表与占位符黑名单。
+# 起因：早期用 artifact_contains 裸子串判章节存在，模型写「## 验收标准\n待定」
+# 也能 PASS（子串命中），英文标题 `## Acceptance Criteria` 又被误杀。artifact_section
+# 改为「标题里出现别名 → 抽出章节正文 → 正文非空且不是纯占位符」。想调判定动这两张表。
+#
+# 别名按章节键归组，键本身也列进去（run_check 对不在表里的键回退成 (键,) 单元素）。
+SECTION_ALIASES = {
+    "验收标准": ("验收标准", "验收准则", "验收条件", "acceptance criteria", "acceptance"),
+    "非目标": ("非目标", "不做的事", "out of scope", "non-goals", "non goals"),
+    "风险": ("风险", "风险评估", "风险与影响", "risks", "risk"),
+    "方案对比": ("方案对比", "方案权衡", "备选方案", "alternatives",
+             "options considered", "trade-offs", "tradeoffs"),
+    "改进项": ("改进项", "改进点", "改进事项", "improvements", "action items"),
+}
+
+# 纯占位符正文：正文里的词全落在这个集合里就判「没写实质内容」。
+# **刻意不含「无」「-」**：`## 风险\n- 无`、`## 非目标\n- 无` 是合法的终态回答
+# （确无风险 / 无非目标），把「无」当占位符会误杀；而「暂无」「待定」是「还没填」的
+# 信号，作为独立 token（`\w+` 下 CJK 连写成一个词，与「无」不同 token）保留在黑名单里。
+PLACEHOLDER_WORDS = frozenset({
+    "待定", "待补充", "待填", "待确认", "暂无", "tbd", "todo", "na", "xxx", "todo待补",
+})
+
 # 每个阶段的准出条件。artifacts 是必须存在且非空的产物文件，
 # checks 是可执行的断言（见 run_check）。想改规则只动这张表。
 GATES = {
     "clarify": {
         "artifacts": ["requirements.md"],
         "checks": [
-            "artifact_contains:requirements.md:验收标准",
-            "artifact_contains:requirements.md:非目标",
+            "artifact_section:requirements.md:验收标准",
+            "artifact_section:requirements.md:非目标",
         ],
     },
     "analyze": {
         "artifacts": ["current-state.md"],
         "checks": [
-            "artifact_contains:current-state.md:风险",
+            "artifact_section:current-state.md:风险",
             "analyze_parts_complete",
             # 仓库画像与需求分析是两件事：需求驱动的那次只看需求相关部分，产不出整仓的
             # 稳定事实（怎么跑、怎么测、坑在哪）。init 会建好画像任务，这条兜底 ——
@@ -95,7 +118,7 @@ GATES = {
     "design": {
         "artifacts": ["design.md"],
         "checks": [
-            "artifact_contains:design.md:方案对比",
+            "artifact_section:design.md:方案对比",
             "contracts_locked",
             "tasks_exist",
             "no_blocked:*",
@@ -119,7 +142,7 @@ GATES = {
     "retro": {
         "artifacts": ["retro.md"],
         "checks": [
-            "artifact_contains:retro.md:改进项",
+            "artifact_section:retro.md:改进项",
             "artifact_contains:retro.md:可复用",
             # 沉淀出口（ROMA 对比第八节 / 落地顺序 9）：沉淀章节必须存在，
             # 且经验真的落进 knowledge/（或显式声明无可沉淀）。
@@ -232,8 +255,9 @@ DEFAULT_ROLE_SCOPES = {
     "knowledger": ["knowledge/**"],
 }
 
-# 跨仓库布局下按目录名认领仓库。只用于生成默认范围，认领不到的仓库谁都写不了 ——
-# init 与 `role scopes` 会点名让你手写前缀，见 unclaimed_repos()。
+# 跨仓库布局下按目录名认领仓库。只用于生成默认范围，认领不到的仓库没有默认开发
+# 角色（守卫不据此拦产品源码写入，是任务分工缺口而非硬拦）—— init 与 `role scopes`
+# 会点名让你派任务时指定角色或手写前缀，见 unclaimed_repos()。
 #
 # 本仓改为**项目实名**（workbench-adaptation.md §2.2）。上游这里是通用词
 # （`frontend` / `web` / `client` / `ui` / `www` …）并做子串匹配，在本仓会重复认领：
@@ -243,9 +267,9 @@ DEFAULT_ROLE_SCOPES = {
 # 边界正好落在项目一级（`bddev` 是后端、`map-hotel-fe` 是前端），所以认领单元取项目，
 # 新增仓库落进既有项目时不用改配置。
 #
-# **只用项目实名，不留通用词**：不在这里的项目不会被任何开发角色认领，
-# `unclaimed_repos()` 会在 init 与 `role scopes` 时硬拦点名，要求手写前缀 ——
-# 这比静默双认领安全。
+# **只用项目实名，不留通用词**：不在这里的项目不会被任何开发角色默认认领，
+# `unclaimed_repos()` 会在 init 与 `role scopes` 时点名，要求派任务时指定角色或手写
+# 前缀 —— 这比静默双认领安全（点名是分工提示，不是产品源码写入硬拦）。
 REPO_HINTS = {
     "frontend-developer": ("map-hotel-fe",),
     "backend-developer": ("bddev", "map-aiad", "map-cjh-hotel",

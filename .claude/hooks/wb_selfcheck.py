@@ -31,8 +31,8 @@ from wb_core import (
     ready_tasks, repo_claims, repo_index_issues, repo_layout_scopes, source_projects,
     source_repos, projects_missing_profiles,
     repo_note_issues, retro_enter_epoch, run_check, save_state, set_flow_override,
-    select_task_batch, state_path, task_contract_errors, task_contract_names,
-    task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
+    select_task_batch, state_path, strict_flow_routing, task_contract_errors,
+    task_contract_names, task_dependency_errors, unclaimed_repos, wb_dir, write_frozen,
     ensure_repo_orientation_tasks,
 )
 from wb_guard import frozen_advice, hook_post_tool, hook_pre_tool, hook_subagent_stop, mark_session_attributed
@@ -167,6 +167,48 @@ def cmd_selfcheck(args) -> None:
             "# 需求\n## 验收标准\n- a\n## 非目标\n- b\n", encoding="utf-8")
         code, _ = quiet("gate", "check")
         assert code == 0, "产物齐全后门禁应通过"
+
+        # artifact_section：结构化章节校验替代裸子串。用一个探针文件直接打 run_check，
+        # 覆盖正例 / 英文别名 / 占位符 / 缺标题 / 空正文 / 合法「无」六种。
+        probe = artifact_path(tmp, "clarify", "_section_probe.md")
+        def _sec(body: str, section: str = "验收标准"):
+            probe.write_text(body, encoding="utf-8")
+            return run_check(tmp, load_state(tmp), "clarify",
+                             f"artifact_section:_section_probe.md:{section}")
+        ok, _, _ = _sec("## 验收标准\n- 必须支持登录\n")
+        assert ok, "有标题有实质正文应通过"
+        ok, _, _ = _sec("## Acceptance Criteria\n- must support login\n")
+        assert ok, "英文别名标题应通过"
+        ok, _, d = _sec("## 验收标准\n待定\n")
+        assert not ok and "占位符" in d, f"纯占位符应被拒：{d}"
+        ok, _, d = _sec("正文里提到验收标准但没有标题\n")
+        assert not ok and "缺少" in d, f"别名只在正文出现不算章节存在：{d}"
+        ok, _, d = _sec("## 验收标准\n\n## 其他\nx\n")
+        assert not ok and "正文为空" in d, f"章节正文为空应被拒：{d}"
+        ok, _, _ = _sec("## 风险\n- 无\n", section="风险")
+        assert ok, "「无」是合法终态回答，不得当占位符误杀"
+        probe.unlink()
+
+        # strict_flow_routing（评审 P2 并发竞态）：开启后状态变更类命令须显式 --flow /
+        # WB_FLOW，不再默认信任共享指针。用 task done <不存在> 打路径：严格闸在 func 前，
+        # 所以不改任何状态。清掉环境里可能残留的 WB_FLOW，免得干扰判定。
+        _saved_wbflow = os.environ.pop("WB_FLOW", None)
+        try:
+            quiet("config", "set", "strict_flow_routing", "true")
+            assert strict_flow_routing(tmp), "开关应已开启"
+            code, out = quiet("task", "done", "T404")
+            assert code != 0 and "strict_flow_routing" in out, \
+                f"严格路由下未显式 flow 应被拒：{out}"
+            code, out = quiet("task", "done", "T404", "--flow", "main")
+            assert "strict_flow_routing" not in out, f"--flow 应放行严格闸：{out}"
+            quiet("config", "set", "strict_flow_routing", "false")
+            assert not strict_flow_routing(tmp), "开关应已关闭"
+            code, out = quiet("task", "done", "T404")
+            assert "strict_flow_routing" not in out, f"关闭后不应触发严格闸：{out}"
+        finally:
+            if _saved_wbflow is not None:
+                os.environ["WB_FLOW"] = _saved_wbflow
+
         quiet("phase", "advance")
         assert load_state(tmp)["phase"] == "analyze"
 
@@ -1076,8 +1118,10 @@ def cmd_selfcheck(args) -> None:
         assert allowed("knowledge/x.md", "knowledger")
         assert not allowed("docs/x.md", "knowledger"), \
             "knowledger 只能写知识出口 knowledge/，docs/ 不是沉淀出口"
-        # 认领靠**项目实名**，不认通用词。认不出的项目落在所有角色范围外 —— 是硬拦
-        # 不是跨仓库放行，所以必须点名，否则要到 develop 阶段才撞成一次权限拒绝。
+        # 认领靠**项目实名**，不认通用词。认不出的项目落在所有角色的默认范围外，
+        # 所以 unclaimed_repos 要点名它（这是分工提示：守卫不对 repos/.source/** 按
+        # 角色执法，未认领不会在 develop 撞成产品源码写入拒绝）。下面 allowed() 测的是
+        # 范围**成员判定**（repo_claims/unclaimed_repos 据此点名），不是守卫的执法路径。
         # 这里也钉住上游通用词子串匹配的坑：`mapclient` 含 `client`，用子串会让它
         # 同时落进 frontend 与 backend 的范围，该项目的角色隔离直接失效。
         assert not allowed("repos/.source/unknown-proj/x/src/x.py", "backend-developer"), \

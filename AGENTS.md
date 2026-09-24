@@ -85,7 +85,7 @@ python3 .claude/hooks/wb.py init --name <需求名>   # 只在外层
 
 **1. 角色范围按项目实名，不是按目录名。** `init` 看到 `repos/.source/*` 会自己换成按项目认领，并在输出里说明 —— 认领单元是**项目**（`bddev`、`map-cjh-hotel`、`map-hotel-fe` …），前后端边界正好落在项目一级，新增仓库落进既有项目时不用改配置。项目白名单在 `wb_const.py` 的 `REPO_HINTS`，**只用实名、不留通用词**：上游按 `client` / `svc` 这类子串猜，实测 `client` 会命中 `mapclient`，让同一个项目被前后端双认领 —— 那个仓库上的角色隔离直接失效。
 
-**认不出项目名的仓库谁都写不了。** 只要有一个项目被认领，认不出的那些就落在所有角色范围之外 —— 是硬拦，不是跨仓库放行。`init` 与 `role scopes` 会点名，照它给的命令认领：
+**认不出项目名的仓库没有默认开发角色认领。** 只要有一个项目被认领，认不出的那些就落在所有角色的**默认范围**之外。**要点**：这是**任务分工缺口**，不是产品源码层面的写入硬拦 —— 守卫对 `repos/.source/**` 不按角色执法（`if not guarded: return`），角色范围只在受守前缀上强制。所以未认领仓库不会在 develop 触发权限拒绝，而是没有推荐的开发角色可派；`init` 与 `role scopes` 会点名，提醒你在派 develop 任务时显式指定角色，或照它给的命令补认领：
 
 ```bash
 python3 .claude/hooks/wb.py config set role_scopes.frontend-developer \
@@ -128,7 +128,7 @@ python3 .claude/hooks/wb.py flow desc main --desc '摘要'   # 补填/更新指�
 
 - `init --flow <名>` 可以直接初始化指定 flow；默认 `main`，但 `main` 只作为初始 flow 使用。
 - **新 flow 从 main 继承工作区级配置**（`role_scopes` / `gate_commands` / `gate_timeout` / `max_parallel`）：这些描述的是「这个工作区怎么干活」，不继承的话每条 flow 都要重抄一遍，漏抄的仓库认领会让指针切换后的角色范围判定整个换掉。任务、契约、阶段不继承 —— 那是每条需求线自己的进度。
-- CLI 命令按 `.workbench/current-flow` 指针定位；`status` 的根行会显示当前 flow。指针是全部会话共享的一份文件：**两个终端并行推两条 flow 时，CLI 各自 `export WB_FLOW=<名>` 钉死**（只影响 wb.py 命令，hook 与守卫不受它影响）。不钉的话，状态命令会被对方切走的指针带到别的流水线上 —— 并发编排多条 flow 没有别的机制保护，要么各自钉 WB_FLOW，要么串行交错。
+- CLI 命令按 `.workbench/current-flow` 指针定位；`status` 的根行会显示当前 flow。指针是全部会话共享的一份文件：**两个终端并行推两条 flow 时，CLI 各自 `export WB_FLOW=<名>` 钉死，或每条命令带 `--flow <名>`**（只影响 wb.py 命令，hook 与守卫不受它影响）。不钉的话，状态命令会被对方切走的指针带到别的流水线上。并发编排多条 flow 时，建议开启 **`wb.py config set strict_flow_routing true`**（工作区级开关，默认关）：开启后改 flow 状态的命令（task / phase / contract / role / config set）未显式 `--flow` / `WB_FLOW` 会被直接拒绝，从机制上挡住串台，而不再依赖人工记得钉 WB_FLOW。
 - **守卫不看指针，看全部 flow 的并集**：A flow 锁定的契约在 B flow 视角下照样冻结；A flow 的契约争议会让所有 flow 的 developer 一起停工（争议本来就是全线停工信号）。
 - 解冻窗口按 flow 生命周期隔离：SubagentStop 与 `contract lock` / `bump` 只关**本 flow** 的窗口，别的 flow 正在使用的窗口不会被顺带拆掉。同一契约名全工作区同时只允许一个窗口（`unlock` 聚合查重），A flow 开窗期间 B flow 对同名契约的 `unlock` 会被拒 —— 共享同一份契约文件的两条 flow，变更本来就要排队。
 - 产物归属（`task-agents.jsonl` / `artifacts.jsonl`）带 flow 字段：任务 ID 每条 flow 独立从 T1 编起，归属按任务所在 flow 过滤，跨 flow 同名任务不会互相认领对方的 agent 与产物。
@@ -181,6 +181,7 @@ python3 .claude/hooks/wb.py flow desc main --desc '摘要'   # 补填/更新指�
 5. **develop 阶段并行派发。** `next --all --json` 拿整批就绪任务，放在同一条消息里多个 Agent 调用同时发出。能明确边界的开发任务用 `task add --write-scopes "目录/**,文件"` 声明写入范围；共享文件（路由注册、公共类型、锁文件、迁移入口、生成文件）单独建串行集成任务并依赖上游。`next --all` 会跳过同批中有祖先/子路径关系的范围冲突，返回 `deferred_write_scope_conflicts`，未声明范围的历史任务保持兼容。每个 agent 先 `task start`、完成后 `task done` —— 产物归属合并与解冻窗口清理都挂在 `task done` 上。analyze 涉及至少两个独立域时同样按共享 `max_parallel` 为每个 manifest scope 并发派 analyst；各自只写唯一 part，主线程回读后串行汇总 canonical。
 6. **不可简化的东西**：信任边界上的输入校验、防数据丢失的错误处理、安全措施、可访问性基础、用户明确要求的功能。其余按最小可用实现。
 7. **clarify 与 design 推进前问用户。** 门禁管「产物齐不齐」，管不了「用户认不认」：需求偏差在这里拦最便宜（产物一过门禁就冻结成契约，改它要走 unlock → bump → 下游返工），方案取舍选错的返工由全部开发阶段承担。用 `AskUserQuestion`，确认完 `wb.py log` 一条留痕；用户批量授权后续时按授权推进并在汇报里说明。
+8. **需求或方案中途变更，先回退阶段再动手，不在 develop/verify 边改代码边定方案。** 需求变了（验收标准/目标/非目标）：`phase set clarify --reason`，派 pm 改 `requirements.md`（`contract unlock --name artifact-requirements → 改 → bump`）并问用户；偏离原需求本质就按归属规则拆新 flow。方案变了且涉及取舍/架构/契约（如「done 信令由 ranker 还是 writer 发」「不变量用代码强制还是配置保证」这类多选一、各有代价的决策）：`phase set design --reason`，派 architect 改 `design.md`（`contract unlock --name design-doc → 改 → bump`，含方案对比与被否方案及理由），**用户确认方案后**再 `phase advance` 回 develop 建任务。判断信号——一旦开始成段权衡「方案 A vs B 的优缺点」，那段对比就属于 `design.md` 且要过确认闸，不是对话里的即兴决定；先改代码后补 design 只能回填记录、不能替代事前确认。边界：不改变取舍的纯实现微调（改判断条件、补测试、重命名、修显式 bug）留在 develop，无需回阶段。
 
 ## 门禁命令
 

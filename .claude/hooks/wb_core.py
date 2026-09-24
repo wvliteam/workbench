@@ -24,8 +24,9 @@ except ImportError:  # pragma: no cover
     fcntl = None
 
 from wb_const import (
-    DEFAULT_ROLE_SCOPES, FROZEN_ALWAYS, GATES, PHASES, PHASE_CN, REPO_HINTS,
-    REPO_PROFILE_DIR, REPO_PROFILE_FILES, STATE_SCHEMA,
+    DEFAULT_ROLE_SCOPES, FROZEN_ALWAYS, GATES, PHASES, PHASE_CN,
+    PLACEHOLDER_WORDS, REPO_HINTS, REPO_PROFILE_DIR, REPO_PROFILE_FILES,
+    SECTION_ALIASES, STATE_SCHEMA,
 )
 from wb_bash import MAX_LOG, catastrophic_command, gate_command_references_outside
 
@@ -111,7 +112,8 @@ def read_current_flow(root: Path) -> str:
     WB_FLOW 只在 CLI 命令路径生效（main() 读入，cmd_hook 清空）—— 守卫与 hook
     是工作区级视角，不跟单个会话的钉死走。指针是全部会话共享的一份文件，两个
     终端并行推两条 flow 时，状态命令会被对方切的指针带跑到别的流水线上；
-    各自 export WB_FLOW 是机制内唯一的并发定位手段。
+    各自 export WB_FLOW（或每条命令带 --flow，同样经 set_flow_override 钉 override）
+    是机制内的并发定位手段，开启 strict_flow_routing 后更会强制要求显式指定。
     """
     if _FLOW_OVERRIDE and _FLOW_NAME.fullmatch(_FLOW_OVERRIDE):
         return _FLOW_OVERRIDE
@@ -140,6 +142,27 @@ def attribution_flow(root: Path) -> str:
 def set_current_flow(root: Path, flow: str) -> None:
     flow_dir(root, flow)          # 先校验名字
     (wb_dir(root) / FLOW_PTR).write_text(flow + "\n", encoding="utf-8")
+
+
+# 严格路由开关（工作区级）。current-flow 是全部会话共享的一份指针，多终端并行推两条
+# flow 时，B 终端 `flow switch` 会改写指针，A 终端随后的 `task done` 就落到别的流水线。
+# 会话级路由堵不住这条：CLI（Bash 里跑）拿不到 session_id，只有 hook 载荷里有。所以
+# 用工作区级开关 + 显式 --flow/WB_FLOW：开启后，改 flow 状态的命令必须显式指定 flow，
+# 不再默认信任共享指针。存成 .workbench/ 下的标记文件（与 current-flow 同级），只增
+# 不改 state，读一次 is_file() 即可。默认关，不破坏单终端习惯。
+STRICT_ROUTING_MARK = "strict-flow-routing"
+
+
+def strict_flow_routing(root: Path) -> bool:
+    return (wb_dir(root) / STRICT_ROUTING_MARK).is_file()
+
+
+def set_strict_flow_routing(root: Path, on: bool) -> None:
+    m = wb_dir(root) / STRICT_ROUTING_MARK
+    if on:
+        m.write_text(now(), encoding="utf-8")
+    elif m.is_file():
+        m.unlink()
 
 
 def all_flows(root: Path) -> list[str]:
@@ -973,6 +996,35 @@ def run_check(root: Path, st: dict, phase: str, spec: str) -> tuple[bool, str, s
         ok = needle in p.read_text(encoding="utf-8", errors="replace")
         return ok, label, "已覆盖" if ok else "缺少该章节"
 
+    if kind == "artifact_section":
+        # 结构化章节校验：标题行里出现章节名（或其别名）→ 抽出章节正文 → 正文非空
+        # 且不是纯占位符。替代 artifact_contains 的裸子串判定，堵「## 验收标准\n待定」
+        # 蒙混过关，同时用别名表接住中英文 / 同义标题（见 wb_const 两张表）。
+        fname, _, section = rest.partition(":")
+        p = artifact_path(root, phase, fname)
+        label = f"{fname} 含有效「{section}」章节"
+        if not p.is_file():
+            return False, label, "产物文件不存在"
+        text = p.read_text(encoding="utf-8", errors="replace")
+        aliases = SECTION_ALIASES.get(section, (section,))
+        # 别名只在 Markdown 标题行（`#`~`######` + 空白 + 文本）里找，不在正文里找 ——
+        # 否则正文顺口提一句「验收标准」也会被当成章节存在。正文抓到下一个标题或 EOF。
+        alias_group = "|".join(re.escape(a) for a in aliases)
+        pattern = (rf"^#{{1,6}}[ \t]+[^\n]*(?:{alias_group})[^\n]*\n"
+                   rf"(.*?)(?=^#{{1,6}}[ \t]|\Z)")
+        m = re.search(pattern, text, re.M | re.S | re.I)
+        if not m:
+            return False, label, f"缺少「{section}」章节标题（支持别名：{', '.join(aliases)}）"
+        lines = [ln.strip() for ln in m.group(1).splitlines() if ln.strip()]
+        if not lines:
+            return False, label, f"「{section}」章节正文为空"
+        # 纯占位符：正文所有词都落在黑名单里就判「没写实质内容」。用 \w+ 取词，
+        # CJK 连写成一个 token（「暂无」是一个词，与合法的「无」不同 token）。
+        words = set(re.findall(r"\w+", " ".join(lines).lower()))
+        if words and words.issubset(PLACEHOLDER_WORDS):
+            return False, label, f"「{section}」章节仅有占位符（{lines[0][:30]}），无实质内容"
+        return True, label, "章节存在且正文有效"
+
     if kind == "repos_notes_exist":
         label = "各仓库有画像三件套"
         names = source_repos(root)
@@ -1355,8 +1407,9 @@ def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
     （`repos/*/src/**` 一样跨），加裸扩展名没有新破的边界。
 
     ponytail: 认领靠目录名。谁都没认领的仓库（`shared` / `payments-svc`）落在所有
-    角色范围之外 —— 宁可拦住也不跨仓库放行，由 `unclaimed_repos()` 在 init 与
-    `role scopes` 里点名，手写前缀认领。
+    角色的默认范围之外 —— 这只影响默认分工推荐，不构成产品源码写入硬拦（守卫对
+    `repos/.source/**` 不按角色执法）。由 `unclaimed_repos()` 在 init 与 `role scopes`
+    里点名，提示派任务时指定角色或手写前缀认领。
     """
     projects = source_projects(root)
     if not projects:
@@ -1375,11 +1428,13 @@ def repo_layout_scopes(root: Path) -> dict[str, list[str]] | None:
 
 
 def unclaimed_repos(root: Path, scopes: dict[str, list[str]]) -> list[str]:
-    """`repos/` 下没有开发角色能写代码的仓库。
+    """`repos/` 下没有默认开发角色认领的仓库。
 
     只要有一个仓库被认领，`repo_layout_scopes` 就走 `repos/<仓库>/**` 分支，于是
-    认不出名字的仓库谁都写不了 —— 是硬拦，不是跨仓库放行。这个失败要到 develop
-    阶段才暴露成一次权限拒绝，所以 init 与 `role scopes` 提前点名。
+    认不出名字的仓库落在所有角色的默认范围外。**注意**：这不构成产品源码写入硬拦
+    —— 守卫对 `repos/.source/**` 不按角色执法，未认领仓库也不会在 develop 撞成权限
+    拒绝。它是「没有推荐开发角色可派」的任务分工缺口，所以 init 与 `role scopes`
+    提前点名，提示派任务时显式指定角色或补认领。
 
     判定按守卫的方式拿探路径去撞模式，只看写代码的两个角色：`qa` 的
     `repos/*/tests/**` 覆盖所有仓库，但「只有 qa 能写它的测试目录」不是认领。
