@@ -16,5 +16,6 @@
 | `dba` | `common.md` + `dba/index.md`（含 role.md） | 数据库与平滑迁移开发（按需条件角色） |
 | `devops` | `common.md` + `devops/index.md`（含 role.md） | 发布部署与健康巡检（交付旁路角色） |
 | `security-auditor` | `common.md` + `security-auditor/index.md` | 安全与合规审计（只读旁路） |
+| `integrator` | `common.md` + `integrator/index.md`（含 role.md） | 本地环境部署与集成联调自测（按需条件角色） |
 
 角色定义引用本索引和 workspace 提供的角色文档，不把项目路径、版本和仓库清单写死在通用 workbench 中。

@@ -22,6 +22,7 @@ except ImportError:  # pragma: no cover
 
 from wb_const import (
     ARTIFACT_LOG, DEFAULT_ROLE_SCOPES, REPO_PROFILE_FILES, STATE_SCHEMA, WB_VERSION,
+    WORKSPACE_GUARDED_PREFIXES,
 )
 from wb_bash import MAX_LOG, resolve
 from wb_core import (
@@ -1027,6 +1028,18 @@ def cmd_selfcheck(args) -> None:
         assert code == 0
         for r in DEFAULT_ROLE_SCOPES:
             assert f"\n  {r}\n" in out, f"role scopes 应按角色分节，{r} 独立成行：{out[:200]}"
+
+        # 工作区材料只读不能被角色默认范围抵消：`scripts/` / `repos.json` / `.vscode/` 在
+        # WORKSPACE_GUARDED_PREFIXES 下，显式以该前缀打头的模式会通过收窄过滤活下来，
+        # 命中 scripts/repos_apply.py —— GUARDED_SCRIPTS 只拦执行、不拦写，角色改完主线程
+        # 一跑就把只读绕开。integrator 曾带 `scripts/**` 引入过这个口子。
+        for r, globs in DEFAULT_ROLE_SCOPES.items():
+            for g in globs:
+                for gp in WORKSPACE_GUARDED_PREFIXES:
+                    bad = g.startswith(gp) if gp.endswith("/") else (g == gp or g.startswith(gp + "/"))
+                    assert not bad, (
+                        f"角色 {r} 的默认范围含工作区材料前缀 {gp}（模式 {g}）："
+                        "受守前缀下显式前缀会绕开只读收窄，改回报回编排者处理")
 
         # 跨仓库布局：本仓的认领单元是 repos/.source/<项目>/（**项目实名**，前后端边界
         # 正好落在项目一级），不再是上游假定的 repos/<仓库>/（workbench-adaptation.md §2.2）

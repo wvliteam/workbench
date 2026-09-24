@@ -42,6 +42,7 @@ ROLES = [
     "frontend-developer",
     "backend-developer",
     "dba",
+    "integrator",
     "qa",
     "submitter",
     "devops",
@@ -51,7 +52,7 @@ ROLES = [
 
 # 争议熔断只拦 developer：pm / analyst / architect / qa / reviewer 不在列。
 # architect 需要改契约解除争议，qa 需要跑测试，pm 需要改需求 —— 全拦死没人能善后。
-DEVELOPER_ROLES = ("frontend-developer", "backend-developer", "dba")
+DEVELOPER_ROLES = ("frontend-developer", "backend-developer", "dba", "integrator")
 
 # 角色的自然阶段：契约 bump / readopt 给消费方建同步返工任务时，任务的 phase 按
 # 消费方角色的自然阶段推断，而不是一律用当时的当前 phase —— 否则会出现「analyze
@@ -64,6 +65,7 @@ ROLE_NATURAL_PHASE = {
     "frontend-developer": "develop",
     "backend-developer": "develop",
     "dba": "develop",
+    "integrator": "develop",
     "qa": "verify",
     "submitter": "verify",   # verify 通过后、retro 前执行（同属 verify 收尾动作）
     "devops": "verify",      # 交付部署旁路（verify 通过后或独立发布流程）
@@ -210,6 +212,18 @@ DEFAULT_ROLE_SCOPES = {
     "dba": [
         ".workbench/artifacts/*/develop/tasks/**",
         "migrations/**", "schemas/**", "schema/**", "sql/**", "*.sql",
+    ],
+    # 产物按实名给：`develop/**` 会连 verification.md 一起放行（那是编排者复核后写的），
+    # `verify/**` 会放行 qa 的 test-report.md 与 submitter 的 submit-report.md。
+    # 不给 `scripts/**`：它在 WORKSPACE_GUARDED_PREFIXES 里，显式前缀过滤后会存活并
+    # 命中 scripts/repos_apply.py —— GUARDED_SCRIPTS 只拦执行不拦写，等于把「工作区
+    # 材料只读」开个口子。仓库内的启动脚本在 repos/.source/<项目>/<仓库>/ 下，
+    # repos/ 不在受守前缀，裸 `*.sh` 已经覆盖。
+    "integrator": [
+        ".workbench/artifacts/*/develop/integration-cases.md",
+        ".workbench/artifacts/*/develop/tasks/**",
+        "tests/**", "test/**", "e2e/**",
+        "*.sh", "*.py", "*.ts", "*.js", "*.json", "*.yml", "*.yaml",
     ],
     "qa": [
         ".workbench/artifacts/*/verify/**",
