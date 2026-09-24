@@ -271,7 +271,7 @@ def render_live_dashboard_html(root: Path, target_flow: str = "main") -> str:
         "project": proj_name,
         "current_flow": target_flow,
     }
-    initial_json = json.dumps(live_meta, ensure_ascii=False)
+    initial_json = json.dumps(live_meta, ensure_ascii=False).replace("<", r"\u003c")
     return (
         template
         .replace("{{PROJECT}}", proj_name)
@@ -664,7 +664,7 @@ def export_static_dashboard(
     phase_name = html.escape(str(ov.get("current_phase", "unknown")))
     ver = html.escape(str(ov.get("version", "0.1.0")))
 
-    initial_json = json.dumps(export_data, ensure_ascii=False).replace("</script>", "<\\/script>")
+    initial_json = json.dumps(export_data, ensure_ascii=False).replace("<", r"\u003c")
 
     vendor_dir = _WEB_DIR / "vendor"
 
@@ -682,8 +682,6 @@ def export_static_dashboard(
         ("cytoscape.min.js", "script", "__VENDOR_CYTOSCAPE__"),
         ("dagre.min.js", "script", "__VENDOR_DAGRE__"),
         ("cytoscape-dagre.min.js", "script", "__VENDOR_CYTOSCAPE_DAGRE__"),
-        ("popper.min.js", "script", "__VENDOR_POPPER__"),
-        ("tippy.umd.min.js", "script", "__VENDOR_TIPPY__"),
         ("bootstrap.purged.css", "style", "__VENDOR_BOOTSTRAP_CSS__"),
     ]
 

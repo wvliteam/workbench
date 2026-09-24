@@ -125,8 +125,7 @@ class TestStaticHTMLExport(unittest.TestCase):
         for elem_id in (
             "__VENDOR_MARKED__", "__VENDOR_PRISM__", "__VENDOR_FUSE__", "__VENDOR_PURIFY__",
             "__VENDOR_ANSER__", "__VENDOR_DIFF2HTML__", "__VENDOR_CYTOSCAPE__",
-            "__VENDOR_DAGRE__", "__VENDOR_CYTOSCAPE_DAGRE__", "__VENDOR_POPPER__",
-            "__VENDOR_TIPPY__", "__VENDOR_BOOTSTRAP_CSS__",
+            "__VENDOR_DAGRE__", "__VENDOR_CYTOSCAPE_DAGRE__", "__VENDOR_BOOTSTRAP_CSS__",
         ):
             self.assertIn(f'id="{elem_id}"', content, f"{elem_id} 未被内联进导出文件")
 

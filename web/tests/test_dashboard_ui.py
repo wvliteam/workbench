@@ -171,6 +171,27 @@ class TestDashboardCSSAndAesthetics(TestDashboardUIBase):
         self.assertIn(".highlight-downstream", html_text)
         self.assertIn(".dimmed", html_text)
 
+    def test_console_reserves_dag_viewport(self):
+        """验证控制台展开时会压缩 DAG 可视区域而非覆盖画布。"""
+        _, html_text, _ = self.fetch_page("/")
+        self.assertIn("--console-reserved-height", html_text)
+        self.assertIn(".workspace-shell.console-open #dag-cy", html_text)
+        self.assertIn("function syncConsoleViewport()", html_text)
+        self.assertIn("new ResizeObserver(resizeCytoscape)", html_text)
+
+    def test_console_is_outside_canvas_main(self):
+        """验证 DAG 使用 main，控制台使用独立的 aside 图层。"""
+        _, html_text, _ = self.fetch_page("/")
+        self.assertIn('<div id="workspace-shell" class="workspace-shell">', html_text)
+        self.assertIn('<aside id="dev-console-layer" class="dev-console-layer"', html_text)
+        main_start = html_text.index('<main class="canvas-wrapper" id="canvas-container">')
+        main_end = html_text.index('</main>', main_start)
+        main_markup = html_text[main_start:main_end]
+        self.assertIn('id="dag-cy"', main_markup)
+        self.assertIn('id="canvas-empty"', main_markup)
+        self.assertNotIn('btn-toggle-dev', main_markup)
+        self.assertNotIn('dev-console-drawer', main_markup)
+
 
 class TestDashboardJavaScriptEngine(TestDashboardUIBase):
     """验证前端 JavaScript 逻辑引擎与算法。"""

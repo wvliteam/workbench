@@ -15,6 +15,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -23,6 +24,7 @@ import time
 import unittest
 import urllib.request
 import urllib.error
+from unittest.mock import patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent.parent
@@ -221,6 +223,22 @@ class TestDashboardRESTEndpoints(TestDashboardServerBase):
         self.assertIn("<!DOCTYPE html>", html_out)
         self.assertIn("Workbench Dashboard", html_out)
         self.assertIn('"is_static": false', html_out)
+
+    def test_live_initial_data_escapes_script_closing(self):
+        """测试实时页面的 JSON 元数据不会提前闭合 script 节点。"""
+        dangerous_flow = "</script><script>alert(1)</script>"
+        with patch.object(dashboard.core, "get_overview", return_value={
+            "project": "workbench",
+            "current_phase": "clarify",
+            "version": "0.1.0",
+        }):
+            html_out = dashboard.render_live_dashboard_html(ROOT, target_flow=dangerous_flow)
+
+        match = re.search(r'<script id="__INITIAL_DATA__" type="application/json">(.*?)</script>', html_out, re.DOTALL)
+        self.assertIsNotNone(match)
+        payload = json.loads(match.group(1))
+        self.assertEqual(payload["current_flow"], dangerous_flow)
+        self.assertNotIn("</script><script>", match.group(1))
 
     def test_no_cors_headers_exposed(self):
         """测试不下发 CORS 跨域头。
