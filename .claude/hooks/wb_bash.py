@@ -34,8 +34,10 @@ _LAST_ARG = frozenset({"mv", "cp", "rsync", "install"})
 # 还原旧版不改动内容（契约校验的是内容哈希），放行是有意的取舍。
 _GIT_WRITE = frozenset({"mv", "rm", "clean", "stash"})
 
-# 重定向正则：匹配 > >> >>> >& >>& 等，排除 2>&1 / >&2
-_RE_REDIRECT = re.compile(r"(?:\d+|&)?>{1,2}\|?\s*([^\s;|&<>()]+)")
+# 重定向目标解析：改用引号感知的扫描（见 _scan_redirects）。
+# 旧实现 `re.compile(r"(?:\d+|&)?>{1,2}\|?\s*([^\s;|&<>()]+)")` 在原文上扫 >，
+# 不认 shell 引号：`echo "a > b"` 里引号内的字面量 > 被当成重定向，幻影目标 b
+# 在源码挂载 cwd 下归一到 repos/.source/** 触发归属闸门，把纯只读命令误拦。
 
 # 会触发不确定性标记的构造
 _UNCERTAIN_PATTERNS = re.compile(
@@ -151,6 +153,60 @@ def _split_pipeline(cmd: str) -> list[str]:
     return segments
 
 
+def _scan_redirects(seg: str) -> list[str]:
+    """引号感知地抽取段内重定向（> / >>）的写入目标，返回原始目标词列表。
+
+    只在引号外识别 > 操作符，`echo "a > b"` 里引号内的 > 是字面量、不产生目标。
+    目标词若被引号包裹则剥掉引号返回（`> ".workbench/state.json"` 归一到真实
+    路径，旧正则把引号连进路径会让冻结匹配失效 = 可绕过）。前导 fd/&（`2>&1`、
+    `>&2`）后面跟的是文件描述符不是文件，自然读不出裸词目标，返回空。
+
+    ponytail: 不处理引号内的转义引号（`\\"`）—— shell 里极罕见，且误判只会多算出
+    幻影目标（偏向多拦，不漏真实写入），安全方向正确；要精确需换 shlex 词法器。
+    """
+    targets: list[str] = []
+    i, n, quote = 0, len(seg), ""
+    while i < n:
+        c = seg[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            i += 1
+            continue
+        if c == ">":
+            while i < n and seg[i] == ">":   # 吃掉连续的 >（>>）
+                i += 1
+            if i < n and seg[i] == "|":      # >| 覆盖 noclobber
+                i += 1
+            fd_dup = i < n and seg[i] == "&"  # >&file / >&1
+            if fd_dup:
+                i += 1
+            while i < n and seg[i] in " \t":
+                i += 1
+            if i < n and seg[i] in ("'", '"'):   # 带引号的目标：剥引号
+                q = seg[i]
+                i += 1
+                start = i
+                while i < n and seg[i] != q:
+                    i += 1
+                target = seg[start:i]
+                i += 1                            # 跳过闭合引号
+            else:                                 # 裸词目标
+                start = i
+                while i < n and seg[i] not in " \t;|&<>()":
+                    i += 1
+                target = seg[start:i]
+            if target and not (fd_dup and (target.isdigit() or target == "-")):
+                targets.append(target)
+            continue
+        i += 1
+    return targets
+
+
 def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
     """解析 shell 命令的写入目标。
 
@@ -198,9 +254,8 @@ def resolve(cmd: str, root: Path) -> tuple[set[str], set[str], bool]:
         cwd_in_root = (state["seg_cwd"] == rootr or rootr in state["seg_cwd"].parents)
         seg_safe = safe if cwd_in_root else frozenset()
 
-        # 1. 重定向目标
-        for m in _RE_REDIRECT.finditer(seg):
-            raw = m.group(1)
+        # 1. 重定向目标（引号感知扫描）
+        for raw in _scan_redirects(seg):
             if raw in ("&1", "&2", "/dev/null"):
                 continue
             p = _target_path(state["seg_cwd"], rootr, raw)
@@ -679,5 +734,4 @@ CONFIG_SCHEMA = (
 
 def config_key_allowed(key: str) -> bool:
     return any(key == k or (k.endswith(".") and key.startswith(k)) for k in CONFIG_SCHEMA)
-
 

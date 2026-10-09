@@ -1225,11 +1225,22 @@ def hook_post_tool(data: dict) -> None:
         append_entry(rel)
 
 
-def hook_session_start(data: dict) -> None:
+def hook_session_start(data: dict, fmt: str = "claude") -> None:
+    def emit(message: str) -> None:
+        if fmt == "codex":
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": message,
+                }
+            }, ensure_ascii=False))
+        else:
+            print(message)
+
     root = find_root(Path(data.get("cwd") or os.getcwd()))
     if not state_path(root).is_file():
-        print("工作台未初始化。要走全链路流程，先运行 /wb-flow 或 "
-              "`python3 .claude/hooks/wb.py init --name <项目名>`。")
+        emit("工作台未初始化。要走全链路流程，先运行 /wb-flow 或 "
+             "`python3 .claude/hooks/wb.py init --name <项目名>`。")
         return
     cur_flow = pointer_flow(root)
     lines = ["## 工作台状态", ""]
@@ -1281,7 +1292,7 @@ def hook_session_start(data: dict) -> None:
     elif not doing and not blocked:
         lines.append("本阶段无待办，可跑门禁：`wb.py gate check`")
     lines.append("推进流程用 /wb-flow，自动排空任务用 /wb-loop。")
-    print("\n".join(lines))
+    emit("\n".join(lines))
 
 
 def hook_subagent_stop(data: dict, fmt: str = "claude") -> None:
@@ -1427,7 +1438,7 @@ def cmd_hook(args) -> None:
         {
             "pre-tool": lambda d: hook_pre_tool(d, fmt=args.format),
             "post-tool": lambda d: hook_post_tool(d),
-            "session-start": lambda d: hook_session_start(d),
+            "session-start": lambda d: hook_session_start(d, fmt=args.format),
             "user-prompt": lambda d: hook_user_prompt(d, fmt=args.format),
             "subagent-stop": lambda d: hook_subagent_stop(d, fmt=args.format),
         }[args.event](data)

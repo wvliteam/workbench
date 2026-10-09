@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 from wb_const import (
@@ -25,7 +26,7 @@ from wb_const import (
 from wb_bash import CONFIG_SCHEMA, catastrophic_command, config_key_allowed
 from wb_core import (
     DEFAULT_FLOW, ORIENTATION_TITLE, REPO_PROFILE_DIR, REPO_PROFILE_FILES, _FLOW_NAME,
-    all_flows, artifact_path,
+    all_flows, artifact_path, atomic_write_text, source_repos,
     close_dispute, close_unlock,
     contract_binding, contract_drift, contract_ref_name, contract_revision, default_state,
     die, dotted_get, dotted_set, ensure_repo_orientation_tasks, find_contract, find_root,
@@ -410,256 +411,176 @@ def merge_artifacts(root: Path, t: dict, flow: str) -> int:
     return n
 
 
-def capture_task_baselines(root: Path, t: dict, flow: str) -> dict[str, Any]:
-    """在任务开始 (task start) 时捕获工作区未提交状态基线，实现任务级纯增量隔离。
+def _task_git_repos(root: Path, artifacts=()) -> dict[str, Path]:
+    """仓库按挂载路径定位；同一真实 worktree 的快照由调用方缓存。"""
+    candidates = [root, *(root / "repos/.source" / name for name in source_repos(root))]
+    # 非标准布局中的嵌套仓库也可收尾；只查 artifact 的祖先，不遍历整棵源码树。
+    for rel in artifacts:
+        parent = (root / rel).parent
+        while parent != root and parent.is_relative_to(root):
+            if (parent / ".git").exists():
+                candidates.append(parent)
+                break
+            parent = parent.parent
+    return {path.relative_to(root).as_posix(): path.resolve() for path in candidates
+            if (path / ".git").exists()}
 
-    1. 对外层与 repos/.source/ 下的所有 Git 仓库，执行 git stash create 捕获当前工作区快照 SHA（若无改动返回空）。
-    2. 对当前未跟踪的新建文件进行快照备份，避免其在后续任务中被误算为本次任务全量新增。
-    """
-    rootr = root.resolve()
-    repo_baselines: dict[str, str] = {}
-    tid = t.get("id", "")
-    phase = t.get("phase", "develop")
-    baselines_dir = wb_dir(root) / "artifacts" / flow / phase / "tasks" / ".baselines" / tid
 
-    # 收集工作区所有 git 仓库候选目录
-    candidate_repos: list[Path] = []
-    if (rootr / ".git").exists():
-        candidate_repos.append(rootr)
+def _task_git(repo: Path, *args, env=None, input=None, allowed=(0,)) -> bytes:
+    try:
+        result = subprocess.run(["git", "-C", str(repo), *args], env=env, input=input,
+                                capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"任务 diff：{repo} git {args[0]} 失败：{exc}") from exc
+    if result.returncode not in allowed:
+        raise RuntimeError(f"任务 diff：{repo} git {args[0]} exit={result.returncode}："
+                           + result.stderr.decode("utf-8", errors="replace").strip())
+    return result.stdout
 
-    source_dir = rootr / "repos" / ".source"
-    if source_dir.is_dir():
-        for proj in source_dir.iterdir():
-            if proj.is_dir():
-                for repo in proj.iterdir():
-                    if repo.is_dir() and ((repo / ".git").exists() or (repo / ".git").is_file()):
-                        candidate_repos.append(repo)
 
-    for rdir in candidate_repos:
-        try:
-            rel_repo = os.path.relpath(rdir, rootr).replace(os.sep, "/")
-        except ValueError:
-            continue
-        try:
-            res = subprocess.run(
-                ["git", "-C", str(rdir), "stash", "create"],
-                capture_output=True, text=True, timeout=5
-            )
-            sha = res.stdout.strip()
-            if sha:
-                repo_baselines[rel_repo] = sha
-        except Exception:
-            pass
+def _task_repo_snapshot(repo: Path) -> str:
+    """独立 index 捕获工作区树（含未跟踪文件），不改用户 index/HEAD/stash。"""
+    index = Path(os.fsdecode(_task_git(repo, "rev-parse", "--git-path", "index")).removesuffix("\n"))
+    if not index.is_absolute():
+        index = repo / index
+    with tempfile.TemporaryDirectory(prefix="wb-task-index-") as directory:
+        temporary_index = Path(directory) / "index"
+        env = dict(os.environ, GIT_INDEX_FILE=str(temporary_index))
+        if index.is_file():
+            shutil.copyfile(index, temporary_index)
+        else:
+            _task_git(repo, "read-tree", "--empty", env=env)
+        _task_git(repo, "add", "--all", "--", ".", ":(exclude,glob)**/.workbench/**", env=env)
+        return _task_git(repo, "write-tree", env=env).decode("ascii").strip()
 
-        # 检查未跟踪文件并建立初始备份
-        try:
-            st_res = subprocess.run(
-                ["git", "-C", str(rdir), "status", "--porcelain"],
-                capture_output=True, text=True, timeout=5
-            )
-            for line in st_res.stdout.splitlines():
-                if line.startswith("??"):
-                    u_file = line[3:].strip()
-                    abs_u = (rdir / u_file).resolve()
-                    if abs_u.is_file():
-                        try:
-                            rel_u = os.path.relpath(abs_u, rootr).replace(os.sep, "/")
-                            target_bk = baselines_dir / rel_u
-                            target_bk.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(abs_u, target_bk)
-                        except Exception:
-                            pass
-        except Exception:
-            pass
 
-    return {
-        "repos": repo_baselines,
-    }
+def capture_task_baselines(root: Path, t: dict, flow: str) -> dict:
+    """每个 worktree 仅捕获一次；Git blob 去重保存内容，任务仅记录树 SHA。"""
+    repos, snapshots = {}, {}
+    for prefix, repo in _task_git_repos(root.resolve(), t.get("artifacts") or []).items():
+        if repo not in snapshots:
+            snapshots[repo] = _task_repo_snapshot(repo)
+        repos[prefix] = snapshots[repo]
+    # ponytail: 与旧 stash create 一样使用未引用对象；超长任务若跨 Git GC
+    # 的 prune 窗口，需要增加任务级 refs。对象丢失会显式失败，不回退伪造差异。
+    return {"version": 2, "repos": repos}
+
+
+def _task_content_patch(path: Path, rel: str, backup: Path | None = None) -> tuple[str, str]:
+    """非 Git 文件和旧未跟踪备份的兼容路径；不跟随源码文件软链。"""
+    def read(file):
+        if file is None or not os.path.lexists(file):
+            return None
+        return os.fsencode(os.readlink(file)) if file.is_symlink() else file.read_bytes()
+
+    before, after = read(backup), read(path)
+    if before == after:
+        return "modified", ""
+    status = "added" if before is None else "deleted" if after is None else "modified"
+    left, right = f"a/{rel}" if before is not None else "/dev/null", f"b/{rel}" if after is not None else "/dev/null"
+    header = f"diff --git a/{rel} b/{rel}\n"
+    if b"\0" in (before or b"") or b"\0" in (after or b""):
+        return status, header + f"Binary files {left} and {right} differ\n"
+    diff = difflib.unified_diff((before or b"").decode("utf-8", errors="replace").splitlines(True),
+                                (after or b"").decode("utf-8", errors="replace").splitlines(True),
+                                fromfile=left, tofile=right)
+    # 无末尾换行的内容行需要补 diff 标记，否则 +/- 行会粘在一起。
+    patch = "".join(line if line.endswith("\n") else line + "\n\\ No newline at end of file\n"
+                    for line in diff)
+    return status, header + (patch or f"--- {left}\n+++ {right}\n")
 
 
 def record_task_diff(root: Path, t: dict, flow: str) -> Path | None:
-    """在任务完成（task done）时固化改动文件的 Unified Diff 快照。
-
-    保存在 .workbench/artifacts/<flow>/<phase>/tasks/<ID>.diff.json，
-    按文件记录 status (modified/added/deleted)、additions、deletions 与 diff。
-    若任务在 task start 时捕获了工作区基线快照（git stash create），优先比对基线以消除任务前原有的脏改动。
-    """
-    tid = t.get("id", "")
-    if not tid:
+    """按仓库发现变更，仅为归属本任务且最终有差异的文件生成 patch。"""
+    if not t.get("id"):
         return None
+    root = root.resolve()
     phase = t.get("phase", "develop")
     tasks_dir = wb_dir(root) / "artifacts" / flow / phase / "tasks"
-    baselines_dir = tasks_dir / ".baselines" / tid
-    artifacts = t.get("artifacts") or []
+    baselines_dir = tasks_dir / ".baselines" / t["id"]
+    artifacts = list(dict.fromkeys(rel for rel in (t.get("artifacts") or [])
+                                  if isinstance(rel, str) and rel))
+    for rel in artifacts:
+        if Path(rel).is_absolute() or ".." in Path(rel).parts:
+            raise RuntimeError(f"任务 diff：非法 artifact 路径 {rel!r}")
     if not artifacts:
         if baselines_dir.exists():
-            shutil.rmtree(baselines_dir, ignore_errors=True)
+            shutil.rmtree(baselines_dir)
         return None
-    tasks_dir.mkdir(parents=True, exist_ok=True)
-    out_file = tasks_dir / f"{tid}.diff.json"
-
-    baselines = t.get("baselines") or {}
-    repo_baselines = baselines.get("repos") or {}
-
-    diff_files = []
-    total_adds = 0
-    total_dels = 0
-
-    rootr = root.resolve()
+    repos = _task_git_repos(root, artifacts)
+    prefixes = sorted(repos, key=len, reverse=True)
+    groups = {}
     for rel in artifacts:
-        if not rel or not isinstance(rel, str):
+        prefix = next((p for p in prefixes if p == "." or rel.startswith(p + "/")), None)
+        groups.setdefault(prefix, []).append(rel)
+    baselines = (t.get("baselines") or {}).get("repos") or {}
+    snapshots, scans, diffs = {}, {}, {}
+    for prefix, paths in groups.items():
+        if prefix is None:
+            for rel in paths:
+                if (root / rel).is_file() or (root / rel).is_symlink():
+                    diffs[rel] = _task_content_patch(root / rel, rel)
             continue
-        abs_p = (rootr / rel).resolve()
-        parent_dir = abs_p.parent if abs_p.parent.is_dir() else rootr
-
-        patch_text = ""
-        status = "modified"
-
-        # 寻找匹配的 git 仓库基线 SHA
-        matching_baseline_sha = None
-        best_match_len = -1
-        for repo_prefix, sha in repo_baselines.items():
-            if repo_prefix == "." or rel == repo_prefix or rel.startswith(repo_prefix + "/"):
-                if len(repo_prefix) > best_match_len:
-                    best_match_len = len(repo_prefix)
-                    matching_baseline_sha = sha
-
-        compare_base = matching_baseline_sha or "HEAD"
-
-        # 检查是否处于 git 仓库中
-        in_git = False
-        try:
-            chk = subprocess.run(
-                ["git", "-C", str(parent_dir), "rev-parse", "--is-inside-work-tree"],
-                capture_output=True, text=True, timeout=5
-            )
-            if chk.returncode == 0 and chk.stdout.strip() == "true":
-                in_git = True
-        except Exception:
-            in_git = False
-
-        if in_git:
-            if abs_p.is_file():
-                # 检查是否已被 git 跟踪
-                try:
-                    tracked_chk = subprocess.run(
-                        ["git", "-C", str(parent_dir), "ls-files", "--error-unmatch", str(abs_p)],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    is_tracked = (tracked_chk.returncode == 0)
-                except Exception:
-                    is_tracked = True
-
-                if is_tracked:
-                    try:
-                        res = subprocess.run(
-                            ["git", "-C", str(parent_dir), "diff", compare_base, "--", str(abs_p)],
-                            capture_output=True, text=True, timeout=10
-                        )
-                        patch_text = res.stdout
-                    except Exception:
-                        patch_text = ""
-                else:
-                    # 未跟踪文件：检查是否存在开工前备份
-                    backup_file = baselines_dir / rel
-                    if backup_file.is_file():
-                        try:
-                            res = subprocess.run(
-                                ["git", "-C", str(rootr), "diff", "--no-index", "--", str(backup_file), str(abs_p)],
-                                capture_output=True, text=True, timeout=10
-                            )
-                            patch_text = res.stdout
-                        except Exception:
-                            patch_text = ""
-                    else:
-                        # 全新创建文件
-                        status = "added"
-                        try:
-                            res = subprocess.run(
-                                ["git", "-C", str(rootr), "diff", "--no-index", "--", "/dev/null", rel],
-                                capture_output=True, text=True, timeout=10
-                            )
-                            patch_text = res.stdout
-                        except Exception:
-                            try:
-                                res = subprocess.run(
-                                    ["git", "-C", str(parent_dir), "diff", "--no-index", "--", "/dev/null", str(abs_p)],
-                                    capture_output=True, text=True, timeout=10
-                                )
-                                patch_text = res.stdout
-                            except Exception:
-                                patch_text = ""
-            else:
-                # 文件在磁盘上已不存在（已删除）
-                status = "deleted"
-                try:
-                    res = subprocess.run(
-                        ["git", "-C", str(parent_dir), "diff", compare_base, "--", str(abs_p)],
-                        capture_output=True, text=True, timeout=10
-                    )
-                    patch_text = res.stdout
-                except Exception:
-                    patch_text = ""
-        else:
-            # 非 Git 目录兜底
-            if abs_p.is_file():
-                try:
-                    content = abs_p.read_text(encoding="utf-8", errors="replace").splitlines(True)
-                    patch_lines = list(difflib.unified_diff(
-                        [], content, fromfile="/dev/null", tofile=rel
-                    ))
-                    patch_text = "".join(patch_lines)
-                    status = "added"
-                except Exception:
-                    patch_text = ""
-
-        # 统计新增和删除行数
-        file_adds = 0
-        file_dels = 0
-        if patch_text:
-            for line in patch_text.splitlines():
-                if line.startswith("+") and not line.startswith("+++"):
-                    file_adds += 1
-                elif line.startswith("-") and not line.startswith("---"):
-                    file_dels += 1
-            if status == "modified":
-                if file_adds > 0 and file_dels == 0:
-                    status = "added"
-                elif file_adds == 0 and file_dels > 0:
-                    status = "deleted"
-
-        total_adds += file_adds
-        total_dels += file_dels
-
-        diff_files.append({
-            "path": rel,
-            "status": status,
-            "additions": file_adds,
-            "deletions": file_dels,
-            "diff": patch_text,
-        })
-
-    payload = {
-        "task_id": tid,
-        "flow": flow,
-        "phase": phase,
-        "recorded_at": now(),
-        "summary": {
-            "total_files": len(diff_files),
-            "additions": total_adds,
-            "deletions": total_dels,
-        },
-        "files": diff_files,
-    }
-
-    try:
-        out_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-        return out_file
-    except OSError:
-        return None
-    finally:
-        if baselines_dir.exists():
-            shutil.rmtree(baselines_dir, ignore_errors=True)
+        repo = repos[prefix]
+        if repo not in snapshots:
+            snapshots[repo] = _task_repo_snapshot(repo)
+        after = snapshots[repo]
+        before = baselines.get(prefix)
+        if not before:
+            # 旧任务无脏快照时回退 HEAD；unborn 仓库使用 Git 自己计算的空树。
+            before = _task_git(repo, "rev-parse", "--verify", "HEAD", allowed=(0, 128)).decode().strip()
+            if not before:
+                before = _task_git(repo, "hash-object", "-w", "-t", "tree", "--stdin", input=b"").decode().strip()
+        key = (repo, before, after)
+        if key not in scans:
+            fields = _task_git(repo, "diff", "--no-ext-diff", "--no-renames", "--name-status", "-z",
+                               before, after, "--").split(b"\0")[:-1]
+            changed = {os.fsdecode(fields[i+1]): fields[i].decode("ascii") for i in range(0, len(fields), 2)}
+            present = set(os.fsdecode(name) for name in
+                          _task_git(repo, "ls-tree", "-r", "--name-only", "-z", after).split(b"\0")[:-1])
+            scans[key] = changed, present
+        changed, present = scans[key]
+        for rel in paths:
+            name = rel if prefix == "." else rel[len(prefix)+1:]
+            backup = baselines_dir / rel
+            if backup.is_file():
+                diffs[rel] = _task_content_patch(root / rel, rel, backup)
+            elif name in changed:
+                patch = _task_git(repo, "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+                                  "--no-color", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
+                                  before, after, "--", name).decode("utf-8", errors="replace")
+                status = {"A": "added", "D": "deleted"}.get(changed[name], "modified")
+                diffs[rel] = status, patch
+            elif name not in present and ((root / rel).is_file() or (root / rel).is_symlink()):
+                # ignored 的工作台产物不入源码快照，保留历史的新增内容展示。
+                diffs[rel] = _task_content_patch(root / rel, rel)
+    files = []
+    for rel in artifacts:
+        status, patch = diffs.get(rel, ("modified", ""))
+        if not patch:
+            continue
+        additions = deletions = 0
+        in_hunk = False
+        for line in patch.splitlines():
+            if line.startswith("@@"):
+                in_hunk = True
+            elif in_hunk:
+                additions += line.startswith("+")
+                deletions += line.startswith("-")
+        files.append({"path": rel, "status": status,
+                      "additions": additions, "deletions": deletions,
+                      "diff": patch})
+    payload = {"task_id": t["id"], "flow": flow, "phase": phase, "recorded_at": now(),
+               "summary": {"total_files": len(files),
+                           "additions": sum(file["additions"] for file in files),
+                           "deletions": sum(file["deletions"] for file in files)}, "files": files}
+    tasks_dir.mkdir(parents=True, exist_ok=True)
+    output = tasks_dir / f"{t['id']}.diff.json"
+    atomic_write_text(output, json.dumps(payload, ensure_ascii=False, indent=2))
+    # 只有成功落盘才销毁旧备份；失败时 task done 保持 doing，可重试。
+    if baselines_dir.exists():
+        shutil.rmtree(baselines_dir)
+    return output
 
 
 def _propagate_stale(st: dict, blocked_id: str) -> None:
@@ -787,10 +708,13 @@ def cmd_task(args) -> None:
         lease = int(st.get("task_lease", 3600))
         t["lease_until"] = time.strftime(
             "%Y-%m-%dT%H:%M:%S%z", time.localtime(time.time() + lease))
-        if args.role_lock:
-            (wb_dir(root) / "role").write_text(t["role"], encoding="utf-8")
         target_flow = st.get("_flow") or pointer_flow(root)
-        t["baselines"] = capture_task_baselines(root, t, target_flow)
+        try:
+            t["baselines"] = capture_task_baselines(root, t, target_flow)
+        except (OSError, RuntimeError) as exc:
+            die(str(exc))
+        if args.role_lock:
+            atomic_write_text(wb_dir(root) / "role", t["role"])
     elif args.action == "done":
         if t.get("status") != "doing":
             die(f"任务 {t['id']} 当前为 {t.get('status')}，只能完成 doing 任务")
@@ -805,7 +729,10 @@ def cmd_task(args) -> None:
         merged = merge_artifacts(root, t, target_flow)
         if merged:
             print(f"归并 {merged} 个改动到 {t['id']}.artifacts")
-        record_task_diff(root, t, target_flow)
+        try:
+            record_task_diff(root, t, target_flow)
+        except (OSError, RuntimeError) as exc:
+            die(str(exc))
     elif args.action == "block":
         if t.get("status") in ("done", "skipped"):
             die(f"任务 {t['id']} 当前为 {t.get('status')}，不能标记 blocked")
@@ -1825,4 +1752,3 @@ def main(argv: list[str] | None = None) -> None:
         args.func(args)
     finally:
         release_state_lock()
-
