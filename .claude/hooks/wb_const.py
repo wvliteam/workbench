@@ -362,8 +362,12 @@ FROZEN_ALWAYS = ["state.json", "role", "unlock", "frozen", ARTIFACT_LOG, "audit.
                  "sessions"]
 
 # 写入型 shell 动作。仍保留用于 uncertain=True 时的兜底匹配。
+# `>>?(?!&)`：真实文件重定向（`> f`/`>> f`/`2> f`/`&> f`）仍算写，但 fd 复制
+# （`2>&1`/`>&2`）的 `>` 后跟 `&`，不算写 —— 否则纯只读命令 `ls x 2>&1` 会因这个
+# `>` 被当成写、连带把参数里提到的冻结路径误拦（csh 式 `>&file` 由精确的
+# _scan_redirects 兜住，不漏真实写入）。
 BASH_WRITE = re.compile(
-    r"(>>?|\btee\b|\bsed\s+-i|\bperl\s+-\S*i|\btruncate\b|\bpatch\b|\bdd\b|"
+    r"(>>?(?!&)|\btee\b|\bsed\s+-i|\bperl\s+-\S*i|\btruncate\b|\bpatch\b|\bdd\b|"
     r"\bshred\b|\bpython3?\s+-c\b|\bnode\s+-e\b|\bln\s+-\S*[sf]|"
     r"\bcp\b|\bmv\b|\binstall\b)"
 )

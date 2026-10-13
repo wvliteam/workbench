@@ -264,6 +264,9 @@ def freeze_phase_artifacts(root: Path, st: dict, phase: str) -> list[str]:
 
 def cmd_phase(args) -> None:
     root = find_root()
+    # 推进/回退都带上作用的 flow 名：指针可能被别的会话移走，不显式打出来就会
+    # 对着错的 flow 推进阶段（实测照指针误推进了另一条 flow）。
+    flow = read_current_flow(root)
     if args.action == "get":
         print(load_state(root)["phase"])
         return
@@ -292,7 +295,7 @@ def cmd_phase(args) -> None:
         log(st, "phase_set", **{"from": old, "to": args.name,
                                 "reason": args.reason, "forward": forward})
         save_state(root, st)
-        print(f"阶段：{old} -> {args.name}（理由：{args.reason}）")
+        print(f"flow {flow}｜阶段：{old} -> {args.name}（理由：{args.reason}）")
         if forward:
             print(f"注意：向前跳过了 {old} 到 {args.name} 之间的门禁，"
                   f"这些阶段在 status / report 里标记为未运行门禁。")
@@ -335,12 +338,12 @@ def cmd_phase(args) -> None:
     if idx + 1 >= len(st["phases"]):
         log(st, "flow_complete")
         save_state(root, st)
-        print("已是最后阶段，全链路完成。")
+        print(f"flow {flow}｜已是最后阶段，全链路完成。")
         return
     st["phase"] = st["phases"][idx + 1]
     log(st, "phase_advance", **{"from": cur, "to": st["phase"], "forced": bool(args.force and not passed)})
     save_state(root, st)
-    print(f"阶段推进：{cur} -> {st['phase']}（{PHASE_CN.get(st['phase'], '')}）")
+    print(f"flow {flow}｜阶段推进：{cur} -> {st['phase']}（{PHASE_CN.get(st['phase'], '')}）")
 
 
 def cmd_gate(args) -> None:
@@ -405,7 +408,11 @@ def merge_artifacts(root: Path, t: dict, flow: str) -> int:
         elif e.get("role") != t["role"] or (e.get("at") or "") < since:
             continue
         rel = e.get("path") or ""
-        if rel and rel not in t["artifacts"]:
+        # 工作区外路径（/tmp 重定向、.. 逃逸等）不是任务产物，跳过——否则会被
+        # record_task_diff 的路径校验硬拒，卡死 task done。
+        if not rel or Path(rel).is_absolute() or ".." in Path(rel).parts:
+            continue
+        if rel not in t["artifacts"]:
             t["artifacts"].append(rel)
             n += 1
     return n

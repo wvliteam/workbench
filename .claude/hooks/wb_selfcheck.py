@@ -982,6 +982,9 @@ def check_frozen_files(tmp: Path) -> None:
         ("cd .workbench/contracts && sed -i s/a/b/ user-api.json", "先切目录再改"),
         ("echo '{\"role\":\"qa\",\"path\":\"x\"}' >> .workbench/artifacts.jsonl",
          "追加流水账伪造产物归属"),
+        # 真实重定向写冻结文件、命令里又带 fd 复制 2>&1：>& 不算写，但 `> state.json`
+        # 的 `>` 后跟空格仍算写，必须照拦（防 BASH_WRITE 的 (?!&) 收窄误放真实写入）。
+        ("echo x > .workbench/state.json 2>&1", "真实重定向写 state.json 带 2>&1 仍要拦"),
     ]:
         assert guard({"tool_name": "Bash", "cwd": cw,
                       "tool_input": {"command": bad_cmd}}) == 2, f"Bash 绕过未被拦：{why}"
@@ -993,6 +996,12 @@ def check_frozen_files(tmp: Path) -> None:
                    "git checkout -- .workbench/contracts/user-api.json",
                    "echo hi > /tmp/scratch.txt",
                    "ls nope 2>/dev/null > out.txt",
+                   # 只读命令提到冻结路径、末尾带 fd 复制 2>&1：2>&1 的 > 后跟 & 不是
+                   # 写，不能把纯读命令连带误拦（实测 ls/grep <冻结> 2>&1 被当成写拦掉）。
+                   "ls -l .workbench/contracts/user-api.json 2>&1",
+                   # grep 的引号内 | 会让 _split_pipeline 切出半截引号段、shlex 失败 →
+                   # uncertain=True；叠加 2>&1 曾触发「写入目标无法解析，已一并拦截」。
+                   "grep -iE \"a|b\" .workbench/contracts/user-api.json 2>&1",
                    # 冻结匹配不能按 basename：role / state.json / unlock
                    # 这几个词在业务代码里太常见，误拦率高到会推翻
                    # 「误拦显式、漏拦静默」这个原则，而且错误信息指向契约申报，
